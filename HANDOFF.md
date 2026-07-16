@@ -23,9 +23,12 @@ stablecoin rails can't touch that economically. External rails only matter at th
 
 A complete v0 prototype exists and works end-to-end: double-entry ledger, user-signed
 mandates → single-use permits, hash-chained receipts, agent-to-agent payments, an
-x402-shaped HTTP 402 pay-per-call flow over real HTTP, an MCP server so a Claude Code
-agent gets a wallet, one-command onboarding, an E2E demo, and 58 passing tests. It
-survived a 35-agent adversarial review (22 findings, all fixed).
+x402-shaped HTTP 402 pay-per-call flow over real HTTP, durable event-sourced
+persistence, Ed25519 identity for both agents (spends) and owners (admin), a live SSE
+dashboard, an external x402 bridge to the machine economy (against a mock wallet), an
+MCP server so a Claude Code agent gets a wallet, one-command onboarding, an E2E demo,
+and 77 passing tests. All five roadmap milestones below are DONE. The design of the
+last two was adversarially reviewed by a multi-agent workflow before implementation.
 
 - **Git:** private repo `https://github.com/MaxwellCalkin/money`, remote `origin`,
   branch `main`. Working tree may have uncommitted edits — check `git status`.
@@ -48,6 +51,9 @@ survived a 35-agent adversarial review (22 findings, all fixed).
 - `src/core/store.ts` — event types + `JsonlStore` (append-only JSONL, torn-tail
   healing). Raw replay methods live on ledger/policy/receipts; `MoneyNetwork.open()`
   ties it together.
+- `src/core/identity.ts` — Ed25519 keypairs; request signing/verification.
+- `src/bridge/` — external x402: `x402.ts` (v1 wire + allowlist + host canon),
+  `wallet.ts` (`ExternalWallet` interface + `MockWallet`), `mock-x402.ts` (mock seller).
 - `src/core/network.ts` — `MoneyNetwork`, the facade that ties it together (the
   closed loop: accounts, funding, allocation, mandates, `pay`, 402 challenges).
 - `src/server/api.ts` — Hono HTTP API + the `paid()` x402 middleware + signed-
@@ -56,12 +62,10 @@ survived a 35-agent adversarial review (22 findings, all fixed).
 - `src/server/dashboard.ts` — the self-contained dashboard page (inline CSS/JS).
 - `src/mcp/server.ts` — MCP server: `money_balance`, `money_pay`, `money_fetch`,
   `money_feed`. The agent holds only its account id (v0), never keys or balances.
-- `src/onboard.ts` — creates user+agent+mandate, prints `.mcp.json` to paste.
+- `src/onboard.ts` — owner-signed setup of user+agent+mandate, prints `.mcp.json`.
 - `src/demo.ts` — the E2E story; `npm run demo` is the best way to see it all work.
-- `src/core/identity.ts` — Ed25519 agent identity: keypair generation, request
-  signing/verification (method+path+sha256(body)+ts+nonce).
-- `test/*.test.ts` — 58 tests across ledger, policy, network, persistence,
-  identity, dashboard.
+- `test/*.test.ts` — 77 tests across ledger, policy, network, persistence,
+  identity, owner-auth, dashboard, bridge.
 
 ## Invariants — do NOT break these
 
@@ -73,8 +77,10 @@ survived a 35-agent adversarial review (22 findings, all fixed).
 3. **Everything money-moving is idempotent.** Clients supply the key; retrying a key
    returns the original outcome, never a second spend. Reserved key namespaces:
    `chl_` (challenges) and `rev_` (reversals) — client keys can't use them.
-4. **Closed-loop zero-sum.** Every balance sums to zero; only `EXTERNAL_FUNDING` may
-   go negative (it's the edge of the loop). `network.ledger.zeroSum()` must hold.
+4. **Closed-loop zero-sum.** Every balance sums to zero; only the boundary accounts
+   `EXTERNAL_FUNDING` (top-up, goes negative) and `EXTERNAL_X402` (bridge outflows,
+   goes positive) sit at the edges. `network.ledger.zeroSum()` must hold. Agents can
+   never pay a boundary account directly — only `fund()` and `payExternal()` touch them.
 5. **Receipt chain stays verifiable.** `network.verifyReceipts()` must stay `ok`.
 6. **Single-owner loop only.** Today all agents belong to ONE user paying each other
    and paying providers — that's a user moving their own money, NOT money
@@ -82,10 +88,17 @@ survived a 35-agent adversarial review (22 findings, all fixed).
    licensing / a sponsor-bank structure. **Do not cross that line in code without
    explicitly flagging it to Max.** Compliant sequencing = single-owner first.
 
-## Next up (agreed plan, in priority order)
+## Roadmap — all five milestones DONE
 
-Build these one verified layer at a time. Commit + push after each. Prefer adding
-regression tests for every new guarantee.
+Built one verified layer at a time (commit + push + regression tests each). The
+records below stay as the running log. **Whoever picks this up next: the natural
+frontier is real on-chain x402 (a live USDC wallet + facilitator against
+Base testnet — the client is already protocol-faithful, only the wallet and
+settlement are mocked), then the differentiators from the design brief —
+subscriptions, refunds, sub-agent delegation, agent-error insurance — and the
+production hardening the reviews flagged (owner-key delivery off stdout, signup
+rate limiting, `@authority` binding in the signature for multi-instance,
+subdomain-aware host throttling).**
 
 ### 1. Persistence — DONE
 
@@ -113,8 +126,6 @@ idempotency keys). Onboarding generates the pair and puts MONEY_AGENT_KEY in the
 MCP config; the MCP server signs every API call. 8 tests in
 `test/identity.test.ts` (unsigned/forged/tampered/stale/replayed/keyless all
 rejected); demo section 3 shows unsigned + wrong-key spends bouncing live.
-Note: creating users/agents/mandates over HTTP is still unauthenticated in v0 —
-owner auth is future work, flagged in the README.
 
 ### 3. Live dashboard — DONE
 
@@ -129,9 +140,66 @@ are HTML-escaped — a payment memo must not script the owner's dashboard.
 Verified live in a browser: feed streams while agents pay, revoking a mandate
 flips its badge without a reload. Tests in `test/dashboard.test.ts`.
 
-(Deliberately deferred: a real external-x402 bridge to the live machine economy — it
-needs real USDC/wallets/funds, which is out of scope for a local prototype. Build the
-protocol client against a mock when the time comes; don't move real money.)
+### 4. Owner auth on admin routes — DONE
+
+The envelope's control plane is now gated. `POST /users` requires an owner
+`publicKey` (signup = key registration, so an un-administerable account can't
+exist). `/fund`, `/agents`, `/allocate`, `/mandates`, and revoke require
+owner-signed requests (`x-user-id`, same Ed25519 scheme as agent spends) and
+bind the signed user to the resource — `body.userId`/`ownerId` must equal the
+signer or it's a 403; revoke re-checks `mandate.userId`. Grants are
+idempotency-keyed (`PolicyEngine.grant` returns `{mandate, replayed}`): a
+captured grant replayed after a restart returns the original mandate instead
+of resetting the spent counters. Key rotation (`POST /accounts/:id/rotate-key`,
+owner-signed, self or owned agent; `key_rotated` event) is the leaked-key
+remediation path. Hardened from a 3-agent adversarial design review: `/providers`
+route removed (durable-log poisoning), future-dated timestamps rejected beyond
+30s skew, signed bodies capped at 256KB pre-hash. 9 tests in
+`test/owner-auth.test.ts`; onboarding is fully owner-signed.
+
+### 5. External x402 bridge (mock) — DONE
+
+`src/bridge/` — one balance now pays the machine economy *outside* the loop.
+Speaks x402 v1 wire format (field names verified against the coinbase/x402 spec):
+parses the 402 `accepts[]`, signs an EIP-3009-shaped authorization, issues the
+base64 `X-PAYMENT` header, reads the `X-PAYMENT-RESPONSE` settlement.
+`ExternalWallet` is an interface; `MockWallet` signs Ed25519 (real
+secp256k1/keccak EIP-712 needs deps we don't take) and the mock seller ALWAYS
+verifies signatures with single-use nonces. Reshaped by the bridge critique:
+- **Two-phase lifecycle** — `payExternal` debits agent→`external:x402` and mints
+  the receipt at header issuance (state `pending`); `confirmExternal` finalizes
+  on settlement; `sweepExternal` auto-reverses anything unconfirmed past
+  `reverseAfter` via the existing `rev_` machinery, *without* handing budget
+  back to the (possibly-compromised) agent.
+- **Policy payee = canonical vendor host** `x402:<host>` (from the URL the agent
+  fetched, never the 402 body), so the new-payee throttle covers external
+  vendors and can't be dodged by case/port/dot variants. Ledger destination is
+  the boundary account; `Transfer.externalPayee`/`Receipt.externalPayee` carry
+  the host and are **inside the receipt hash**, so replay rebuilds throttle
+  state exactly and a doctored log is refused.
+- **Economic fields pinned server-side** — `ASSET_ALLOWLIST` fixes (network,
+  asset, decimals); nothing economic is trusted from the 402 body; `$10`
+  hard per-tx cap. USDC atomic units are micro-dollars exactly.
+- `pay()`/`approveAndPay()` reject external boundary accounts as payees, so an
+  injected agent can't fabricate outflows. Replaying the create key returns the
+  SAME payment + header (one authorization, ever).
+MCP `money_fetch` handles external 402s (`accepts[]`) with a namespaced resume
+map, preferring the internal `challengeId` flow when both are present.
+`MOCK_X402_PORT` on `npm run api` serves a wallet-wired mock seller for local
+dev. 9 tests in `test/bridge.test.ts`; demo section 9 + a real MCP agent buying
+from the mock seller, verified end-to-end.
+
+**Known v0 gaps (documented, not bugs):** the MockWallet certifies the bridge's
+accounting and policy, NOT real EIP-712/secp256k1 signing or on-chain
+settlement finality — mock-green ≠ chain-ready. `external:x402`'s balance is
+face value (gas/fees/peg slippage unmodeled). Subdomain rotation
+(`a1.evil.com`…) still gets a fresh new-payee allowance per hostname.
+`POST /users` is still an unauthenticated durable-log write (needs rate
+limiting in production).
+
+(Real on-chain x402 — a live USDC wallet + facilitator — remains deferred: it
+needs real funds. The client is built and protocol-faithful; only the wallet
+and settlement are mocked.)
 
 ## How to run / verify
 
@@ -140,13 +208,17 @@ tool is also available — use POSIX syntax there, PowerShell syntax otherwise.
 
 ```
 npm install          # if node_modules is missing
-npm test             # vitest — 36 tests, must stay green
+npm test             # vitest — 77 tests, must stay green
 npm run typecheck    # tsc --noEmit
-npm run demo         # spins up the server on 4021 and runs the full E2E story
-npm run api          # just the HTTP server
-npm run onboard      # create user+agent+mandate, print .mcp.json
-npm run mcp          # MCP server (needs MONEY_AGENT_ID env)
+npm run demo         # spins up the server on 4021 and runs the full E2E story (9 sections)
+npm run api          # the HTTP server (durable; MOCK_X402_PORT also serves a mock x402 seller)
+npm run onboard      # owner-signed create user+agent+mandate, print .mcp.json (+ owner key)
+npm run mcp          # MCP server (needs MONEY_AGENT_ID and MONEY_AGENT_KEY env)
 ```
+
+Dashboard: `http://127.0.0.1:4021/dashboard`. For the external bridge locally,
+`MOCK_X402_PORT=4022 npm run api` then point `money_fetch` at
+`http://127.0.0.1:4022/external/report`.
 
 ## Environment gotchas (these cost real time — heed them)
 

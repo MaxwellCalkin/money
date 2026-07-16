@@ -25,8 +25,9 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | Network | `src/core/network.ts` | The facade: accounts, funding, agent-to-agent `pay()`, human `approveAndPay()`, 402 challenges |
 | HTTP API | `src/server/api.ts` | Hono server on **:4021** — network API + demo paid endpoints behind an x402-shaped 402 gate |
 | Dashboard | `src/server/dashboard.ts` | Live view at `/dashboard`: balances, mandates, real-time receipt feed over SSE |
-| MCP server | `src/mcp/server.ts` | `money_balance`, `money_pay`, `money_fetch` (auto-pays 402s within mandate), `money_feed` |
-| Demo | `src/demo.ts` | The full story end-to-end, including denial and tamper cases |
+| x402 bridge | `src/bridge/` | Pay external x402 sellers (v1 wire, EIP-3009-shaped auth) via a two-phase pending→confirm/auto-reverse lifecycle, against a mock wallet + seller |
+| MCP server | `src/mcp/server.ts` | `money_balance`, `money_pay`, `money_fetch` (auto-pays internal 402s AND external x402 sellers within mandate), `money_feed` |
+| Demo | `src/demo.ts` | The full story end-to-end (9 sections), including denial, tamper, restart, owner-auth, and external-bridge cases |
 
 ## Run it
 
@@ -75,15 +76,15 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 ```
 
 - **Escalation**: above the ask-me line, the network returns `escalate`; a human approval mints a one-time permit bound to the *exact* payee+amount approved ("approval is the mandate" — no gap between what the human saw and what executes).
-- **New-payee throttle**: the first payment to any unseen payee is capped at cents. A prompt-injected agent lured to an attacker's endpoint can leak cents/day, not the envelope. Payees inside the owner's own trust domain (the owner, sibling agents they own) are exempt — money paid to them never leaves the owner's accounts. Everything else (caps, budget, escalation) still applies to them.
+- **New-payee throttle**: the first payment to any unseen payee is capped at cents — including external x402 vendors, keyed on their canonical host. A prompt-injected agent lured to an attacker's endpoint can leak cents/day, not the envelope. Payees inside the owner's own trust domain (the owner, sibling agents they own) are exempt — money paid to them never leaves the owner's accounts. Everything else (caps, budget, escalation) still applies to them.
 - **Permits**: single-use, 60s TTL, bound to (agent, payee, amount). Replay and amount-inflation are structurally dead.
 
 ## Honest v0 shortcuts (the roadmap is the inverse)
 
 - Persistence is a local JSONL event log (`data/events.jsonl`, replayed and integrity-checked on boot; `MONEY_DATA` overrides the path) — durable across restarts, but single-node (→ Postgres, same event-sourced shape).
-- Agent identity is an Ed25519 keypair per agent: spend requests are signed over method+path+body+timestamp+nonce and verified against the key registered at creation (→ RFC 9421 HTTP Message Signatures on the wire, keys chained to a KYC'd owner, and owner auth on the admin routes — creating users/mandates is still open in v0).
+- Identity is an Ed25519 keypair per account: agents sign spends and owners sign admin mutations (fund/allocate/mandates/revoke/rotate-key), over method+path+body+timestamp+nonce, verified against the key registered at creation. Key rotation is the leaked-key remediation path (→ RFC 9421 HTTP Message Signatures + `@authority` binding on the wire; keys chained to a KYC'd owner; signup rate-limiting and owner-key delivery off stdout).
 - Single-node; network and API share a process (→ policy/signer split into separate trust domains, as in the design brief).
-- No external rails: top-up is simulated (→ card/ACH via sponsor-bank FBO; USDC leg for x402 interop).
+- External top-up is simulated, and the x402 bridge to the outside machine economy runs against a **mock** wallet + seller (protocol-faithful x402 v1 client, but Ed25519 stands in for EIP-712/secp256k1 signing and there's no on-chain settlement) — so mock-green certifies the accounting and policy, not chain finality (→ real USDC wallet + facilitator on Base; card/ACH top-up via sponsor-bank FBO).
 - Single-owner loop only: agents of one user pay each other and providers. **Cross-owner transfers are deliberately out** — that's the money-transmission line; it comes with licensing/partner structure, not before.
 - No subscriptions, refunds, sub-agent delegation, or insurance yet — these are the differentiators identified in the design brief and belong on the roadmap in that order.
 
