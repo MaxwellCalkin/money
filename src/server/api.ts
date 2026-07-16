@@ -11,8 +11,14 @@ import { dashboardHtml } from "./dashboard.ts";
 
 /** Signed requests must be fresher than this (and nonces are remembered this long). */
 const AUTH_WINDOW_MS = 2 * 60_000;
+/** Small allowance for client clocks running ahead — a far-future timestamp
+ *  would otherwise pre-extend a captured request's replay life. */
+const CLOCK_SKEW_MS = 30_000;
+/** Signed routes hash the body before the signature is known-good — cap what
+ *  an unauthenticated caller can make us buffer. */
+const MAX_SIGNED_BODY_BYTES = 256 * 1024;
 
-type ApiEnv = { Variables: { agentId: string } };
+type ApiEnv = { Variables: { agentId: string; userId: string } };
 
 export const DEFAULT_PORT = 4021; // 402 + 1
 export const DEFAULT_DATA = "data/events.jsonl";
@@ -34,11 +40,14 @@ function payStatus(result: PayResult): 200 | 400 | 402 | 409 {
  *      an x402-shaped HTTP 402 flow: no payment → 402 + challenge;
  *      pay the challenge → retry with receipt headers → 200.
  *
- * Spend routes (/pay, /pay-challenge) require Ed25519-signed requests,
- * verified against the public key registered at agent creation. In-process
- * callers (tests, the demo driving `network` directly) bypass HTTP auth by
- * construction — the policy envelope still governs every spend; production
- * splits policy and signing into separate trust domains per the design brief.
+ * Spend routes (/pay, /pay-challenge) require agent-signed requests; admin
+ * routes (/fund, /agents, /allocate, /mandates, revoke) require owner-signed
+ * requests — both Ed25519 over method+path+sha256(body)+ts+nonce, verified
+ * against the key registered at account creation. /providers and the read
+ * routes stay open in v0. In-process callers (tests, the demo driving
+ * `network` directly) bypass HTTP auth by construction — the policy envelope
+ * still governs every spend; production splits policy and signing into
+ * separate trust domains per the design brief.
  */
 export function createApi(network: MoneyNetwork) {
   const app = new Hono<ApiEnv>();
@@ -57,46 +66,59 @@ export function createApi(network: MoneyNetwork) {
   const seenNonces = new Map<string, number>();
 
   /**
-   * Agent authentication: an Ed25519 signature over
-   * method+path+sha256(body)+ts+nonce, verified against the agent's
-   * registered public key. A request that is unsigned, forged, stale,
-   * replayed, or from a keyless agent is rejected before any money moves.
+   * Signed-request authentication: an Ed25519 signature over
+   * method+path+sha256(body)+ts+nonce, verified against the public key
+   * registered on the account at creation. A request that is unsigned,
+   * forged, stale, replayed, or from a keyless account is rejected before
+   * any money moves. Agents sign spends (x-agent-id); owners sign admin
+   * mutations (x-user-id) — same scheme, different trust domain.
    */
-  const requireAgentSig = async (c: Context<ApiEnv>, next: Next) => {
-    const claimedId = c.req.header("x-agent-id");
-    const ts = Number(c.req.header("x-signature-ts"));
-    const nonce = c.req.header("x-signature-nonce");
-    const signature = c.req.header("x-signature");
-    const reject = (reason: string) => c.json({ error: "unauthenticated", reason }, 401);
+  const requireSignedAccount = (kind: "agent" | "user") => {
+    const idHeader = kind === "agent" ? "x-agent-id" : "x-user-id";
+    const ctxKey = kind === "agent" ? ("agentId" as const) : ("userId" as const);
+    return async (c: Context<ApiEnv>, next: Next) => {
+      const claimedId = c.req.header(idHeader);
+      const ts = Number(c.req.header("x-signature-ts"));
+      const nonce = c.req.header("x-signature-nonce");
+      const signature = c.req.header("x-signature");
+      const reject = (reason: string) => c.json({ error: "unauthenticated", reason }, 401);
 
-    if (!claimedId || !nonce || !signature || !Number.isFinite(ts)) {
-      return reject("signed request required: x-agent-id, x-signature-ts, x-signature-nonce, x-signature");
-    }
-    const account = network.account(claimedId);
-    if (!account || account.kind !== "agent") return reject(`unknown agent ${claimedId}`);
-    if (!account.publicKey) return reject("agent has no registered public key — recreate it with one");
-    const now = Date.now();
-    if (Math.abs(now - ts) > AUTH_WINDOW_MS) return reject("signature timestamp outside the accepted window");
-    if (seenNonces.has(nonce)) return reject("nonce already used — sign each request freshly (an idempotency key retry still needs a new signature)");
+      if (!claimedId || !nonce || !signature || !Number.isFinite(ts)) {
+        return reject(`signed request required: ${idHeader}, x-signature-ts, x-signature-nonce, x-signature`);
+      }
+      const account = network.account(claimedId);
+      if (!account || account.kind !== kind) return reject(`unknown ${kind} ${claimedId}`);
+      if (!account.publicKey) return reject(`${kind} has no registered public key — recreate it with one`);
+      const now = Date.now();
+      if (now - ts > AUTH_WINDOW_MS || ts - now > CLOCK_SKEW_MS) {
+        return reject("signature timestamp outside the accepted window");
+      }
+      if (seenNonces.has(nonce)) return reject("nonce already used — sign each request freshly (an idempotency key retry still needs a new signature)");
 
-    const url = new URL(c.req.url);
-    const body = await c.req.text(); // Hono caches the body; handlers can still read it
-    const ok = verifyRequest(account.publicKey, signature, {
-      method: c.req.method,
-      path: url.pathname + url.search,
-      body,
-      ts,
-      nonce,
-    });
-    if (!ok) return reject("signature verification failed");
+      const declaredLength = Number(c.req.header("content-length") ?? 0);
+      if (declaredLength > MAX_SIGNED_BODY_BYTES) return reject("request body too large");
+      const url = new URL(c.req.url);
+      const body = await c.req.text(); // Hono caches the body; handlers can still read it
+      if (body.length > MAX_SIGNED_BODY_BYTES) return reject("request body too large");
+      const ok = verifyRequest(account.publicKey, signature, {
+        method: c.req.method,
+        path: url.pathname + url.search,
+        body,
+        ts,
+        nonce,
+      });
+      if (!ok) return reject("signature verification failed");
 
-    for (const [n, t] of seenNonces) {
-      if (now - t > AUTH_WINDOW_MS) seenNonces.delete(n);
-    }
-    seenNonces.set(nonce, ts);
-    c.set("agentId", claimedId);
-    await next();
+      for (const [n, t] of seenNonces) {
+        if (now - t > AUTH_WINDOW_MS) seenNonces.delete(n);
+      }
+      seenNonces.set(nonce, ts);
+      c.set(ctxKey, claimedId);
+      await next();
+    };
   };
+  const requireAgentSig = requireSignedAccount("agent");
+  const requireOwnerSig = requireSignedAccount("user");
 
   const readBody = async <T>(c: Context): Promise<T | null> =>
     c.req.json<T>().catch(() => null);
@@ -142,33 +164,55 @@ export function createApi(network: MoneyNetwork) {
 
   // ── Network API ─────────────────────────────────────────────────────────
 
+  // Signup = key registration: the owner key is what authorizes funding,
+  // agents, and mandates from then on, so creating a user without one would
+  // create an account nobody can ever administer.
   app.post("/users", async (c) => {
-    const { name } = await c.req.json<{ name: string }>();
-    return c.json(network.createUser(name));
+    const body = await readBody<{ name: string; publicKey: string }>(c);
+    if (!body || typeof body.name !== "string" || !body.name) {
+      return c.json({ error: "invalid_request", reason: "need name" }, 400);
+    }
+    if (typeof body.publicKey !== "string" || !body.publicKey) {
+      return c.json({ error: "invalid_request", reason: "need publicKey (base64 SPKI Ed25519) — the owner key authorizes all admin operations" }, 400);
+    }
+    return c.json(network.createUser(body.name, body.publicKey));
   });
 
-  app.post("/agents", async (c) => {
-    const { name, ownerId, publicKey } = await c.req.json<{ name: string; ownerId: string; publicKey?: string }>();
-    if (publicKey !== undefined && typeof publicKey !== "string") {
+  app.post("/agents", requireOwnerSig, async (c) => {
+    const owner = c.get("userId");
+    const body = await readBody<{ name: string; ownerId: string; publicKey?: string }>(c);
+    if (!body || typeof body.name !== "string" || !body.name) {
+      return c.json({ error: "invalid_request", reason: "need name and ownerId" }, 400);
+    }
+    if (body.publicKey !== undefined && typeof body.publicKey !== "string") {
       return c.json({ error: "invalid_request", reason: "publicKey must be a base64 SPKI Ed25519 key" }, 400);
     }
-    return c.json(network.createAgent(name, ownerId, publicKey));
+    if (body.ownerId !== owner) {
+      return c.json({ error: "forbidden", reason: "ownerId must be the signing user — you cannot create agents for someone else" }, 403);
+    }
+    return c.json(network.createAgent(body.name, owner, body.publicKey));
   });
 
-  app.post("/providers", async (c) => {
-    const { name } = await c.req.json<{ name: string }>();
-    return c.json(network.createProvider(name));
-  });
+  // No open /providers route: providers are created in-process (the demo one
+  // above) until provider onboarding gets its own auth story. An open route
+  // would let anyone append junk accounts to the durable event log forever.
+  // (/users stays open — it IS signup — but writes durable state too;
+  // production adds rate limiting there.)
 
-  app.post("/fund", async (c) => {
+  app.post("/fund", requireOwnerSig, async (c) => {
+    const owner = c.get("userId");
     const body = await readBody<{ userId: string; amountMicros: number; idempotencyKey: string }>(c);
     if (!body || typeof body.userId !== "string" || !isPositiveMicros(body.amountMicros) || !validClientKey(body.idempotencyKey)) {
       return c.json({ error: "invalid_request", reason: "need userId, positive integer amountMicros, and idempotencyKey (retries must reuse it)" }, 400);
     }
-    return c.json(network.fund(body.userId, body.amountMicros, body.idempotencyKey));
+    if (body.userId !== owner) {
+      return c.json({ error: "forbidden", reason: "userId must be the signing user — you can only fund your own account" }, 403);
+    }
+    return c.json(network.fund(owner, body.amountMicros, body.idempotencyKey));
   });
 
-  app.post("/allocate", async (c) => {
+  app.post("/allocate", requireOwnerSig, async (c) => {
+    const owner = c.get("userId");
     const body = await readBody<{ userId: string; agentId: string; amountMicros: number; idempotencyKey: string }>(c);
     if (
       !body ||
@@ -179,11 +223,15 @@ export function createApi(network: MoneyNetwork) {
     ) {
       return c.json({ error: "invalid_request", reason: "need userId, agentId, positive integer amountMicros, and idempotencyKey (retries must reuse it)" }, 400);
     }
-    return c.json(network.allocate(body.userId, body.agentId, body.amountMicros, body.idempotencyKey));
+    if (body.userId !== owner) {
+      return c.json({ error: "forbidden", reason: "userId must be the signing user — you can only allocate your own funds" }, 403);
+    }
+    return c.json(network.allocate(owner, body.agentId, body.amountMicros, body.idempotencyKey));
   });
 
-  app.post("/mandates", async (c) => {
-    const body = await c.req.json<{
+  app.post("/mandates", requireOwnerSig, async (c) => {
+    const owner = c.get("userId");
+    const body = await readBody<{
       userId: string;
       agentId: string;
       budgetMicros: number;
@@ -193,9 +241,17 @@ export function createApi(network: MoneyNetwork) {
       newPayeeCapMicros: number;
       payeeAllowlist?: string[];
       expiresAt?: number;
-    }>();
+      idempotencyKey: string;
+    }>(c);
+    const caps = body && [body.budgetMicros, body.perTxCapMicros, body.dailyCapMicros, body.escalateAboveMicros, body.newPayeeCapMicros];
+    if (!body || typeof body.agentId !== "string" || !caps || caps.some((n) => !Number.isSafeInteger(n) || n < 0) || !validClientKey(body.idempotencyKey)) {
+      return c.json({ error: "invalid_request", reason: "need agentId, non-negative integer *Micros caps, and idempotencyKey (a replayed grant must not reset counters)" }, 400);
+    }
+    if (body.userId !== owner) {
+      return c.json({ error: "forbidden", reason: "userId must be the signing user — only the owner signs mandates" }, 403);
+    }
     const mandate = network.grantMandate({
-      userId: body.userId,
+      userId: owner,
       agentId: body.agentId,
       budget: body.budgetMicros,
       perTxCap: body.perTxCapMicros,
@@ -204,20 +260,42 @@ export function createApi(network: MoneyNetwork) {
       newPayeeCap: body.newPayeeCapMicros,
       payeeAllowlist: body.payeeAllowlist,
       expiresAt: body.expiresAt,
+      idempotencyKey: body.idempotencyKey,
     });
     // Sets serialize poorly; expose what matters.
     return c.json({ ...mandate, seenPayees: [...mandate.seenPayees] });
   });
 
-  // The owner's kill switch. In production this sits behind owner auth
-  // (passkey ceremony); v0 has no owner auth yet — see the identity milestone.
-  app.post("/mandates/:id/revoke", (c) => {
-    const id = c.req.param("id");
-    try {
-      network.revokeMandate(id);
-    } catch {
-      return c.json({ error: `unknown mandate ${id}` }, 404);
+  // Key rotation: the remediation path for a leaked key. The OWNER's current
+  // key authorizes it — for their own account, or for an agent they own
+  // (a compromised agent must not be able to re-key itself or its siblings).
+  app.post("/accounts/:id/rotate-key", requireOwnerSig, async (c) => {
+    const owner = c.get("userId");
+    const targetId = c.req.param("id") ?? "";
+    const target = network.account(targetId);
+    if (!target) return c.json({ error: `unknown account ${targetId}` }, 404);
+    const authorized = target.id === owner || (target.kind === "agent" && target.ownerId === owner);
+    if (!authorized) {
+      return c.json({ error: "forbidden", reason: "you can only rotate your own key or a key of an agent you own" }, 403);
     }
+    const body = await readBody<{ publicKey: string }>(c);
+    if (!body || typeof body.publicKey !== "string" || !body.publicKey) {
+      return c.json({ error: "invalid_request", reason: "need publicKey (base64 SPKI Ed25519)" }, 400);
+    }
+    const account = network.rotateKey(targetId, body.publicKey);
+    return c.json({ ok: true, accountId: account.id });
+  });
+
+  // The owner's kill switch — only the mandate's own signer may pull it.
+  app.post("/mandates/:id/revoke", requireOwnerSig, (c) => {
+    const owner = c.get("userId");
+    const id = c.req.param("id") ?? "";
+    const mandate = network.policy.get(id);
+    if (!mandate) return c.json({ error: `unknown mandate ${id}` }, 404);
+    if (mandate.userId !== owner) {
+      return c.json({ error: "forbidden", reason: "only the user who granted a mandate can revoke it" }, 403);
+    }
+    network.revokeMandate(id);
     return c.json({ ok: true, mandateId: id });
   });
 

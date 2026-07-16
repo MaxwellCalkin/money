@@ -20,6 +20,7 @@ export type StoredMandate = Omit<Mandate, "seenPayees"> & { seenPayees: string[]
 
 export type NetworkEvent =
   | { type: "account_created"; account: Account }
+  | { type: "key_rotated"; accountId: string; publicKey: string }
   | { type: "mandate_granted"; mandate: StoredMandate }
   | { type: "mandate_revoked"; mandateId: string }
   | {

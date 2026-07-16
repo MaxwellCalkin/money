@@ -249,6 +249,30 @@ describe("persistence (JSONL event sourcing)", () => {
     expect(rebuilt.ledger.zeroSum()).toBe(true);
   });
 
+  it("key rotation and grant idempotency survive a restart", () => {
+    const path = tempLog();
+    const clock = () => Date.UTC(2026, 6, 15, 12);
+    const { network, user, agent, peer } = durableSetup(path, clock);
+    const rotatedKey = generateAgentKeypair().publicKey;
+    network.rotateKey(agent.id, rotatedKey);
+    const keyed = network.grantMandate({
+      userId: user.id, agentId: peer.id,
+      budget: usd(5), perTxCap: usd(1), dailyCap: usd(5), escalateAbove: usd(2), newPayeeCap: usd(0.1),
+      idempotencyKey: "grant-k1",
+    });
+
+    const rebuilt = MoneyNetwork.open(path, clock);
+    expect(rebuilt.account(agent.id)!.publicKey).toBe(rotatedKey);
+    // Replaying the grant key against the REBUILT network returns the same
+    // mandate — a captured grant cannot reset counters even across a restart.
+    const replayed = rebuilt.grantMandate({
+      userId: user.id, agentId: peer.id,
+      budget: usd(5), perTxCap: usd(1), dailyCap: usd(5), escalateAbove: usd(2), newPayeeCap: usd(0.1),
+      idempotencyKey: "grant-k1",
+    });
+    expect(replayed.id).toBe(keyed.id);
+  });
+
   it("idempotent retries of funding and allocation append only one event", () => {
     const path = tempLog();
     const clock = () => Date.UTC(2026, 6, 15, 12);

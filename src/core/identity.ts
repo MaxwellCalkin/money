@@ -56,16 +56,18 @@ export function verifyRequest(publicKeyB64: string, signatureB64: string, parts:
   }
 }
 
-/** The headers a client attaches to a signed request. */
+/** The headers a client attaches to a signed request. Agents identify via
+ *  x-agent-id; owners (users) sign admin requests the same way via x-user-id. */
 export function signedHeaders(
-  agentId: string,
+  accountId: string,
   privateKeyB64: string,
-  parts: Omit<SignedRequestParts, "ts" | "nonce">
+  parts: Omit<SignedRequestParts, "ts" | "nonce">,
+  idHeader: "x-agent-id" | "x-user-id" = "x-agent-id"
 ): Record<string, string> {
   const ts = Date.now();
   const nonce = randomUUID();
   return {
-    "x-agent-id": agentId,
+    [idHeader]: accountId,
     "x-signature-ts": String(ts),
     "x-signature-nonce": nonce,
     "x-signature": signRequest(privateKeyB64, { ...parts, ts, nonce }),

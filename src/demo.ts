@@ -148,6 +148,12 @@ async function main() {
     no(`unsigned spend claiming scout's id → ${unsigned.status} (identity is the keypair, not a header)`);
     const stolenId = await signedPayChallenge("chl_whatever", generateAgentKeypair().privateKey);
     no(`spend signed with the WRONG key → ${stolenId.status} (Ed25519 verify against the registered key)`);
+    const unsignedGrant = await fetch(`${base}/mandates`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: max.id, agentId: scout.id, budgetMicros: usd(1000), perTxCapMicros: usd(1000), dailyCapMicros: usd(1000), escalateAboveMicros: usd(1000), newPayeeCapMicros: usd(1000) }),
+    });
+    no(`unsigned attempt to widen scout's mandate to $1000 → ${unsignedGrant.status} (only the owner's key signs mandates)`);
 
     section("4 · Injection throttle: first payment to an unseen payee");
     const sketchy = network.createProvider("sketchy-api");

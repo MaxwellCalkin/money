@@ -72,6 +72,10 @@ export interface Mandate {
   payeeAllowlist?: string[];
   expiresAt: number;
   revoked: boolean;
+  /** Client-supplied grant idempotency key: replaying it returns this same
+   *  mandate instead of minting a fresh one (a re-granted mandate would reset
+   *  the spent counters — a replayed grant must never widen anything). */
+  idempotencyKey?: string;
   // Counters — mutated only by PolicyEngine.consume().
   spent: Micros;
   spentToday: Micros;

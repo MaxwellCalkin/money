@@ -113,6 +113,12 @@ export class MoneyNetwork {
           this.accounts.set(e.account.id, e.account);
           this.ledger.ensureAccount(e.account.id);
           break;
+        case "key_rotated": {
+          const account = this.accounts.get(e.accountId);
+          if (!account) throw new Error(`replay: key rotation references unknown account ${e.accountId}`);
+          account.publicKey = e.publicKey;
+          break;
+        }
         case "mandate_granted":
           this.policy.loadMandate(e.mandate);
           break;
@@ -151,8 +157,10 @@ export class MoneyNetwork {
 
   // ── Accounts ────────────────────────────────────────────────────────────
 
-  createUser(name: string): Account {
-    return this.createAccount("user", name);
+  /** publicKey (base64 SPKI Ed25519) is the owner's registered identity —
+   *  required to authenticate admin HTTP requests (fund, agents, mandates). */
+  createUser(name: string, publicKey?: string): Account {
+    return this.createAccount("user", name, undefined, publicKey);
   }
 
   /** publicKey (base64 SPKI Ed25519) is the agent's registered identity —
@@ -241,9 +249,25 @@ export class MoneyNetwork {
     if (agent.kind !== "agent" || agent.ownerId !== user.id) {
       throw new Error("mandates can only be granted to the user's own agents");
     }
-    const mandate = this.policy.grant(input);
-    this.emit({ type: "mandate_granted", mandate: serializeMandate(mandate) });
+    const { mandate, replayed } = this.policy.grant(input);
+    if (!replayed) this.emit({ type: "mandate_granted", mandate: serializeMandate(mandate) });
     return mandate;
+  }
+
+  /**
+   * Replace an account's registered public key (user or agent). Authorized
+   * at the API layer by the OWNER's current key — this is the remediation
+   * path for a leaked key, so the old key stops verifying immediately.
+   */
+  rotateKey(accountId: string, publicKey: string): Account {
+    const account = this.mustAccount(accountId);
+    if (account.kind !== "user" && account.kind !== "agent") {
+      throw new Error("only user and agent accounts carry identity keys");
+    }
+    if (!publicKey) throw new Error("publicKey is required");
+    account.publicKey = publicKey;
+    this.emit({ type: "key_rotated", accountId, publicKey });
+    return account;
   }
 
   listMandates(): Mandate[] {

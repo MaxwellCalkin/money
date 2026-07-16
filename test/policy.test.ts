@@ -18,7 +18,7 @@ function grant(engine: PolicyEngine, overrides: Partial<Parameters<PolicyEngine[
     escalateAbove: usd(2),
     newPayeeCap: usd(0.1),
     ...overrides,
-  });
+  }).mandate;
 }
 
 /** Approve+consume helper: the normal successful spend path. */

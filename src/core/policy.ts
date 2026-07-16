@@ -22,6 +22,8 @@ export interface MandateGrant {
   payeeAllowlist?: string[];
   /** Epoch ms. Defaults to 30 days from grant. */
   expiresAt?: number;
+  /** Replaying the same key returns the original mandate (no counter reset). */
+  idempotencyKey?: string;
 }
 
 function utcDay(ts: number): string {
@@ -41,6 +43,8 @@ function utcDay(ts: number): string {
 export class PolicyEngine {
   private mandates = new Map<string, Mandate>();
   private permits = new Map<string, Permit>();
+  /** grant idempotency key → mandate id (rebuilt on replay via loadMandate). */
+  private grantKeys = new Map<string, string>();
 
   /**
    * @param isTrustedPayee Payees inside the owner's own trust domain (the
@@ -53,10 +57,32 @@ export class PolicyEngine {
     private isTrustedPayee: (mandate: Mandate, payeeId: string) => boolean = () => false
   ) {}
 
-  grant(input: MandateGrant): Mandate {
+  grant(input: MandateGrant): { mandate: Mandate; replayed: boolean } {
     for (const cap of [input.budget, input.perTxCap, input.dailyCap, input.escalateAbove, input.newPayeeCap]) {
       assertMicros(cap);
       if (cap < 0) throw new Error("mandate limits must be non-negative");
+    }
+    // Grant replay: a re-granted mandate would reset the spent counters, so a
+    // captured grant request replayed after a restart could double a budget.
+    // Same key + same terms → the original mandate; same key + different
+    // terms is an error, never a silent re-grant.
+    if (input.idempotencyKey) {
+      const priorId = this.grantKeys.get(input.idempotencyKey);
+      const prior = priorId ? this.mandates.get(priorId) : undefined;
+      if (prior) {
+        if (
+          prior.userId !== input.userId ||
+          prior.agentId !== input.agentId ||
+          prior.budget !== input.budget ||
+          prior.perTxCap !== input.perTxCap ||
+          prior.dailyCap !== input.dailyCap ||
+          prior.escalateAbove !== input.escalateAbove ||
+          prior.newPayeeCap !== input.newPayeeCap
+        ) {
+          throw new Error(`grant idempotency key ${input.idempotencyKey} was already used with different terms`);
+        }
+        return { mandate: prior, replayed: true };
+      }
     }
     // A new grant supersedes all prior mandates for this agent. Without this,
     // revoking the newest mandate would silently resurrect an older, looser
@@ -77,13 +103,15 @@ export class PolicyEngine {
       payeeAllowlist: input.payeeAllowlist,
       expiresAt: input.expiresAt ?? now + 30 * 24 * 60 * 60 * 1000,
       revoked: false,
+      idempotencyKey: input.idempotencyKey,
       spent: 0,
       spentToday: 0,
       today: utcDay(now),
       seenPayees: new Set(),
     };
     this.mandates.set(mandate.id, mandate);
-    return mandate;
+    if (input.idempotencyKey) this.grantKeys.set(input.idempotencyKey, mandate.id);
+    return { mandate, replayed: false };
   }
 
   /**
@@ -104,6 +132,7 @@ export class PolicyEngine {
       today: utcDay(this.clock()),
       seenPayees: new Set(),
     });
+    if (stored.idempotencyKey) this.grantKeys.set(stored.idempotencyKey, stored.id);
   }
 
   /** Replay-only: re-commit a spend recorded in the log to its mandate's counters. */
