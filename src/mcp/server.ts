@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { signedHeaders } from "../core/identity.ts";
 import { fmt, usd } from "../core/types.ts";
 
 /**
@@ -16,24 +17,32 @@ import { fmt, usd } from "../core/types.ts";
  * The agent never holds keys or balances — only its account id. Every spend
  * is policy-checked server-side against the owner's mandate.
  *
+ * The agent's identity is its Ed25519 private key: every network API call is
+ * signed, and the network verifies against the public key registered at
+ * agent creation. Spend requests without a valid signature are rejected.
+ *
  * Config:
- *   MONEY_API      base URL of the network API (default http://localhost:4021)
- *   MONEY_AGENT_ID this agent's account id (required)
+ *   MONEY_API       base URL of the network API (default http://127.0.0.1:4021)
+ *   MONEY_AGENT_ID  this agent's account id (required)
+ *   MONEY_AGENT_KEY this agent's private key, base64 PKCS#8 (required; comes
+ *                   from onboarding — treat it like a password)
  */
 const API = process.env.MONEY_API ?? "http://127.0.0.1:4021";
 const AGENT_ID = process.env.MONEY_AGENT_ID;
+const AGENT_KEY = process.env.MONEY_AGENT_KEY;
 
-if (!AGENT_ID) {
-  console.error("MONEY_AGENT_ID is required (the agent's account id on the money network)");
+if (!AGENT_ID || !AGENT_KEY) {
+  console.error("MONEY_AGENT_ID and MONEY_AGENT_KEY are required (both come from onboarding: npm run onboard)");
   process.exit(1);
 }
 
 async function api(path: string, init?: RequestInit): Promise<{ status: number; body: any }> {
+  const body = typeof init?.body === "string" ? init.body : "";
   const res = await fetch(`${API}${path}`, {
     ...init,
     headers: {
       "content-type": "application/json",
-      "x-agent-id": AGENT_ID!,
+      ...signedHeaders(AGENT_ID!, AGENT_KEY!, { method: init?.method ?? "GET", path, body }),
       ...(init?.headers ?? {}),
     },
   });

@@ -2,6 +2,7 @@ import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { generateAgentKeypair } from "../src/core/identity.ts";
 import { MoneyNetwork } from "../src/core/network.ts";
 import { JsonlStore, type NetworkEvent } from "../src/core/store.ts";
 import { usd } from "../src/core/types.ts";
@@ -30,7 +31,9 @@ function durableSetup(path: string, clock: () => number) {
   const network = MoneyNetwork.open(path, clock);
   const user = network.createUser("Max");
   network.fund(user.id, usd(20), "seed-fund");
-  const agent = network.createAgent("scout", user.id);
+  // Registered identity key rides on the account, so the restart test's
+  // account deep-equal proves it survives too.
+  const agent = network.createAgent("scout", user.id, generateAgentKeypair().publicKey);
   network.allocate(user.id, agent.id, usd(10), "seed-alloc-1");
   const peer = network.createAgent("writer", user.id);
   network.allocate(user.id, peer.id, usd(5), "seed-alloc-2");

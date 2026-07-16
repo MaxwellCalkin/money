@@ -24,7 +24,7 @@ stablecoin rails can't touch that economically. External rails only matter at th
 A complete v0 prototype exists and works end-to-end: double-entry ledger, user-signed
 mandates → single-use permits, hash-chained receipts, agent-to-agent payments, an
 x402-shaped HTTP 402 pay-per-call flow over real HTTP, an MCP server so a Claude Code
-agent gets a wallet, one-command onboarding, an E2E demo, and 45 passing tests. It
+agent gets a wallet, one-command onboarding, an E2E demo, and 53 passing tests. It
 survived a 35-agent adversarial review (22 findings, all fixed).
 
 - **Git:** private repo `https://github.com/MaxwellCalkin/money`, remote `origin`,
@@ -55,7 +55,9 @@ survived a 35-agent adversarial review (22 findings, all fixed).
   `money_feed`. The agent holds only its account id (v0), never keys or balances.
 - `src/onboard.ts` — creates user+agent+mandate, prints `.mcp.json` to paste.
 - `src/demo.ts` — the E2E story; `npm run demo` is the best way to see it all work.
-- `test/*.test.ts` — 45 tests across ledger, policy, network, persistence.
+- `src/core/identity.ts` — Ed25519 agent identity: keypair generation, request
+  signing/verification (method+path+sha256(body)+ts+nonce).
+- `test/*.test.ts` — 53 tests across ledger, policy, network, persistence, identity.
 
 ## Invariants — do NOT break these
 
@@ -94,14 +96,21 @@ must replay to; `network.revokeMandate()` + `POST /mandates/:id/revoke` so the
 kill switch is durable and reachable. 9 persistence tests in
 `test/persistence.test.ts`; demo section 8 rebuilds from the log live.
 
-### 2. Agent identity — replace the trust-me header
+### 2. Agent identity — DONE
 
-`x-agent-id` is a placeholder, not auth — anyone can claim any agent. Add **Ed25519
-keypairs per agent** (`node:crypto`), sign requests (Web-Bot-Auth-style signed
-headers over method+path+body+timestamp is fine), and verify server-side against the
-agent's registered public key. Onboarding generates the keypair, registers the public
-key, hands the private key to the agent's MCP config. A forged/unsigned request must
-be rejected — prove it with a test.
+Ed25519 keypair per agent (`src/core/identity.ts`): keys travel as single-line
+base64 DER (SPKI public / PKCS#8 private); the public key registers on the
+Account at creation, so it persists through the event log for free. `/pay` and
+`/pay-challenge` require signed headers (x-agent-id, x-signature-ts,
+x-signature-nonce, x-signature) over method+path+sha256(body)+ts+nonce, verified
+against the registered key with a 2-minute freshness window and a nonce replay
+cache (in-memory — post-restart replays within the window are neutralized by
+idempotency keys). Onboarding generates the pair and puts MONEY_AGENT_KEY in the
+MCP config; the MCP server signs every API call. 8 tests in
+`test/identity.test.ts` (unsigned/forged/tampered/stale/replayed/keyless all
+rejected); demo section 3 shows unsigned + wrong-key spends bouncing live.
+Note: creating users/agents/mandates over HTTP is still unauthenticated in v0 —
+owner auth is future work, flagged in the README.
 
 ### 3. Live dashboard — make it visible
 

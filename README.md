@@ -51,8 +51,9 @@ Or wire it manually — add to `.mcp.json`:
       "command": "npx",
       "args": ["tsx", "C:/Users/mcalk/code/money/src/mcp/server.ts"],
       "env": {
-        "MONEY_API": "http://localhost:4021",
-        "MONEY_AGENT_ID": "agt_xxxxxxxx"
+        "MONEY_API": "http://127.0.0.1:4021",
+        "MONEY_AGENT_ID": "agt_xxxxxxxx",
+        "MONEY_AGENT_KEY": "<base64 Ed25519 private key from onboarding — keep out of git>"
       }
     }
   }
@@ -74,7 +75,7 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 ## Honest v0 shortcuts (the roadmap is the inverse)
 
 - Persistence is a local JSONL event log (`data/events.jsonl`, replayed and integrity-checked on boot; `MONEY_DATA` overrides the path) — durable across restarts, but single-node (→ Postgres, same event-sourced shape).
-- `x-agent-id` header is identification, not authentication (→ signed requests / Web Bot Auth keypairs per agent, chained to a KYC'd owner).
+- Agent identity is an Ed25519 keypair per agent: spend requests are signed over method+path+body+timestamp+nonce and verified against the key registered at creation (→ RFC 9421 HTTP Message Signatures on the wire, keys chained to a KYC'd owner, and owner auth on the admin routes — creating users/mandates is still open in v0).
 - Single-node; network and API share a process (→ policy/signer split into separate trust domains, as in the design brief).
 - No external rails: top-up is simulated (→ card/ACH via sponsor-bank FBO; USDC leg for x402 interop).
 - Single-owner loop only: agents of one user pay each other and providers. **Cross-owner transfers are deliberately out** — that's the money-transmission line; it comes with licensing/partner structure, not before.

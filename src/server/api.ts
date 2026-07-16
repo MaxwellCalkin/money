@@ -2,8 +2,14 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import type { Context, Next } from "hono";
 import { pathToFileURL } from "node:url";
+import { verifyRequest } from "../core/identity.ts";
 import { MoneyNetwork } from "../core/network.ts";
 import { fmt, usd, type Micros, type PayResult } from "../core/types.ts";
+
+/** Signed requests must be fresher than this (and nonces are remembered this long). */
+const AUTH_WINDOW_MS = 2 * 60_000;
+
+type ApiEnv = { Variables: { agentId: string } };
 
 export const DEFAULT_PORT = 4021; // 402 + 1
 export const DEFAULT_DATA = "data/events.jsonl";
@@ -25,12 +31,14 @@ function payStatus(result: PayResult): 200 | 400 | 402 | 409 {
  *      an x402-shaped HTTP 402 flow: no payment → 402 + challenge;
  *      pay the challenge → retry with receipt headers → 200.
  *
- * v0 auth is a bare `x-agent-id` header — a placeholder, not authentication.
- * Production replaces it with signed requests (Web Bot Auth / mTLS) and the
- * policy/signing split described in the design brief.
+ * Spend routes (/pay, /pay-challenge) require Ed25519-signed requests,
+ * verified against the public key registered at agent creation. In-process
+ * callers (tests, the demo driving `network` directly) bypass HTTP auth by
+ * construction — the policy envelope still governs every spend; production
+ * splits policy and signing into separate trust domains per the design brief.
  */
 export function createApi(network: MoneyNetwork) {
-  const app = new Hono();
+  const app = new Hono<ApiEnv>();
 
   // Core throws are bugs or unknown-account errors — return structured JSON,
   // never a bare stack trace.
@@ -42,7 +50,50 @@ export function createApi(network: MoneyNetwork) {
     network.listAccounts().find((a) => a.kind === "provider" && a.name === "quote-api") ??
     network.createProvider("quote-api");
 
-  const agentId = (c: Context): string | undefined => c.req.header("x-agent-id") ?? undefined;
+  /** nonce → signed ts, remembered for the auth window to block replays. */
+  const seenNonces = new Map<string, number>();
+
+  /**
+   * Agent authentication: an Ed25519 signature over
+   * method+path+sha256(body)+ts+nonce, verified against the agent's
+   * registered public key. A request that is unsigned, forged, stale,
+   * replayed, or from a keyless agent is rejected before any money moves.
+   */
+  const requireAgentSig = async (c: Context<ApiEnv>, next: Next) => {
+    const claimedId = c.req.header("x-agent-id");
+    const ts = Number(c.req.header("x-signature-ts"));
+    const nonce = c.req.header("x-signature-nonce");
+    const signature = c.req.header("x-signature");
+    const reject = (reason: string) => c.json({ error: "unauthenticated", reason }, 401);
+
+    if (!claimedId || !nonce || !signature || !Number.isFinite(ts)) {
+      return reject("signed request required: x-agent-id, x-signature-ts, x-signature-nonce, x-signature");
+    }
+    const account = network.account(claimedId);
+    if (!account || account.kind !== "agent") return reject(`unknown agent ${claimedId}`);
+    if (!account.publicKey) return reject("agent has no registered public key — recreate it with one");
+    const now = Date.now();
+    if (Math.abs(now - ts) > AUTH_WINDOW_MS) return reject("signature timestamp outside the accepted window");
+    if (seenNonces.has(nonce)) return reject("nonce already used — sign each request freshly (an idempotency key retry still needs a new signature)");
+
+    const url = new URL(c.req.url);
+    const body = await c.req.text(); // Hono caches the body; handlers can still read it
+    const ok = verifyRequest(account.publicKey, signature, {
+      method: c.req.method,
+      path: url.pathname + url.search,
+      body,
+      ts,
+      nonce,
+    });
+    if (!ok) return reject("signature verification failed");
+
+    for (const [n, t] of seenNonces) {
+      if (now - t > AUTH_WINDOW_MS) seenNonces.delete(n);
+    }
+    seenNonces.set(nonce, ts);
+    c.set("agentId", claimedId);
+    await next();
+  };
 
   const readBody = async <T>(c: Context): Promise<T | null> =>
     c.req.json<T>().catch(() => null);
@@ -94,8 +145,11 @@ export function createApi(network: MoneyNetwork) {
   });
 
   app.post("/agents", async (c) => {
-    const { name, ownerId } = await c.req.json<{ name: string; ownerId: string }>();
-    return c.json(network.createAgent(name, ownerId));
+    const { name, ownerId, publicKey } = await c.req.json<{ name: string; ownerId: string; publicKey?: string }>();
+    if (publicKey !== undefined && typeof publicKey !== "string") {
+      return c.json({ error: "invalid_request", reason: "publicKey must be a base64 SPKI Ed25519 key" }, 400);
+    }
+    return c.json(network.createAgent(name, ownerId, publicKey));
   });
 
   app.post("/providers", async (c) => {
@@ -164,9 +218,8 @@ export function createApi(network: MoneyNetwork) {
     return c.json({ ok: true, mandateId: id });
   });
 
-  app.post("/pay", async (c) => {
-    const from = agentId(c);
-    if (!from) return c.json({ error: "missing x-agent-id header" }, 401);
+  app.post("/pay", requireAgentSig, async (c) => {
+    const from = c.get("agentId");
     const body = await readBody<{ to: string; amountMicros: number; memo?: string; idempotencyKey: string }>(c);
     if (!body || typeof body.to !== "string" || !isPositiveMicros(body.amountMicros) || !validClientKey(body.idempotencyKey)) {
       return c.json({ error: "invalid_request", reason: "need to, positive integer amountMicros, and idempotencyKey (not starting with chl_/rev_)" }, 400);
@@ -175,9 +228,8 @@ export function createApi(network: MoneyNetwork) {
     return c.json(result, payStatus(result));
   });
 
-  app.post("/pay-challenge", async (c) => {
-    const from = agentId(c);
-    if (!from) return c.json({ error: "missing x-agent-id header" }, 401);
+  app.post("/pay-challenge", requireAgentSig, async (c) => {
+    const from = c.get("agentId");
     const body = await readBody<{ challengeId: string }>(c);
     if (!body || typeof body.challengeId !== "string") {
       return c.json({ error: "invalid_request", reason: "need challengeId" }, 400);

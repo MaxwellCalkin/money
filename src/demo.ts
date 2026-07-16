@@ -7,6 +7,7 @@
  * Run: npm run demo
  */
 import { rmSync } from "node:fs";
+import { generateAgentKeypair, signedHeaders } from "./core/identity.ts";
 import { MoneyNetwork } from "./core/network.ts";
 import { verifyChain } from "./core/receipts.ts";
 import { fmt, usd } from "./core/types.ts";
@@ -48,7 +49,8 @@ async function main() {
     network.fund(max.id, usd(20), "seed-fund");
     ok(`funded ${max.name} (${max.id}) with ${fmt(network.balanceOf(max.id))}`);
 
-    const scout = network.createAgent("scout", max.id);
+    const scoutKeys = generateAgentKeypair();
+    const scout = network.createAgent("scout", max.id, scoutKeys.publicKey);
     const writer = network.createAgent("writer", max.id);
     network.allocate(max.id, scout.id, usd(10), "seed-alloc-scout");
     network.allocate(max.id, writer.id, usd(5), "seed-alloc-writer");
@@ -101,15 +103,22 @@ async function main() {
     }
 
     section("3 · Machine economy: HTTP 402 pay-per-call, over real HTTP");
+    const signedPayChallenge = (challengeId: string, privateKey: string) => {
+      const body = JSON.stringify({ challengeId });
+      return fetch(`${base}/pay-challenge`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...signedHeaders(scout.id, privateKey, { method: "POST", path: "/pay-challenge", body }),
+        },
+        body,
+      });
+    };
     for (let i = 1; i <= 3; i++) {
       const first = await fetch(`${base}/paid/quote`);
       if (first.status !== 402) throw new Error(`expected 402, got ${first.status}`);
       const challenge = (await first.json()) as { challengeId: string; amountMicros: number };
-      const payRes = await fetch(`${base}/pay-challenge`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-agent-id": scout.id },
-        body: JSON.stringify({ challengeId: challenge.challengeId }),
-      });
+      const payRes = await signedPayChallenge(challenge.challengeId, scoutKeys.privateKey);
       const payment = (await payRes.json()) as any;
       if (payment.status !== "paid") throw new Error(`payment denied: ${JSON.stringify(payment)}`);
       const retry = await fetch(`${base}/paid/quote`, {
@@ -130,6 +139,15 @@ async function main() {
       },
     });
     no(`forged/reused receipt → ${reuse.status} (challenges are single-use, receipts verified)`);
+
+    const unsigned = await fetch(`${base}/pay-challenge`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-agent-id": scout.id },
+      body: JSON.stringify({ challengeId: "chl_whatever" }),
+    });
+    no(`unsigned spend claiming scout's id → ${unsigned.status} (identity is the keypair, not a header)`);
+    const stolenId = await signedPayChallenge("chl_whatever", generateAgentKeypair().privateKey);
+    no(`spend signed with the WRONG key → ${stolenId.status} (Ed25519 verify against the registered key)`);
 
     section("4 · Injection throttle: first payment to an unseen payee");
     const sketchy = network.createProvider("sketchy-api");

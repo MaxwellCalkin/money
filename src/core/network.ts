@@ -137,23 +137,26 @@ export class MoneyNetwork {
     return this.createAccount("user", name);
   }
 
-  createAgent(name: string, ownerId: string): Account {
+  /** publicKey (base64 SPKI Ed25519) is the agent's registered identity —
+   *  required to authenticate HTTP spend requests. */
+  createAgent(name: string, ownerId: string, publicKey?: string): Account {
     const owner = this.accounts.get(ownerId);
     if (!owner || owner.kind !== "user") throw new Error(`agent owner ${ownerId} must be a user account`);
-    return this.createAccount("agent", name, ownerId);
+    return this.createAccount("agent", name, ownerId, publicKey);
   }
 
   createProvider(name: string): Account {
     return this.createAccount("provider", name);
   }
 
-  private createAccount(kind: Account["kind"], name: string, ownerId?: string): Account {
+  private createAccount(kind: Account["kind"], name: string, ownerId?: string, publicKey?: string): Account {
     const prefix = { user: "usr", agent: "agt", provider: "prv", external: "ext" }[kind];
     const account: Account = {
       id: `${prefix}_${randomUUID().slice(0, 8)}`,
       kind,
       name,
       ownerId,
+      publicKey,
       createdAt: this.clock(),
     };
     this.accounts.set(account.id, account);

@@ -38,6 +38,9 @@ export interface Account {
   name: string;
   /** Agents are owned by a user; the owner's mandates govern their spending. */
   ownerId?: string;
+  /** Agent identity: base64 SPKI Ed25519 public key registered at creation.
+   *  HTTP spend requests must be signed by the matching private key. */
+  publicKey?: string;
   createdAt: number;
 }
 
