@@ -64,7 +64,7 @@ last two was adversarially reviewed by a multi-agent workflow before implementat
   `money_feed`. The agent holds only its account id (v0), never keys or balances.
 - `src/onboard.ts` — owner-signed setup of user+agent+mandate, prints `.mcp.json`.
 - `src/demo.ts` — the E2E story; `npm run demo` is the best way to see it all work.
-- `test/*.test.ts` — 77 tests across ledger, policy, network, persistence,
+- `test/*.test.ts` — 79 tests across ledger, policy, network, persistence,
   identity, owner-auth, dashboard, bridge.
 
 ## Invariants — do NOT break these
@@ -186,16 +186,33 @@ verifies signatures with single-use nonces. Reshaped by the bridge critique:
 MCP `money_fetch` handles external 402s (`accepts[]`) with a namespaced resume
 map, preferring the internal `challengeId` flow when both are present.
 `MOCK_X402_PORT` on `npm run api` serves a wallet-wired mock seller for local
-dev. 9 tests in `test/bridge.test.ts`; demo section 9 + a real MCP agent buying
+dev. Tests in `test/bridge.test.ts`; demo section 9 + a real MCP agent buying
 from the mock seller, verified end-to-end.
 
-**Known v0 gaps (documented, not bugs):** the MockWallet certifies the bridge's
-accounting and policy, NOT real EIP-712/secp256k1 signing or on-chain
+**Post-implementation review (4-agent adversarial workflow, each finding
+independently verified) found 4 real issues — all fixed in the next commit:**
+- (HIGH) Multi-event log writes weren't crash-atomic: a torn append between a
+  batch's lines could strand funds or brick the log with a duplicate `rev_`
+  key. Fixed: each `emit()` is now ONE JSONL line (a JSON array), so a torn
+  write drops the whole batch (`store.ts`); `sweepExternal` also guards the
+  `replayed` flag. Regression test in `test/persistence.test.ts`.
+- (HIGH) The external `payTo` was unbound from the mandate's payee controls —
+  an injected agent could name a trusted/seen host but redirect the signed
+  authorization to an attacker address. Fixed: the policy payee is now
+  `x402:<host>:<payTo>`, so a fresh destination is a fresh (throttled) payee
+  and a `payeeAllowlist` entry pins the exact pair. Test in `test/bridge.test.ts`.
+- (LOW) `POST /users` now rejects a malformed `publicKey` (can't fill the log
+  with un-authenticatable accounts); rate limiting still production-deferred.
+- (LOW) `payExternal`'s replay branch now returns `denied` for an
+  already-auto-reversed payment instead of a misleading `paid` + dead header.
+
+**Remaining known v0 gaps (documented, not bugs):** the MockWallet certifies the
+bridge's accounting and policy, NOT real EIP-712/secp256k1 signing or on-chain
 settlement finality — mock-green ≠ chain-ready. `external:x402`'s balance is
 face value (gas/fees/peg slippage unmodeled). Subdomain rotation
 (`a1.evil.com`…) still gets a fresh new-payee allowance per hostname.
-`POST /users` is still an unauthenticated durable-log write (needs rate
-limiting in production).
+`POST /users` still needs rate limiting in production. There's no `fsync`, so
+durability is OS-flush-dependent (acceptable for a single-node prototype).
 
 (Real on-chain x402 — a live USDC wallet + facilitator — remains deferred: it
 needs real funds. The client is built and protocol-faithful; only the wallet
@@ -208,7 +225,7 @@ tool is also available — use POSIX syntax there, PowerShell syntax otherwise.
 
 ```
 npm install          # if node_modules is missing
-npm test             # vitest — 77 tests, must stay green
+npm test             # vitest — 79 tests, must stay green
 npm run typecheck    # tsc --noEmit
 npm run demo         # spins up the server on 4021 and runs the full E2E story (9 sections)
 npm run api          # the HTTP server (durable; MOCK_X402_PORT also serves a mock x402 seller)

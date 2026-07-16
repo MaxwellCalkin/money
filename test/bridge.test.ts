@@ -12,6 +12,8 @@ import { usd } from "../src/core/types.ts";
 
 const MOCK_ASSET = "0x00000000000000000000000000000000000c0ffe";
 const PAY_TO = "0x209693bc6afc0c5328ba36faf03c514ef312287c";
+// The policy payee binds host AND destination: a fresh payTo is a fresh payee.
+const PAYEE = `x402:data.example.com:${PAY_TO}`;
 
 const tempDirs: string[] = [];
 function tempLog(): string {
@@ -101,7 +103,7 @@ describe("external x402 bridge", () => {
     expect(paid.status).toBe(200);
     const payment = (await paid.json()) as any;
     expect(payment.state).toBe("pending");
-    expect(payment.receipt.externalPayee).toBe("x402:data.example.com");
+    expect(payment.receipt.externalPayee).toBe(PAYEE);
     expect(network.balanceOf(agent.id)).toBe(usd(10) - usd(0.05));
     expect(network.balanceOf(EXTERNAL_X402)).toBe(usd(0.05));
     expect(network.ledger.zeroSum()).toBe(true);
@@ -163,6 +165,16 @@ describe("external x402 bridge", () => {
     const late = network.confirmExternal(paid.payment.id);
     expect(late.ok).toBe(false);
     expect(network.externalPayment(paid.payment.id)!.state).toBe("reversed");
+
+    // Replaying the create key after the auto-reversal must NOT report "paid"
+    // (and hand back a now-worthless header) — the purchase is refunded, dead.
+    const replayAfterReversal = network.payExternal({
+      agentId: agent.id, host: "data.example.com", payTo: PAY_TO, asset: MOCK_ASSET, network: "mock-local",
+      resource: "/external/report", amount: usd(0.05), idempotencyKey: "x1",
+      paymentHeader: header, reverseAfter: Number(authorization.validBefore) * 1000 + 60_000,
+    });
+    expect(replayAfterReversal.status).toBe("denied");
+    expect(network.balanceOf(agent.id)).toBe(usd(10)); // still refunded, no re-debit
   });
 
   it("the vendor host is the policy payee: throttled on first touch, canonicalized against case/port/dot variants", async () => {
@@ -188,8 +200,24 @@ describe("external x402 bridge", () => {
       requirement: requirement({ maxAmountRequired: String(usd(0.5)) }),
       idempotencyKey: "x3",
     }, agent.id, agentKeys.privateKey);
-    expect(variant.status).toBe(200); // graduated host: above the new-payee cap is fine (within per-tx cap)
-    expect([...network.policy.activeMandateFor(agent.id)!.seenPayees]).toEqual(["x402:data.example.com"]);
+    expect(variant.status).toBe(200); // graduated host+payTo: above the new-payee cap is fine (within per-tx cap)
+    expect([...network.policy.activeMandateFor(agent.id)!.seenPayees]).toEqual([PAYEE]);
+  });
+
+  it("a fresh destination on a seen host is a NEW payee — payTo redirection is throttled", async () => {
+    const { app, agent, agentKeys } = setup();
+    // Graduate the vendor host with a small legit payment to PAY_TO.
+    const legit = await agentPost(app, "/pay-external", { url: "https://data.example.com/x", requirement: requirement(), idempotencyKey: "x1" }, agent.id, agentKeys.privateKey);
+    expect(legit.status).toBe(200);
+    // Same host, but redirect the money to an attacker address above the
+    // new-payee cap: the throttle must treat it as an unseen payee.
+    const redirect = await agentPost(app, "/pay-external", {
+      url: "https://data.example.com/x",
+      requirement: requirement({ payTo: "0xattacker00000000000000000000000000000bad", maxAmountRequired: String(usd(0.5)) }),
+      idempotencyKey: "x2",
+    }, agent.id, agentKeys.privateKey);
+    expect(redirect.status).toBe(402);
+    expect((await redirect.json() as any).code).toBe("new_payee_cap");
   });
 
   it("economic fields are pinned server-side: bad asset, bad network, huge or garbage amounts all rejected", async () => {
@@ -266,7 +294,7 @@ describe("external x402 bridge", () => {
     expect(rebuilt.externalPayment(second.payment.id)!.paymentHeader).toBe(second.payment.paymentHeader);
     // Throttle graduation survives: the host is already seen, so a payment
     // above the new-payee cap is NOT re-throttled.
-    expect([...rebuilt.policy.activeMandateFor(agent.id)!.seenPayees]).toEqual(["x402:data.example.com"]);
+    expect([...rebuilt.policy.activeMandateFor(agent.id)!.seenPayees]).toEqual([PAYEE]);
     const afterRestart = (() => {
       const req = requirement({ maxAmountRequired: String(usd(0.5)) });
       const { header, authorization } = buildXPayment(wallet, req, now.t);
@@ -322,7 +350,7 @@ describe("external x402 bridge", () => {
     // the transfer and receipt (evading the cross-check) — the receipt hash
     // must still catch it.
     const lines = readFileSync(path, "utf8").trimEnd().split("\n");
-    const idx = lines.findIndex((l) => l.includes('"externalPayee":"x402:evil.example.com"') && l.includes('"receipt"'));
+    const idx = lines.findIndex((l) => l.includes('"externalPayee":"x402:evil.example.com:') && l.includes('"receipt"'));
     expect(idx).toBeGreaterThanOrEqual(0);
     const doctored = lines[idx]!.replaceAll("x402:evil.example.com", "x402:trusted.example.com");
     writeFileSync(path, [...lines.slice(0, idx), doctored, ...lines.slice(idx + 1)].join("\n") + "\n");

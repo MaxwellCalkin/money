@@ -26,6 +26,18 @@ export interface SignedRequestParts {
   nonce: string;
 }
 
+/** True if `s` parses as a base64 SPKI Ed25519 public key. Cheap gate so the
+ *  durable log can't be filled with keys that could never verify anything. */
+export function isValidPublicKey(s: unknown): s is string {
+  if (typeof s !== "string" || !s) return false;
+  try {
+    const key = createPublicKey({ key: Buffer.from(s, "base64"), format: "der", type: "spki" });
+    return key.asymmetricKeyType === "ed25519";
+  } catch {
+    return false;
+  }
+}
+
 export function generateAgentKeypair(): { publicKey: string; privateKey: string } {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   return {

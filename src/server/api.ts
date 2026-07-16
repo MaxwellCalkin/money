@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { createMockX402Server } from "../bridge/mock-x402.ts";
 import { buildXPayment, canonicalHostOf, requirementToMicros, type PaymentRequirements } from "../bridge/x402.ts";
 import { MockWallet, type ExternalWallet } from "../bridge/wallet.ts";
-import { verifyRequest } from "../core/identity.ts";
+import { isValidPublicKey, verifyRequest } from "../core/identity.ts";
 import { MoneyNetwork } from "../core/network.ts";
 import { serializeMandate } from "../core/store.ts";
 import { fmt, usd, type ExternalPayResult, type Micros, type PayResult } from "../core/types.ts";
@@ -175,8 +175,11 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
     if (!body || typeof body.name !== "string" || !body.name) {
       return c.json({ error: "invalid_request", reason: "need name" }, 400);
     }
-    if (typeof body.publicKey !== "string" || !body.publicKey) {
-      return c.json({ error: "invalid_request", reason: "need publicKey (base64 SPKI Ed25519) — the owner key authorizes all admin operations" }, 400);
+    // Reject a malformed key here: signup is unauthenticated and writes durable
+    // state, so a garbage key would be a permanent log entry that can never
+    // authenticate. (Production still needs rate limiting on this route.)
+    if (!isValidPublicKey(body.publicKey)) {
+      return c.json({ error: "invalid_request", reason: "need publicKey as a valid base64 SPKI Ed25519 key — the owner key authorizes all admin operations" }, 400);
     }
     return c.json(network.createUser(body.name, body.publicKey));
   });

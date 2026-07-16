@@ -581,13 +581,22 @@ export class MoneyNetwork {
     paymentHeader: string;
     reverseAfter: number;
   }): ExternalPayResult {
-    this.sweepExternal();
     const from = this.mustAccount(req.agentId);
     if (from.kind !== "agent") throw new Error("payExternal is the agent spend path");
     if (!req.idempotencyKey) throw new Error("idempotencyKey is required");
-    const payee = `x402:${req.host}`;
+    if (!req.payTo) throw new Error("payTo is required");
+    // The policy identity binds BOTH the vendor host AND the on-chain
+    // destination. Binding the host alone would let an injected agent name a
+    // trusted/seen host while redirecting the signed authorization to an
+    // attacker address: the new-payee throttle and payeeAllowlist would wave
+    // it through because they'd only ever see the host label, not where the
+    // money actually goes. A fresh destination is a fresh payee.
+    const payee = `x402:${req.host}:${req.payTo.toLowerCase()}`;
 
-    // Replay: return the original record and the SAME payment header.
+    // Replay: return the original record and the SAME payment header. Run the
+    // sweep AFTER this lookup, so a replay observes exactly the state the
+    // original create returned — never a "paid" result for a payment the
+    // top-of-call sweep just auto-reversed.
     const priorId = this.externalByClientKey.get(req.idempotencyKey);
     if (priorId) {
       const payment = this.externalPayments.get(priorId)!;
@@ -596,8 +605,14 @@ export class MoneyNetwork {
       }
       const transfer = this.ledger.findByIdempotencyKey(req.idempotencyKey)!;
       const receipt = this.receipts.get(payment.receiptId)!;
+      // A reversed payment is no longer live — never report it as paid or
+      // hand back its (now worthless, but confusing) authorization header.
+      if (payment.state === "reversed") {
+        return { status: "denied", code: "permit_invalid", reason: "external payment was auto-reversed (unconfirmed past its deadline)" };
+      }
       return { status: "paid", payment, transfer, receipt, replayed: true };
     }
+    this.sweepExternal();
     if (this.ledger.findByIdempotencyKey(req.idempotencyKey)) {
       return { status: "denied", code: "idempotency_conflict", reason: "idempotency key was already used for a non-external payment" };
     }
@@ -713,7 +728,7 @@ export class MoneyNetwork {
     const reversed: ExternalPayment[] = [];
     for (const payment of this.externalPayments.values()) {
       if (payment.state !== "pending" || now <= payment.reverseAfter) continue;
-      const { transfer: reversal } = this.ledger.apply({
+      const { transfer: reversal, replayed } = this.ledger.apply({
         from: EXTERNAL_X402,
         to: payment.agentId,
         amount: payment.amount,
@@ -722,8 +737,13 @@ export class MoneyNetwork {
       });
       payment.state = "reversed";
       payment.reversalTransferId = reversal.id;
+      // If the reversal already applied (e.g. a prior torn write left the
+      // ledger reversed but the state un-flipped), don't re-emit the transfer
+      // — a duplicate rev_ key in the log would make the next replay refuse
+      // to load. Just record the state transition. Matches the !replayed
+      // guard on every other emit site.
       this.emit(
-        { type: "transfer", transfer: reversal },
+        ...(replayed ? [] : [{ type: "transfer" as const, transfer: reversal }]),
         { type: "external_reversed", paymentId: payment.id, reversalTransferId: reversal.id }
       );
       reversed.push(payment);

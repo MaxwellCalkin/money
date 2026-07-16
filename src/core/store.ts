@@ -54,16 +54,26 @@ export class JsonlStore implements EventSink {
     this.healTornTail();
   }
 
+  /**
+   * One emit() = one line = one JSON array of its events. Framing the whole
+   * batch as a single line is what makes it crash-atomic: a torn append can
+   * only ever produce a partial final line with no trailing "\n", which
+   * healTornTail discards WHOLE — never a prefix of the batch. Writing the
+   * events as separate lines (as an earlier version did) let a crash keep
+   * the first event of a pair and drop the second: a reversal without its
+   * bookkeeping, a debit without its record.
+   */
   append(...events: NetworkEvent[]): void {
     if (events.length === 0) return;
-    const lines = events.map((e) => JSON.stringify(e) + "\n").join("");
-    appendFileSync(this.path, lines, "utf8");
+    appendFileSync(this.path, JSON.stringify(events) + "\n", "utf8");
   }
 
   /**
    * Read every event in the log. The constructor already discarded a torn
    * tail, so every remaining line must parse; corruption anywhere is not
-   * survivable for a ledger — throw rather than replay half a log.
+   * survivable for a ledger — throw rather than replay half a log. Each line
+   * is a JSON array of events (a batch); a bare object is also accepted for
+   * logs written by the pre-batch format.
    */
   readAll(): NetworkEvent[] {
     if (!existsSync(this.path)) return [];
@@ -74,7 +84,9 @@ export class JsonlStore implements EventSink {
       const text = lines[i]!.replace(/\r$/, "");
       if (text === "") continue;
       try {
-        events.push(JSON.parse(text) as NetworkEvent);
+        const parsed = JSON.parse(text) as NetworkEvent | NetworkEvent[];
+        if (Array.isArray(parsed)) events.push(...parsed);
+        else events.push(parsed);
       } catch (err) {
         throw new Error(`event log ${this.path} is corrupt at line ${i + 1}: ${(err as Error).message}`);
       }

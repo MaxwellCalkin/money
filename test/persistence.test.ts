@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -173,21 +173,23 @@ describe("persistence (JSONL event sourcing)", () => {
     expect(network.pay({ from: agent.id, to: peer.id, amount: usd(0.25), memo: "m", idempotencyKey: "t1" }).status).toBe("paid");
 
     const lines = readFileSync(path, "utf8").trimEnd().split("\n");
+    // Each line is a batch (JSON array); find the one holding the receipt event.
     const idx = lines.findIndex((l) => l.includes('"receipt"'));
     expect(idx).toBeGreaterThanOrEqual(0);
-    const event = JSON.parse(lines[idx]!) as Extract<NetworkEvent, { type: "transfer" }>;
+    const batch = JSON.parse(lines[idx]!) as NetworkEvent[];
+    const evIdx = batch.findIndex((e) => e.type === "transfer" && "receipt" in e && e.receipt);
+    const withBatch = (mutate: (e: Extract<NetworkEvent, { type: "transfer" }>) => void) => {
+      const copy = structuredClone(batch);
+      mutate(copy[evIdx] as Extract<NetworkEvent, { type: "transfer" }>);
+      return [...lines.slice(0, idx), JSON.stringify(copy), ...lines.slice(idx + 1)].join("\n") + "\n";
+    };
 
     // Tamper the amount consistently in transfer AND receipt → hash chain breaks.
-    const consistent = structuredClone(event);
-    consistent.transfer.amount += 1;
-    consistent.receipt!.amount += 1;
-    writeFileSync(path, [...lines.slice(0, idx), JSON.stringify(consistent), ...lines.slice(idx + 1)].join("\n") + "\n");
+    writeFileSync(path, withBatch((e) => { e.transfer.amount += 1; e.receipt!.amount += 1; }));
     expect(() => MoneyNetwork.open(path, clock)).toThrow(/tampered|corrupt/);
 
     // Tamper only the receipt → transfer/receipt cross-check catches it.
-    const mismatched = structuredClone(event);
-    mismatched.receipt!.amount += 1;
-    writeFileSync(path, [...lines.slice(0, idx), JSON.stringify(mismatched), ...lines.slice(idx + 1)].join("\n") + "\n");
+    writeFileSync(path, withBatch((e) => { e.receipt!.amount += 1; }));
     expect(() => MoneyNetwork.open(path, clock)).toThrow(/does not match/);
   });
 
@@ -271,6 +273,37 @@ describe("persistence (JSONL event sourcing)", () => {
       idempotencyKey: "grant-k1",
     });
     expect(replayed.id).toBe(keyed.id);
+  });
+
+  it("a multi-event emit is one atomic log line — a torn batch is discarded whole, never split", () => {
+    const path = tempLog();
+    const clock = () => Date.UTC(2026, 6, 15, 12);
+    const { network, user, agent, peer } = durableSetup(path, clock);
+    // A pay emits a 2-event batch: {transfer, receipt} + (nothing else here)
+    // but the reversal path and the external bridge emit true 2-event batches.
+    // Use an escalation-free pay, then assert every log line is a JSON array.
+    expect(network.pay({ from: agent.id, to: peer.id, amount: usd(0.25), memo: "m", idempotencyKey: "p1" }).status).toBe("paid");
+    const balances = [user, agent, peer].map((a) => network.balanceOf(a.id));
+
+    const lines = readFileSync(path, "utf8").trimEnd().split("\n");
+    for (const line of lines) {
+      expect(Array.isArray(JSON.parse(line))).toBe(true); // batch framing: one line = one array
+    }
+
+    // Simulate a crash mid-append of the NEXT batch: append a partial line
+    // (no trailing newline) as fsappend would leave on a torn write.
+    const sizeBefore = statSync(path).size;
+    appendFileSync(path, '[{"type":"transfer","transfer":{"id":"tr_tor', "utf8");
+
+    const rebuilt = MoneyNetwork.open(path, clock);
+    // The torn batch is gone wholesale — balances are exactly as before it.
+    expect([user, agent, peer].map((a) => rebuilt.balanceOf(a.id))).toEqual(balances);
+    expect(rebuilt.ledger.zeroSum()).toBe(true);
+    expect(rebuilt.verifyReceipts().ok).toBe(true);
+    // And the log healed back to its pre-torn size, so future appends are clean.
+    expect(statSync(path).size).toBe(sizeBefore);
+    rebuilt.pay({ from: agent.id, to: peer.id, amount: usd(0.1), memo: "m", idempotencyKey: "p2" });
+    expect(MoneyNetwork.open(path, clock).balanceOf(peer.id)).toBe(rebuilt.balanceOf(peer.id));
   });
 
   it("idempotent retries of funding and allocation append only one event", () => {
