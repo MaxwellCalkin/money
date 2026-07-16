@@ -20,8 +20,11 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | Ledger | `src/core/ledger.ts` | Double-entry over integer micro-dollars, idempotency-keyed, zero-sum invariant |
 | Policy | `src/core/policy.ts` | Mandates (budget, per-tx cap, daily cap, escalation line, new-payee throttle, allowlist, expiry) → single-use permits bound to exact payee+amount |
 | Receipts | `src/core/receipts.ts` | Hash-chained evidence log; tamper detection |
+| Persistence | `src/core/store.ts` | Append-only JSONL event log; replay rebuilds everything and refuses tampered logs |
+| Identity | `src/core/identity.ts` | Ed25519 keypair per agent; spend requests are signed and verified against the registered key |
 | Network | `src/core/network.ts` | The facade: accounts, funding, agent-to-agent `pay()`, human `approveAndPay()`, 402 challenges |
 | HTTP API | `src/server/api.ts` | Hono server on **:4021** — network API + demo paid endpoints behind an x402-shaped 402 gate |
+| Dashboard | `src/server/dashboard.ts` | Live view at `/dashboard`: balances, mandates, real-time receipt feed over SSE |
 | MCP server | `src/mcp/server.ts` | `money_balance`, `money_pay`, `money_fetch` (auto-pays 402s within mandate), `money_feed` |
 | Demo | `src/demo.ts` | The full story end-to-end, including denial and tamper cases |
 
@@ -29,10 +32,13 @@ When both sides of a transaction are on the same ledger, a payment is a database
 
 ```bash
 npm install
-npm test         # ledger/policy/network invariants
+npm test         # ledger/policy/network/persistence/identity invariants
 npm run demo     # the whole story in one script
-npm run api      # just the HTTP server on :4021
+npm run api      # the HTTP server on :4021 (durable: data/events.jsonl)
 ```
+
+Then open **http://127.0.0.1:4021/dashboard** to watch balances, mandates, and
+receipts update live as agents pay.
 
 ### Give a Claude Code agent a wallet
 

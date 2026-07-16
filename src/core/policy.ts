@@ -132,6 +132,10 @@ export class PolicyEngine {
     return this.mandates.get(mandateId);
   }
 
+  listMandates(): Mandate[] {
+    return [...this.mandates.values()];
+  }
+
   /** The newest non-revoked mandate for an agent governs its spending. */
   activeMandateFor(agentId: string): Mandate | undefined {
     let latest: Mandate | undefined;

@@ -1,10 +1,13 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import type { Context, Next } from "hono";
+import { streamSSE } from "hono/streaming";
 import { pathToFileURL } from "node:url";
 import { verifyRequest } from "../core/identity.ts";
 import { MoneyNetwork } from "../core/network.ts";
+import { serializeMandate } from "../core/store.ts";
 import { fmt, usd, type Micros, type PayResult } from "../core/types.ts";
+import { dashboardHtml } from "./dashboard.ts";
 
 /** Signed requests must be fresher than this (and nonces are remembered this long). */
 const AUTH_WINDOW_MS = 2 * 60_000;
@@ -252,6 +255,58 @@ export function createApi(network: MoneyNetwork) {
 
   app.get("/verify", (c) => c.json(network.verifyReceipts()));
 
+  // ── Dashboard (read-only owner view: balances, mandates, live receipts) ──
+
+  const snapshot = () => ({
+    now: Date.now(),
+    zeroSum: network.ledger.zeroSum(),
+    receiptsOk: network.verifyReceipts().ok,
+    receiptCount: network.receipts.length,
+    accounts: network.listAccounts().map((a) => ({ ...a, balanceMicros: network.balanceOf(a.id) })),
+    mandates: network.listMandates().map(serializeMandate),
+    feed: network.feed(25),
+  });
+
+  app.get("/dashboard", (c) => c.html(dashboardHtml));
+  app.get("/dashboard/state", (c) => c.json(snapshot()));
+
+  // SSE: push a fresh snapshot whenever money moves (coalesced to 250ms),
+  // plus a heartbeat every ~15s so proxies don't kill the idle stream.
+  app.get("/dashboard/events", (c) =>
+    streamSSE(c, async (stream) => {
+      let dirty = false;
+      let alive = true;
+      const unsubscribe = network.onEvent(() => {
+        dirty = true;
+      });
+      stream.onAbort(() => {
+        alive = false;
+        unsubscribe();
+      });
+      const push = async (event: string, data: string) => {
+        try {
+          await stream.writeSSE({ event, data });
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      alive = (await push("state", JSON.stringify(snapshot()))) && alive;
+      let ticks = 0;
+      while (alive && !stream.aborted) {
+        await stream.sleep(250);
+        ticks++;
+        if (dirty) {
+          dirty = false;
+          if (!(await push("state", JSON.stringify(snapshot())))) break;
+        } else if (ticks % 60 === 0) {
+          if (!(await push("ping", String(Date.now())))) break;
+        }
+      }
+      unsubscribe();
+    })
+  );
+
   // ── Demo paid endpoints (what an agent actually buys) ───────────────────
 
   app.get("/paid/quote", paid(usd(0.02), "/paid/quote"), (c) =>
@@ -285,6 +340,7 @@ export function startServer(network?: MoneyNetwork, port = Number(process.env.PO
   // so clients should use http://127.0.0.1:<port>.
   const server = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" });
   console.log(`money network listening on http://127.0.0.1:${port} (demo provider: ${provider.id})`);
+  console.log(`live dashboard at http://127.0.0.1:${port}/dashboard`);
   return { server, network, provider, port };
 }
 

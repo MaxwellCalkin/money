@@ -24,7 +24,7 @@ stablecoin rails can't touch that economically. External rails only matter at th
 A complete v0 prototype exists and works end-to-end: double-entry ledger, user-signed
 mandates → single-use permits, hash-chained receipts, agent-to-agent payments, an
 x402-shaped HTTP 402 pay-per-call flow over real HTTP, an MCP server so a Claude Code
-agent gets a wallet, one-command onboarding, an E2E demo, and 53 passing tests. It
+agent gets a wallet, one-command onboarding, an E2E demo, and 58 passing tests. It
 survived a 35-agent adversarial review (22 findings, all fixed).
 
 - **Git:** private repo `https://github.com/MaxwellCalkin/money`, remote `origin`,
@@ -50,14 +50,18 @@ survived a 35-agent adversarial review (22 findings, all fixed).
   ties it together.
 - `src/core/network.ts` — `MoneyNetwork`, the facade that ties it together (the
   closed loop: accounts, funding, allocation, mandates, `pay`, 402 challenges).
-- `src/server/api.ts` — Hono HTTP API + the `paid()` x402 middleware.
+- `src/server/api.ts` — Hono HTTP API + the `paid()` x402 middleware + signed-
+  request auth + the dashboard routes (`/dashboard`, `/dashboard/state`,
+  `/dashboard/events` SSE).
+- `src/server/dashboard.ts` — the self-contained dashboard page (inline CSS/JS).
 - `src/mcp/server.ts` — MCP server: `money_balance`, `money_pay`, `money_fetch`,
   `money_feed`. The agent holds only its account id (v0), never keys or balances.
 - `src/onboard.ts` — creates user+agent+mandate, prints `.mcp.json` to paste.
 - `src/demo.ts` — the E2E story; `npm run demo` is the best way to see it all work.
 - `src/core/identity.ts` — Ed25519 agent identity: keypair generation, request
   signing/verification (method+path+sha256(body)+ts+nonce).
-- `test/*.test.ts` — 53 tests across ledger, policy, network, persistence, identity.
+- `test/*.test.ts` — 58 tests across ledger, policy, network, persistence,
+  identity, dashboard.
 
 ## Invariants — do NOT break these
 
@@ -112,12 +116,18 @@ rejected); demo section 3 shows unsigned + wrong-key spends bouncing live.
 Note: creating users/agents/mandates over HTTP is still unauthenticated in v0 —
 owner auth is future work, flagged in the README.
 
-### 3. Live dashboard — make it visible
+### 3. Live dashboard — DONE
 
-A small self-contained web view served by the Hono app: balances, mandates, and a
-live receipt feed (Server-Sent Events for real-time updates). Watching agents pay
-each other in real time is the thing that makes this feel like a company. Keep it
-one page, no external CDNs.
+`http://127.0.0.1:4021/dashboard` — one self-contained page (inline CSS/JS, zero
+external requests) served by the Hono app: balances by account kind, mandate
+cards with budget/daily progress bars and active/revoked/expired status, and a
+newest-first live receipt feed. Real-time via SSE: `network.onEvent()` observers
+hook the same `emit()` every mutation funnels through; `/dashboard/events`
+pushes a full state snapshot coalesced to 250ms plus a 15s heartbeat;
+`/dashboard/state` serves the JSON. All agent-controlled strings (memos, names)
+are HTML-escaped — a payment memo must not script the owner's dashboard.
+Verified live in a browser: feed streams while agents pay, revoking a mandate
+flips its badge without a reload. Tests in `test/dashboard.test.ts`.
 
 (Deliberately deferred: a real external-x402 bridge to the live machine economy — it
 needs real USDC/wallets/funds, which is out of scope for a local prototype. Build the

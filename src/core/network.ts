@@ -83,8 +83,26 @@ export class MoneyNetwork {
     return network;
   }
 
+  /** Live observers (dashboard SSE, etc.). Distinct from the durable sink. */
+  private listeners = new Set<(e: NetworkEvent) => void>();
+
+  /** Subscribe to every state mutation as it commits. Returns unsubscribe. */
+  onEvent(listener: (e: NetworkEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
   private emit(...events: NetworkEvent[]): void {
     this.sink?.append(...events);
+    for (const e of events) {
+      for (const listener of this.listeners) {
+        try {
+          listener(e);
+        } catch {
+          // An observer must never be able to break a payment.
+        }
+      }
+    }
   }
 
   /** Rebuild state from the log. Raw application only — no ids, no clock reads, no re-validation, no re-logging. */
@@ -226,6 +244,10 @@ export class MoneyNetwork {
     const mandate = this.policy.grant(input);
     this.emit({ type: "mandate_granted", mandate: serializeMandate(mandate) });
     return mandate;
+  }
+
+  listMandates(): Mandate[] {
+    return this.policy.listMandates();
   }
 
   /** The owner's kill switch. Idempotent: re-revoking is a no-op. */
