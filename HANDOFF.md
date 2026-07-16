@@ -1,0 +1,155 @@
+# Handoff — `money`: Venmo for agents
+
+You are taking over an in-progress project. Read this file, then read the key
+source files it points to, run the test suite to confirm it's green, and
+continue with the "Next up" work. Everything you need is in this repo plus the
+project memory.
+
+## The mission
+
+Build a **closed-loop payment network for AI agents** — "Venmo for agents." Users
+set aside funds; their agents spend at will under user-signed budgets; agents pay
+each other and pay APIs/CLIs. The bet is a **very high volume of low-cost
+transactions** (agent→agent and agent→API). The owner (Max) is aiming big — treat
+this as the foundation of a real company, so correctness and security matter more
+than speed.
+
+**Why closed-loop is the whole thesis:** when both parties to a payment are on our
+ledger, a payment is a database row — instant, free, sub-cent capable. Card and
+stablecoin rails can't touch that economically. External rails only matter at the
+*edges* (top-up / cash-out). This is how PayPal, Alipay, and M-Pesa actually won.
+
+## Current state (v0 — working, tested, pushed)
+
+A complete v0 prototype exists and works end-to-end: double-entry ledger, user-signed
+mandates → single-use permits, hash-chained receipts, agent-to-agent payments, an
+x402-shaped HTTP 402 pay-per-call flow over real HTTP, an MCP server so a Claude Code
+agent gets a wallet, one-command onboarding, an E2E demo, and 45 passing tests. It
+survived a 35-agent adversarial review (22 findings, all fixed).
+
+- **Git:** private repo `https://github.com/MaxwellCalkin/money`, remote `origin`,
+  branch `main`. Working tree may have uncommitted edits — check `git status`.
+- **Durable.** State survives restarts via event sourcing to an append-only JSONL
+  log (`data/events.jsonl` by default, `MONEY_DATA` to override; the demo uses
+  `data/demo-events.jsonl`, wiped per run). Replay rebuilds everything and verifies
+  zero-sum + the receipt chain on boot — a tampered or corrupt log refuses to load.
+  Torn final lines (crash mid-append) are truncated away WAL-style. Not persisted
+  (deliberate): 402 challenges and unconsumed permits — both short-TTL; a lost paid
+  challenge means the agent may re-pay once, bounded by the challenge price.
+
+### File map (read these first, in this order)
+
+- `src/core/types.ts` — money math (**integer micro-dollars**, `1_000_000` micros =
+  $1) and all domain types. Floats never touch money.
+- `src/core/ledger.ts` — double-entry ledger; idempotency-keyed; zero-sum invariant.
+- `src/core/policy.ts` — **the envelope**: mandates, caps, escalation, the new-payee
+  injection throttle, single-use permits. The security boundary lives here.
+- `src/core/receipts.ts` — SHA-256 hash-chained receipt log (the evidence chain).
+- `src/core/store.ts` — event types + `JsonlStore` (append-only JSONL, torn-tail
+  healing). Raw replay methods live on ledger/policy/receipts; `MoneyNetwork.open()`
+  ties it together.
+- `src/core/network.ts` — `MoneyNetwork`, the facade that ties it together (the
+  closed loop: accounts, funding, allocation, mandates, `pay`, 402 challenges).
+- `src/server/api.ts` — Hono HTTP API + the `paid()` x402 middleware.
+- `src/mcp/server.ts` — MCP server: `money_balance`, `money_pay`, `money_fetch`,
+  `money_feed`. The agent holds only its account id (v0), never keys or balances.
+- `src/onboard.ts` — creates user+agent+mandate, prints `.mcp.json` to paste.
+- `src/demo.ts` — the E2E story; `npm run demo` is the best way to see it all work.
+- `test/*.test.ts` — 45 tests across ledger, policy, network, persistence.
+
+## Invariants — do NOT break these
+
+1. **Money is integer micros.** Never use floats for amounts. `assertMicros` guards
+   both transfer amounts and resulting balances (past 2^53 micros floats lose money).
+2. **The envelope is the security boundary, not the model.** Assume the agent is
+   prompt-injected. All limits are enforced by deterministic code the model can't
+   reach. Mandates are created/widened only by the owner, never from agent context.
+3. **Everything money-moving is idempotent.** Clients supply the key; retrying a key
+   returns the original outcome, never a second spend. Reserved key namespaces:
+   `chl_` (challenges) and `rev_` (reversals) — client keys can't use them.
+4. **Closed-loop zero-sum.** Every balance sums to zero; only `EXTERNAL_FUNDING` may
+   go negative (it's the edge of the loop). `network.ledger.zeroSum()` must hold.
+5. **Receipt chain stays verifiable.** `network.verifyReceipts()` must stay `ok`.
+6. **Single-owner loop only.** Today all agents belong to ONE user paying each other
+   and paying providers — that's a user moving their own money, NOT money
+   transmission. Cross-owner agent-to-agent payments ARE money transmission and need
+   licensing / a sponsor-bank structure. **Do not cross that line in code without
+   explicitly flagging it to Max.** Compliant sequencing = single-owner first.
+
+## Next up (agreed plan, in priority order)
+
+Build these one verified layer at a time. Commit + push after each. Prefer adding
+regression tests for every new guarantee.
+
+### 1. Persistence — DONE
+
+Implemented exactly as designed: append-only JSONL event log, concrete outcomes
+stored per event, policy counters rebuilt from transfers on replay, raw-apply
+methods (`Ledger.insert`, `ReceiptChain.insertRaw`, `PolicyEngine.loadMandate` /
+`replaySpend`), `MoneyNetwork.open(path)`. Extras beyond the plan: replay verifies
+zero-sum + receipt chain and cross-checks each receipt against its transfer (a
+tampered log throws instead of loading); torn final lines are truncated WAL-style;
+reversal pairs are written in one atomic append along with the denial their key
+must replay to; `network.revokeMandate()` + `POST /mandates/:id/revoke` so the
+kill switch is durable and reachable. 9 persistence tests in
+`test/persistence.test.ts`; demo section 8 rebuilds from the log live.
+
+### 2. Agent identity — replace the trust-me header
+
+`x-agent-id` is a placeholder, not auth — anyone can claim any agent. Add **Ed25519
+keypairs per agent** (`node:crypto`), sign requests (Web-Bot-Auth-style signed
+headers over method+path+body+timestamp is fine), and verify server-side against the
+agent's registered public key. Onboarding generates the keypair, registers the public
+key, hands the private key to the agent's MCP config. A forged/unsigned request must
+be rejected — prove it with a test.
+
+### 3. Live dashboard — make it visible
+
+A small self-contained web view served by the Hono app: balances, mandates, and a
+live receipt feed (Server-Sent Events for real-time updates). Watching agents pay
+each other in real time is the thing that makes this feel like a company. Keep it
+one page, no external CDNs.
+
+(Deliberately deferred: a real external-x402 bridge to the live machine economy — it
+needs real USDC/wallets/funds, which is out of scope for a local prototype. Build the
+protocol client against a mock when the time comes; don't move real money.)
+
+## How to run / verify
+
+Environment: **Windows, Node 18.3, npm 8.** Shell is PowerShell (primary); a Bash
+tool is also available — use POSIX syntax there, PowerShell syntax otherwise.
+
+```
+npm install          # if node_modules is missing
+npm test             # vitest — 36 tests, must stay green
+npm run typecheck    # tsc --noEmit
+npm run demo         # spins up the server on 4021 and runs the full E2E story
+npm run api          # just the HTTP server
+npm run onboard      # create user+agent+mandate, print .mcp.json
+npm run mcp          # MCP server (needs MONEY_AGENT_ID env)
+```
+
+## Environment gotchas (these cost real time — heed them)
+
+- **Bind `127.0.0.1`, not `localhost`.** Node 18's `fetch` resolves `localhost` to
+  `::1` (IPv6) first; the server binds IPv4. Clients must hit `http://127.0.0.1:4021`.
+- **Port 4021** (402 + 1).
+- **ESM project** (`"type": "module"`); imports use explicit `.ts` extensions and
+  `tsconfig` has `allowImportingTsExtensions`. Run TS via `tsx`.
+- **Pinned deps that matter:** `typescript@5.6`, `vitest@2`, `@hono/node-server@1.8.2`,
+  `hono`, `@modelcontextprotocol/sdk`, `zod`, `tsx`, and `@rollup/rollup-win32-x64-msvc`
+  as a devDep (works around an npm optional-deps bug that otherwise breaks vitest).
+- **`gh` CLI is NOT installed.** Git auth goes through the GitHub Credential Manager
+  (wincred). It only hands the token to `git credential fill` when interactivity is
+  allowed — run that time-boxed (e.g. `timeout 25 git credential fill`) rather than
+  fully non-interactive, which returns nothing. `git push` itself works fine.
+- Project memory lives under the Claude project dir and loads automatically for this
+  repo; it has the running project log. Keep it updated as you go.
+
+## First moves for the new agent
+
+1. `git status` and `npm test` — confirm you're starting from green.
+2. Skim the file map above in order.
+3. Implement persistence (task 1), add the restart test, run `npm run demo` and
+   `npm test`, then commit + push.
+4. Then identity, then the dashboard.

@@ -5,7 +5,8 @@ import { pathToFileURL } from "node:url";
 import { MoneyNetwork } from "../core/network.ts";
 import { fmt, usd, type Micros, type PayResult } from "../core/types.ts";
 
-export const DEFAULT_PORT = 4021; // 402 + 1 node
+export const DEFAULT_PORT = 4021; // 402 + 1
+export const DEFAULT_DATA = "data/events.jsonl";
 
 /** Map a PayResult to an HTTP status: client errors are 4xx, "pay up" is 402. */
 function payStatus(result: PayResult): 200 | 400 | 402 | 409 {
@@ -35,8 +36,11 @@ export function createApi(network: MoneyNetwork) {
   // never a bare stack trace.
   app.onError((err, c) => c.json({ error: "internal_error", message: err.message }, 500));
 
-  // Demo provider that owns the paid endpoints on this server.
-  const provider = network.createProvider("quote-api");
+  // Demo provider that owns the paid endpoints on this server. Reused across
+  // restarts — a durable network must not mint a new provider every boot.
+  const provider =
+    network.listAccounts().find((a) => a.kind === "provider" && a.name === "quote-api") ??
+    network.createProvider("quote-api");
 
   const agentId = (c: Context): string | undefined => c.req.header("x-agent-id") ?? undefined;
 
@@ -148,6 +152,18 @@ export function createApi(network: MoneyNetwork) {
     return c.json({ ...mandate, seenPayees: [...mandate.seenPayees] });
   });
 
+  // The owner's kill switch. In production this sits behind owner auth
+  // (passkey ceremony); v0 has no owner auth yet — see the identity milestone.
+  app.post("/mandates/:id/revoke", (c) => {
+    const id = c.req.param("id");
+    try {
+      network.revokeMandate(id);
+    } catch {
+      return c.json({ error: `unknown mandate ${id}` }, 404);
+    }
+    return c.json({ ok: true, mandateId: id });
+  });
+
   app.post("/pay", async (c) => {
     const from = agentId(c);
     if (!from) return c.json({ error: "missing x-agent-id header" }, 401);
@@ -209,7 +225,9 @@ export function createApi(network: MoneyNetwork) {
   return { app, provider };
 }
 
-export function startServer(network = new MoneyNetwork(), port = Number(process.env.PORT ?? DEFAULT_PORT)) {
+export function startServer(network?: MoneyNetwork, port = Number(process.env.PORT ?? DEFAULT_PORT)) {
+  // Durable by default: state survives a restart via the JSONL event log.
+  network ??= MoneyNetwork.open(process.env.MONEY_DATA ?? DEFAULT_DATA);
   const { app, provider } = createApi(network);
   // Bind IPv4 explicitly: Node 18's fetch resolves "localhost" to ::1 first,
   // so clients should use http://127.0.0.1:<port>.

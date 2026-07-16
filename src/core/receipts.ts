@@ -27,6 +27,15 @@ export class ReceiptChain {
     return receipt;
   }
 
+  /**
+   * Replay-only: append a receipt recorded in the event log verbatim — no
+   * re-hashing. Chain integrity is checked after replay via verify(), so a
+   * tampered log fails to load instead of loading with a broken chain.
+   */
+  insertRaw(receipt: Receipt): void {
+    this.chain.push(receipt);
+  }
+
   get(id: string): Receipt | undefined {
     return this.chain.find((r) => r.id === id);
   }

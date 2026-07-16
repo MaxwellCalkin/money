@@ -73,7 +73,7 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 
 ## Honest v0 shortcuts (the roadmap is the inverse)
 
-- In-memory state; no persistence (→ Postgres, event-sourced from the receipt chain).
+- Persistence is a local JSONL event log (`data/events.jsonl`, replayed and integrity-checked on boot; `MONEY_DATA` overrides the path) — durable across restarts, but single-node (→ Postgres, same event-sourced shape).
 - `x-agent-id` header is identification, not authentication (→ signed requests / Web Bot Auth keypairs per agent, chained to a KYC'd owner).
 - Single-node; network and API share a process (→ policy/signer split into separate trust domains, as in the design brief).
 - No external rails: top-up is simulated (→ card/ACH via sponsor-bank FBO; USDC leg for x402 interop).

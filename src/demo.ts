@@ -6,10 +6,14 @@
  *
  * Run: npm run demo
  */
+import { rmSync } from "node:fs";
 import { MoneyNetwork } from "./core/network.ts";
 import { verifyChain } from "./core/receipts.ts";
 import { fmt, usd } from "./core/types.ts";
 import { startServer } from "./server/api.ts";
+
+/** The demo runs on its own event log, wiped at start for a clean story. */
+const DEMO_LOG = "data/demo-events.jsonl";
 
 const line = (s = "") => console.log(s);
 const section = (title: string) => {
@@ -32,7 +36,8 @@ async function waitForServer(url: string, attempts = 50): Promise<void> {
 }
 
 async function main() {
-  const network = new MoneyNetwork();
+  rmSync(DEMO_LOG, { force: true });
+  const network = MoneyNetwork.open(DEMO_LOG);
   const { server, provider, port } = startServer(network, 4021);
   const base = `http://127.0.0.1:${port}`;
   await waitForServer(`${base}/verify`);
@@ -190,6 +195,25 @@ async function main() {
     if (tampered[0]) tampered[0].amount += 1;
     const detect = verifyChain(tampered);
     no(`tamper one historic amount by a single micro → chain breaks at seq ${detect.ok ? "?" : detect.brokenAt}`);
+
+    section("8 · Durability: kill the process, keep the money");
+    const rebuilt = MoneyNetwork.open(DEMO_LOG);
+    const balancesMatch = [max, scout, writer, provider].every(
+      (a) => rebuilt.balanceOf(a.id) === network.balanceOf(a.id)
+    );
+    ok(`rebuilt a fresh network from ${DEMO_LOG}: balances ${balancesMatch ? "identical" : "DIFFER (bug!)"}`);
+    ok(`rebuilt receipt chain (${rebuilt.receipts.length} receipts): ${rebuilt.verifyReceipts().ok ? "intact" : "BROKEN"}`);
+    ok(`rebuilt ledger zero-sum: ${rebuilt.ledger.zeroSum()}`);
+    const survivedReplay = rebuilt.pay({
+      from: scout.id,
+      to: writer.id,
+      amount: usd(0.25),
+      memo: "subtask: summarize sources for the pricing report",
+      idempotencyKey: "task-1441-summarize",
+    });
+    if (survivedReplay.status === "paid" && survivedReplay.replayed) {
+      ok("idempotency survives restart: the old key returns the original receipt, no double spend");
+    }
 
     section("Done");
     line("  One balance. Agents paying agents and paying APIs, at will,");

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Ledger, InsufficientFundsError } from "./ledger.ts";
 import { PolicyEngine, type MandateGrant } from "./policy.ts";
 import { ReceiptChain } from "./receipts.ts";
+import { JsonlStore, serializeMandate, type EventSink, type NetworkEvent } from "./store.ts";
 import {
   assertMicros,
   type Account,
@@ -42,7 +43,13 @@ export class MoneyNetwork {
   /** idempotencyKey → denial, for keys whose transfer was reversed after apply. */
   private deniedByIdempotency = new Map<string, PayResult>();
 
-  constructor(private clock: () => number = Date.now) {
+  /**
+   * A bare `new MoneyNetwork()` is in-memory only (state dies with the
+   * process) — fine for tests and demos. For a durable network use
+   * MoneyNetwork.open(), which replays the log before attaching the sink;
+   * passing a sink here without replaying its existing log is a misuse.
+   */
+  constructor(private clock: () => number = Date.now, private sink?: EventSink) {
     this.ledger = new Ledger(clock);
     // Same-owner payees (the owner, or sibling agents they own) are inside
     // the trust domain: paying them never moves money out of the owner's
@@ -59,6 +66,69 @@ export class MoneyNetwork {
       createdAt: clock(),
     });
     this.ledger.ensureAccount(EXTERNAL_FUNDING);
+  }
+
+  // ── Durability ──────────────────────────────────────────────────────────
+
+  /**
+   * Open a durable network backed by an append-only JSONL event log. Replays
+   * the log to rebuild all state (accounts, ledger, mandates with counters,
+   * receipt chain), verifies the invariants, then appends every future
+   * mutation to the same log.
+   */
+  static open(path: string, clock: () => number = Date.now): MoneyNetwork {
+    const store = new JsonlStore(path);
+    const network = new MoneyNetwork(clock, store);
+    network.replay(store.readAll());
+    return network;
+  }
+
+  private emit(...events: NetworkEvent[]): void {
+    this.sink?.append(...events);
+  }
+
+  /** Rebuild state from the log. Raw application only — no ids, no clock reads, no re-validation, no re-logging. */
+  private replay(events: NetworkEvent[]): void {
+    for (const e of events) {
+      switch (e.type) {
+        case "account_created":
+          this.accounts.set(e.account.id, e.account);
+          this.ledger.ensureAccount(e.account.id);
+          break;
+        case "mandate_granted":
+          this.policy.loadMandate(e.mandate);
+          break;
+        case "mandate_revoked":
+          this.policy.revoke(e.mandateId);
+          break;
+        case "transfer":
+          this.ledger.insert(e.transfer);
+          if (e.receipt) {
+            const r = e.receipt;
+            // The receipt must describe its transfer — a log where they
+            // disagree has been tampered with, whatever the hashes say.
+            if (r.transferId !== e.transfer.id || r.from !== e.transfer.from || r.to !== e.transfer.to || r.amount !== e.transfer.amount) {
+              throw new Error(`replay: receipt ${r.id} does not match transfer ${e.transfer.id} — the event log is corrupt`);
+            }
+            this.receipts.insertRaw(r);
+            this.receiptByIdempotency.set(e.transfer.idempotencyKey, r.id);
+            if (r.mandateId) {
+              this.policy.replaySpend(r.mandateId, e.transfer.to, e.transfer.amount, e.transfer.ts);
+            }
+          }
+          if (e.denial) this.deniedByIdempotency.set(e.denial.forKey, e.denial.result);
+          break;
+      }
+    }
+    // A rebuilt network must satisfy the same invariants as a live one; a
+    // tampered or corrupt log must fail loudly here, not misprice later.
+    if (!this.ledger.zeroSum()) {
+      throw new Error("replay: rebuilt ledger is not zero-sum — the event log is corrupt");
+    }
+    const v = this.receipts.verify();
+    if (!v.ok) {
+      throw new Error(`replay: rebuilt receipt chain is broken at seq ${v.brokenAt} — the event log was tampered with or corrupted`);
+    }
   }
 
   // ── Accounts ────────────────────────────────────────────────────────────
@@ -88,11 +158,16 @@ export class MoneyNetwork {
     };
     this.accounts.set(account.id, account);
     this.ledger.ensureAccount(account.id);
+    this.emit({ type: "account_created", account });
     return account;
   }
 
   account(id: string): Account | undefined {
     return this.accounts.get(id);
+  }
+
+  listAccounts(): Account[] {
+    return [...this.accounts.values()];
   }
 
   balanceOf(id: string): Micros {
@@ -106,10 +181,11 @@ export class MoneyNetwork {
     assertMicros(amount);
     const account = this.mustAccount(accountId);
     if (account.kind !== "user") throw new Error("only user accounts can be funded from outside");
-    const { transfer } = this.ledger.apply(
+    const { transfer, replayed } = this.ledger.apply(
       { from: EXTERNAL_FUNDING, to: accountId, amount, memo: "top-up", idempotencyKey },
       { allowOverdraft: true }
     );
+    if (!replayed) this.emit({ type: "transfer", transfer });
     return transfer;
   }
 
@@ -124,13 +200,14 @@ export class MoneyNetwork {
     if (agent.kind !== "agent" || agent.ownerId !== userId) {
       throw new Error("allocate: destination must be an agent owned by this user");
     }
-    const { transfer } = this.ledger.apply({
+    const { transfer, replayed } = this.ledger.apply({
       from: userId,
       to: agentId,
       amount,
       memo: "allocation from owner",
       idempotencyKey,
     });
+    if (!replayed) this.emit({ type: "transfer", transfer });
     return transfer;
   }
 
@@ -143,7 +220,18 @@ export class MoneyNetwork {
     if (agent.kind !== "agent" || agent.ownerId !== user.id) {
       throw new Error("mandates can only be granted to the user's own agents");
     }
-    return this.policy.grant(input);
+    const mandate = this.policy.grant(input);
+    this.emit({ type: "mandate_granted", mandate: serializeMandate(mandate) });
+    return mandate;
+  }
+
+  /** The owner's kill switch. Idempotent: re-revoking is a no-op. */
+  revokeMandate(mandateId: string): void {
+    const mandate = this.policy.get(mandateId);
+    if (!mandate) throw new Error(`unknown mandate: ${mandateId}`);
+    if (mandate.revoked) return;
+    this.policy.revoke(mandateId);
+    this.emit({ type: "mandate_revoked", mandateId });
   }
 
   // ── Paying (the core loop) ──────────────────────────────────────────────
@@ -249,7 +337,7 @@ export class MoneyNetwork {
       // The transfer applied but the permit re-check failed — reverse it.
       // Reversal key derives from the server-generated transfer id, so a
       // client-chosen idempotency key can never collide with it.
-      this.ledger.apply({
+      const { transfer: reversal } = this.ledger.apply({
         from: req.to,
         to: req.from,
         amount: req.amount,
@@ -261,6 +349,12 @@ export class MoneyNetwork {
       // The key now maps to a reversed transfer with no receipt — remember the
       // denial so replays of this key return it instead of crashing.
       this.deniedByIdempotency.set(req.idempotencyKey, denial);
+      // One atomic write: the applied transfer, its reversal, and the denial
+      // the original key must replay to after a restart.
+      this.emit(
+        { type: "transfer", transfer },
+        { type: "transfer", transfer: reversal, denial: { forKey: req.idempotencyKey, result: denial } }
+      );
       return denial;
     }
 
@@ -274,6 +368,7 @@ export class MoneyNetwork {
       permitId,
     });
     this.receiptByIdempotency.set(req.idempotencyKey, receipt.id);
+    this.emit({ type: "transfer", transfer, receipt });
 
     return { status: "paid", transfer, receipt, replayed: false };
   }

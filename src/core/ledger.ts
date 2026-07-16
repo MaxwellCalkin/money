@@ -94,6 +94,28 @@ export class Ledger {
     return { transfer, replayed: false };
   }
 
+  /**
+   * Replay-only: apply a transfer recorded in the event log verbatim — no id
+   * or clock generation, no overdraft check (the log records what actually
+   * happened, including the external funding boundary going negative).
+   * Arithmetic safety still holds: resulting balances must be safe integers.
+   */
+  insert(transfer: Transfer): void {
+    if (this.byIdempotency.has(transfer.idempotencyKey)) {
+      throw new Error(`replay: idempotency key ${transfer.idempotencyKey} appears twice in the log`);
+    }
+    this.ensureAccount(transfer.from);
+    this.ensureAccount(transfer.to);
+    const newFrom = this.balance(transfer.from) - transfer.amount;
+    const newTo = this.balance(transfer.to) + transfer.amount;
+    assertMicros(newFrom);
+    assertMicros(newTo);
+    this.balances.set(transfer.from, newFrom);
+    this.balances.set(transfer.to, newTo);
+    this.transfers.push(transfer);
+    this.byIdempotency.set(transfer.idempotencyKey, transfer);
+  }
+
   findByIdempotencyKey(key: string): Transfer | undefined {
     return this.byIdempotency.get(key);
   }

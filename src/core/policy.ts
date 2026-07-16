@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { StoredMandate } from "./store.ts";
 import {
   assertMicros,
   fmt,
@@ -83,6 +84,43 @@ export class PolicyEngine {
     };
     this.mandates.set(mandate.id, mandate);
     return mandate;
+  }
+
+  /**
+   * Replay-only: load a mandate recorded in the event log. Applies the same
+   * supersede rule as grant() — replaying the grants in log order must
+   * revoke the same priors the live grants did. Counters start empty and are
+   * rebuilt from the replayed transfers via replaySpend(), so the daily cap
+   * is correct even when the restart lands on a different UTC day.
+   */
+  loadMandate(stored: StoredMandate): void {
+    for (const m of this.mandates.values()) {
+      if (m.agentId === stored.agentId && !m.revoked) m.revoked = true;
+    }
+    this.mandates.set(stored.id, {
+      ...stored,
+      spent: 0,
+      spentToday: 0,
+      today: utcDay(this.clock()),
+      seenPayees: new Set(),
+    });
+  }
+
+  /** Replay-only: re-commit a spend recorded in the log to its mandate's counters. */
+  replaySpend(mandateId: string, payeeId: string, amount: Micros, ts: number): void {
+    const m = this.mandates.get(mandateId);
+    if (!m) throw new Error(`replay: transfer references unknown mandate ${mandateId}`);
+    m.spent += amount;
+    m.seenPayees.add(payeeId);
+    const day = utcDay(ts);
+    // Same monotonic rule as rotateDay(): the day only rolls forward. The
+    // boot day is the floor, so only spends on the mandate's current UTC day
+    // count against the daily cap — older days' spends never do.
+    if (day > m.today) {
+      m.today = day;
+      m.spentToday = 0;
+    }
+    if (day === m.today) m.spentToday += amount;
   }
 
   revoke(mandateId: string): void {
