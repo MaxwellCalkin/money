@@ -3,10 +3,13 @@ import { Hono } from "hono";
 import type { Context, Next } from "hono";
 import { streamSSE } from "hono/streaming";
 import { pathToFileURL } from "node:url";
+import { createMockX402Server } from "../bridge/mock-x402.ts";
+import { buildXPayment, canonicalHostOf, requirementToMicros, type PaymentRequirements } from "../bridge/x402.ts";
+import { MockWallet, type ExternalWallet } from "../bridge/wallet.ts";
 import { verifyRequest } from "../core/identity.ts";
 import { MoneyNetwork } from "../core/network.ts";
 import { serializeMandate } from "../core/store.ts";
-import { fmt, usd, type Micros, type PayResult } from "../core/types.ts";
+import { fmt, usd, type ExternalPayResult, type Micros, type PayResult } from "../core/types.ts";
 import { dashboardHtml } from "./dashboard.ts";
 
 /** Signed requests must be fresher than this (and nonces are remembered this long). */
@@ -24,7 +27,7 @@ export const DEFAULT_PORT = 4021; // 402 + 1
 export const DEFAULT_DATA = "data/events.jsonl";
 
 /** Map a PayResult to an HTTP status: client errors are 4xx, "pay up" is 402. */
-function payStatus(result: PayResult): 200 | 400 | 402 | 409 {
+function payStatus(result: PayResult | ExternalPayResult): 200 | 400 | 402 | 409 {
   if (result.status === "paid") return 200;
   if (result.status === "escalate") return 402;
   if (result.code === "idempotency_conflict") return 409;
@@ -49,7 +52,7 @@ function payStatus(result: PayResult): 200 | 400 | 402 | 409 {
  * still governs every spend; production splits policy and signing into
  * separate trust domains per the design brief.
  */
-export function createApi(network: MoneyNetwork) {
+export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new MockWallet()) {
   const app = new Hono<ApiEnv>();
 
   // Core throws are bugs or unknown-account errors — return structured JSON,
@@ -319,6 +322,72 @@ export function createApi(network: MoneyNetwork) {
     return c.json(result, payStatus(result));
   });
 
+  // ── External x402 bridge ──────────────────────────────────────────────────
+
+  // Pay an EXTERNAL x402 seller. The agent forwards the 402's requirement
+  // verbatim; nothing in it is trusted — (network, asset) must be
+  // allowlisted (which pins decimals), the amount is parsed+capped here, the
+  // vendor host comes from the URL the agent actually fetched (not the 402
+  // body), and the owner's mandate governs the spend like any other.
+  app.post("/pay-external", requireAgentSig, async (c) => {
+    const from = c.get("agentId");
+    const body = await readBody<{ url: string; requirement: PaymentRequirements; idempotencyKey: string }>(c);
+    if (!body || typeof body.url !== "string" || !validClientKey(body.idempotencyKey)) {
+      return c.json({ error: "invalid_request", reason: "need url, requirement, and idempotencyKey" }, 400);
+    }
+    const host = canonicalHostOf(body.url);
+    if (!host.ok) return c.json({ error: "invalid_request", reason: host.reason }, 400);
+    const amount = requirementToMicros(body.requirement);
+    if (!amount.ok) return c.json({ error: "invalid_request", reason: amount.reason }, 400);
+
+    // Sign the authorization up front; on an idempotent replay the network
+    // returns the ORIGINAL record+header and this one is discarded unused.
+    const { header, authorization } = buildXPayment(wallet, body.requirement, Date.now());
+    const result = network.payExternal({
+      agentId: from,
+      host: host.host,
+      payTo: body.requirement.payTo,
+      asset: body.requirement.asset,
+      network: body.requirement.network,
+      resource: body.requirement.resource ?? body.url,
+      amount: amount.micros,
+      idempotencyKey: body.idempotencyKey,
+      paymentHeader: header,
+      // Grace past the authorization's own expiry, so a confirm that raced
+      // the deadline still lands before the auto-reversal.
+      reverseAfter: Number(authorization.validBefore) * 1000 + 60_000,
+    });
+    if (result.status !== "paid") return c.json(result, payStatus(result));
+    return c.json(
+      {
+        status: "paid",
+        externalId: result.payment.id,
+        state: result.payment.state,
+        paymentHeader: result.payment.paymentHeader,
+        transfer: result.transfer,
+        receipt: result.receipt,
+        replayed: result.replayed,
+      },
+      200
+    );
+  });
+
+  // Finalize (or learn the fate of) an external payment. Only the paying
+  // agent can confirm its own payment.
+  app.post("/pay-external/:id/confirm", requireAgentSig, async (c) => {
+    const from = c.get("agentId");
+    const id = c.req.param("id") ?? "";
+    const payment = network.externalPayment(id);
+    if (!payment) return c.json({ error: `unknown external payment ${id}` }, 404);
+    if (payment.agentId !== from) {
+      return c.json({ error: "forbidden", reason: "only the paying agent can confirm its payment" }, 403);
+    }
+    const body = await readBody<{ transaction?: string }>(c);
+    const result = network.confirmExternal(id, typeof body?.transaction === "string" ? body.transaction : undefined);
+    if (!result.ok) return c.json({ error: "confirm_failed", reason: result.reason, state: network.externalPayment(id)?.state }, 409);
+    return c.json({ ok: true, state: result.payment.state, settledTx: result.payment.settledTx });
+  });
+
   app.get("/balance/:id", (c) => {
     const id = c.req.param("id");
     if (!network.account(id)) return c.json({ error: `unknown account ${id}` }, 404);
@@ -343,6 +412,9 @@ export function createApi(network: MoneyNetwork) {
     accounts: network.listAccounts().map((a) => ({ ...a, balanceMicros: network.balanceOf(a.id) })),
     mandates: network.listMandates().map(serializeMandate),
     feed: network.feed(25),
+    // Bridge payments, credential omitted — the dashboard is a read surface
+    // and must never re-expose a spendable X-PAYMENT header.
+    external: network.listExternalPayments().slice(-20).map(({ paymentHeader: _header, ...p }) => p),
   });
 
   app.get("/dashboard", (c) => c.html(dashboardHtml));
@@ -407,19 +479,40 @@ export function createApi(network: MoneyNetwork) {
     })
   );
 
-  return { app, provider };
+  return { app, provider, wallet };
 }
 
 export function startServer(network?: MoneyNetwork, port = Number(process.env.PORT ?? DEFAULT_PORT)) {
   // Durable by default: state survives a restart via the JSONL event log.
   network ??= MoneyNetwork.open(process.env.MONEY_DATA ?? DEFAULT_DATA);
-  const { app, provider } = createApi(network);
+  const { app, provider, wallet } = createApi(network);
   // Bind IPv4 explicitly: Node 18's fetch resolves "localhost" to ::1 first,
   // so clients should use http://127.0.0.1:<port>.
   const server = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" });
+  // Unconfirmed external payments auto-reverse; unref so the sweeper never
+  // keeps a closing process alive.
+  const sweeper = setInterval(() => network!.sweepExternal(), 30_000);
+  sweeper.unref?.();
   console.log(`money network listening on http://127.0.0.1:${port} (demo provider: ${provider.id})`);
   console.log(`live dashboard at http://127.0.0.1:${port}/dashboard`);
-  return { server, network, provider, port };
+  // Local-dev affordance: MOCK_X402_PORT also serves a mock EXTERNAL x402
+  // seller that verifies this server's wallet, so an MCP agent can exercise
+  // the full bridge flow (money_fetch → 402 → bridge → X-PAYMENT → 200)
+  // without real funds.
+  if (process.env.MOCK_X402_PORT && wallet instanceof MockWallet) {
+    const mockPort = Number(process.env.MOCK_X402_PORT);
+    const seller = createMockX402Server({
+      payTo: "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+      asset: "0x00000000000000000000000000000000000c0ffe",
+      network: "mock-local",
+      priceAtomic: String(usd(0.05)),
+      resourcePath: "/external/report",
+      verify: (auth, domain, sig) => wallet.verifyAuthorization(auth, domain, sig),
+    });
+    serve({ fetch: seller.app.fetch, port: mockPort, hostname: "127.0.0.1" });
+    console.log(`mock external x402 seller on http://127.0.0.1:${mockPort}/external/report`);
+  }
+  return { server, network, provider, wallet, port };
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

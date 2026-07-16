@@ -54,6 +54,11 @@ export interface Transfer {
   idempotencyKey: string;
   mandateId?: string;
   permitId?: string;
+  /** For bridge payments the ledger destination is the external:x402
+   *  boundary account, but the POLICY payee is the external vendor
+   *  ("x402:<host>"). Replay rebuilds mandate counters from this field so
+   *  the new-payee throttle state survives restarts exactly. */
+  externalPayee?: string;
 }
 
 export interface Mandate {
@@ -129,6 +134,9 @@ export interface Receipt {
   memo: string;
   mandateId?: string;
   permitId?: string;
+  /** External vendor identity ("x402:<host>") — covered by the receipt hash,
+   *  so a doctored log cannot repoint who an external payment went to. */
+  externalPayee?: string;
   prevHash: string;
   hash: string;
 }
@@ -148,5 +156,44 @@ export interface Challenge {
 
 export type PayResult =
   | { status: "paid"; transfer: Transfer; receipt: Receipt; replayed: boolean }
+  | { status: "denied"; code: DenialCode; reason: string }
+  | { status: "escalate"; reason: string; mandateId: string };
+
+/**
+ * An external (out-of-loop) x402 purchase. Two-phase: the internal debit
+ * happens when the payment header is issued (state "pending"); the payment
+ * finalizes when settlement is confirmed, or auto-reverses via the ledger's
+ * reversal machinery if no confirmation arrives by reverseAfter. Money that
+ * leaves the loop has no in-loop counterparty to claw back from — the
+ * pending window is what keeps an unredeemed header from becoming a silent
+ * loss.
+ */
+export interface ExternalPayment {
+  id: string;
+  agentId: string;
+  /** Canonical vendor host; the policy payee is `x402:<host>`. */
+  host: string;
+  payTo: string;
+  asset: string;
+  network: string;
+  resource: string;
+  amount: Micros;
+  transferId: string;
+  receiptId: string;
+  /** Client key that created this payment; replaying it returns this record. */
+  idempotencyKey: string;
+  /** The exact X-PAYMENT header issued — a replay must return the SAME
+   *  credential, never sign a second authorization for the same purchase. */
+  paymentHeader: string;
+  state: "pending" | "confirmed" | "reversed";
+  createdAt: number;
+  /** Unconfirmed past this instant → auto-reversed. */
+  reverseAfter: number;
+  settledTx?: string;
+  reversalTransferId?: string;
+}
+
+export type ExternalPayResult =
+  | { status: "paid"; payment: ExternalPayment; transfer: Transfer; receipt: Receipt; replayed: boolean }
   | { status: "denied"; code: DenialCode; reason: string }
   | { status: "escalate"; reason: string; mandateId: string };

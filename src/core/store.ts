@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, truncateSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Account, Mandate, PayResult, Receipt, Transfer } from "./types.ts";
+import type { Account, ExternalPayment, Mandate, PayResult, Receipt, Transfer } from "./types.ts";
 
 /**
  * Durability = event sourcing to an append-only JSONL log. Every state
@@ -31,7 +31,13 @@ export type NetworkEvent =
       /** Present on the reversal leg of a reversed pay: the denial that the
        *  original idempotency key must replay to after a restart. */
       denial?: { forKey: string; result: PayResult };
-    };
+    }
+  /** Bridge lifecycle: record created pending (its debit is the preceding
+   *  transfer event), then confirmed or auto-reversed (whose refund is the
+   *  preceding transfer event). */
+  | { type: "external_payment"; payment: ExternalPayment }
+  | { type: "external_confirmed"; paymentId: string; transaction?: string }
+  | { type: "external_reversed"; paymentId: string; reversalTransferId: string };
 
 export interface EventSink {
   /** Append events durably. Multiple events go down in one atomic write. */

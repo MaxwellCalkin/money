@@ -1,6 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { decodeSettlement } from "../bridge/x402.ts";
 import { signedHeaders } from "../core/identity.ts";
 import { fmt, usd } from "../core/types.ts";
 
@@ -100,6 +102,15 @@ server.tool(
  */
 const pendingRedemptions = new Map<string, { challengeId: string; receiptId: string }>();
 
+/**
+ * External x402 purchases in flight, by URL (separate namespace from the
+ * internal map — a URL that switches flows must not cross-wire state). The
+ * idempotency key is stored BEFORE paying, so a lost response resumes with
+ * the same key and the network returns the original header — never a second
+ * debit or a second signed authorization.
+ */
+const pendingExternal = new Map<string, { idempotencyKey: string; externalId?: string; paymentHeader?: string; paidMicros?: number }>();
+
 async function fetchWithReceipt(url: string, challengeId: string, receiptId: string): Promise<Response> {
   return fetch(url, {
     headers: {
@@ -110,14 +121,92 @@ async function fetchWithReceipt(url: string, challengeId: string, receiptId: str
   });
 }
 
+type PendingExternal = { idempotencyKey: string; externalId?: string; paymentHeader?: string; paidMicros?: number };
+
+/** Retry an external URL with an already-issued X-PAYMENT header, then
+ *  confirm settlement (finalizing the pending debit — unconfirmed payments
+ *  auto-reverse server-side). */
+async function retryExternal(url: string, pending: PendingExternal) {
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: { "x-payment": pending.paymentHeader! } });
+  } catch {
+    return text({
+      status: 0,
+      error: "paid, but the retry fetch failed — payment header retained; call money_fetch again with the same url to resume without paying twice",
+      paid: fmt(pending.paidMicros ?? 0),
+      externalId: pending.externalId,
+    });
+  }
+  const bodyText = await res.text();
+  if (res.ok) {
+    const settlementHeader = res.headers.get("x-payment-response");
+    const settlement = settlementHeader ? decodeSettlement(settlementHeader) : null;
+    await api(`/pay-external/${pending.externalId}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ transaction: settlement?.transaction }),
+    }).catch(() => {});
+    pendingExternal.delete(url);
+    return text({
+      status: res.status,
+      paid: fmt(pending.paidMicros ?? 0),
+      ...(settlement?.transaction ? { settledTx: settlement.transaction } : {}),
+      body: safeJson(bodyText),
+    });
+  }
+  // The seller refused the header (expired, replayed, or hostile). Drop the
+  // local state; the unredeemed pending payment auto-reverses server-side.
+  pendingExternal.delete(url);
+  return text({
+    status: res.status,
+    paid: fmt(pending.paidMicros ?? 0),
+    error: "paid but the external server refused the payment header; the unconfirmed payment will auto-reverse",
+    body: safeJson(bodyText),
+  });
+}
+
+/** Fresh external x402 purchase: pay through the bridge, retry with the
+ *  issued X-PAYMENT header. */
+async function externalFetch(url: string, accepts: unknown[]) {
+  const requirement = (accepts as Array<{ scheme?: string } | null>).find((a) => a?.scheme === "exact");
+  if (!requirement) {
+    return text({ status: 402, error: "external 402 offers no supported payment scheme (need 'exact')" });
+  }
+
+  let pending = pendingExternal.get(url);
+  if (!pending) {
+    pending = { idempotencyKey: `xfetch-${randomUUID()}` };
+    pendingExternal.set(url, pending); // stored BEFORE paying: a lost response resumes with the same key
+  }
+
+  const payment = await api("/pay-external", {
+    method: "POST",
+    body: JSON.stringify({ url, requirement, idempotencyKey: pending.idempotencyKey }),
+  });
+  if (payment.body?.status !== "paid") {
+    pendingExternal.delete(url); // nothing debited — a future attempt starts fresh
+    return text({ status: 402, error: "external payment was not authorized by policy", decision: payment.body });
+  }
+  pending.externalId = payment.body.externalId;
+  pending.paymentHeader = payment.body.paymentHeader;
+  pending.paidMicros = payment.body.receipt?.amount;
+  return retryExternal(url, pending);
+}
+
 server.tool(
   "money_fetch",
-  "Fetch a URL. If the server responds 402 Payment Required with a money-network challenge, pay it from this agent's mandate and retry automatically. Retry-safe: if a previous call paid but failed to retrieve the resource, this resumes with the existing receipt instead of paying again. Returns the resource plus what was actually paid (from the receipt).",
+  "Fetch a URL. If the server responds 402 Payment Required — either a money-network challenge or an external x402 seller (accepts[]) — pay it from this agent's mandate and retry automatically. External payments go through the network's x402 bridge: policy-checked, capped, and auto-reversed if the seller never delivers. Retry-safe: if a previous call paid but failed to retrieve the resource, this resumes with the existing receipt/header instead of paying again. Returns the resource plus what was actually paid (from the receipt).",
   {
     url: z.string().url().describe("the URL to fetch"),
   },
   async ({ url }) => {
-    // Resume path: we already paid for this URL but never got the resource.
+    // Resume path (external): we already hold a paid X-PAYMENT header.
+    const extPending = pendingExternal.get(url);
+    if (extPending?.paymentHeader) {
+      return retryExternal(url, extPending);
+    }
+
+    // Resume path (internal): we already paid for this URL but never got the resource.
     const pending = pendingRedemptions.get(url);
     if (pending) {
       try {
@@ -149,9 +238,17 @@ server.tool(
       challengeId?: string;
       amountMicros?: number;
       payTo?: string;
+      accepts?: unknown[];
     } | null;
     if (!challenge?.challengeId) {
-      return text({ status: 402, error: "server demanded payment but sent no money-network challenge", body: challenge });
+      // Not our network's 402. If it speaks external x402 (accepts[]), pay it
+      // through the bridge. The internal challengeId flow is deliberately
+      // preferred when both are present — flow choice must not be steerable
+      // by a malicious body.
+      if (Array.isArray(challenge?.accepts) && challenge.accepts.length > 0) {
+        return externalFetch(url, challenge.accepts);
+      }
+      return text({ status: 402, error: "server demanded payment but sent no supported payment challenge", body: challenge });
     }
 
     const payment = await api("/pay-challenge", {

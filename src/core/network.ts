@@ -7,6 +7,8 @@ import {
   assertMicros,
   type Account,
   type Challenge,
+  type ExternalPayment,
+  type ExternalPayResult,
   type Mandate,
   type Micros,
   type PayResult,
@@ -16,6 +18,9 @@ import {
 
 /** The external boundary of the closed loop — the only account allowed to go negative. */
 export const EXTERNAL_FUNDING = "external:funding";
+/** Where money that leaves the loop via the x402 bridge lands. Its balance is
+ *  the FACE VALUE of external outflows (fees/slippage are not modeled). */
+export const EXTERNAL_X402 = "external:x402";
 
 const CHALLENGE_TTL_MS = 10 * 60_000;
 
@@ -38,6 +43,9 @@ export class MoneyNetwork {
   readonly receipts: ReceiptChain;
   private accounts = new Map<string, Account>();
   private challenges = new Map<string, Challenge>();
+  private externalPayments = new Map<string, ExternalPayment>();
+  /** client idempotency key → external payment id, for exactly-once creates. */
+  private externalByClientKey = new Map<string, string>();
   /** idempotencyKey → receipt id, so replays return the full original result. */
   private receiptByIdempotency = new Map<string, string>();
   /** idempotencyKey → denial, for keys whose transfer was reversed after apply. */
@@ -66,6 +74,13 @@ export class MoneyNetwork {
       createdAt: clock(),
     });
     this.ledger.ensureAccount(EXTERNAL_FUNDING);
+    this.accounts.set(EXTERNAL_X402, {
+      id: EXTERNAL_X402,
+      kind: "external",
+      name: "External x402 bridge",
+      createdAt: clock(),
+    });
+    this.ledger.ensureAccount(EXTERNAL_X402);
   }
 
   // ── Durability ──────────────────────────────────────────────────────────
@@ -131,17 +146,43 @@ export class MoneyNetwork {
             const r = e.receipt;
             // The receipt must describe its transfer — a log where they
             // disagree has been tampered with, whatever the hashes say.
-            if (r.transferId !== e.transfer.id || r.from !== e.transfer.from || r.to !== e.transfer.to || r.amount !== e.transfer.amount) {
+            if (
+              r.transferId !== e.transfer.id ||
+              r.from !== e.transfer.from ||
+              r.to !== e.transfer.to ||
+              r.amount !== e.transfer.amount ||
+              (r.externalPayee ?? null) !== (e.transfer.externalPayee ?? null)
+            ) {
               throw new Error(`replay: receipt ${r.id} does not match transfer ${e.transfer.id} — the event log is corrupt`);
             }
             this.receipts.insertRaw(r);
             this.receiptByIdempotency.set(e.transfer.idempotencyKey, r.id);
             if (r.mandateId) {
-              this.policy.replaySpend(r.mandateId, e.transfer.to, e.transfer.amount, e.transfer.ts);
+              // Counters rebuild against the POLICY payee: for bridge
+              // payments that is the vendor host, not the boundary account.
+              this.policy.replaySpend(r.mandateId, e.transfer.externalPayee ?? e.transfer.to, e.transfer.amount, e.transfer.ts);
             }
           }
           if (e.denial) this.deniedByIdempotency.set(e.denial.forKey, e.denial.result);
           break;
+        case "external_payment":
+          this.externalPayments.set(e.payment.id, e.payment);
+          this.externalByClientKey.set(e.payment.idempotencyKey, e.payment.id);
+          break;
+        case "external_confirmed": {
+          const payment = this.externalPayments.get(e.paymentId);
+          if (!payment) throw new Error(`replay: confirmation references unknown external payment ${e.paymentId}`);
+          payment.state = "confirmed";
+          payment.settledTx = e.transaction;
+          break;
+        }
+        case "external_reversed": {
+          const payment = this.externalPayments.get(e.paymentId);
+          if (!payment) throw new Error(`replay: reversal references unknown external payment ${e.paymentId}`);
+          payment.state = "reversed";
+          payment.reversalTransferId = e.reversalTransferId;
+          break;
+        }
       }
     }
     // A rebuilt network must satisfy the same invariants as a live one; a
@@ -293,7 +334,14 @@ export class MoneyNetwork {
   pay(req: PayRequest): PayResult {
     const from = this.mustAccount(req.from);
     if (from.kind !== "agent") throw new Error("pay() is the agent spend path; use allocate()/fund() for user moves");
-    this.mustAccount(req.to);
+    const payee = this.mustAccount(req.to);
+    if (payee.kind === "external") {
+      // Boundary accounts record real money crossing the edge. Letting an
+      // (injectable) agent credit them directly would fabricate external
+      // outflows that never happened — only fund() touches external:funding
+      // and only payExternal() credits external:x402.
+      return { status: "denied", code: "payee_not_allowed", reason: "external boundary accounts cannot be paid directly" };
+    }
     if (req.from === req.to) {
       return { status: "denied", code: "payee_not_allowed", reason: "an agent cannot pay itself" };
     }
@@ -345,7 +393,10 @@ export class MoneyNetwork {
       return { status: "denied", code: "no_mandate", reason: "mandate is not bound to the paying agent" };
     }
     this.mustAccount(req.from);
-    this.mustAccount(req.to);
+    const approvedPayee = this.mustAccount(req.to);
+    if (approvedPayee.kind === "external") {
+      return { status: "denied", code: "payee_not_allowed", reason: "external boundary accounts cannot be paid directly" };
+    }
     if (req.from === req.to) {
       return { status: "denied", code: "payee_not_allowed", reason: "an agent cannot pay itself" };
     }
@@ -498,6 +549,194 @@ export class MoneyNetwork {
     }
     challenge.redeemed = true;
     return { ok: true, challenge };
+  }
+
+  // ── External x402 bridge (money leaving the loop) ───────────────────────
+
+  /**
+   * Pay an external x402 seller from an agent's mandate. Two-phase:
+   *
+   *   1. HERE — policy-check against the vendor host ("x402:<host>"), debit
+   *      agent → external:x402, mint the receipt, record a PENDING payment
+   *      carrying the exact payment header issued.
+   *   2. confirmExternal() finalizes on settlement; sweepExternal()
+   *      auto-reverses anything unconfirmed past reverseAfter, because money
+   *      that left the loop has no in-loop counterparty to claw back from.
+   *
+   * The policy payee is the vendor host while the ledger destination is the
+   * boundary account — the permit binds to the host, and the transfer +
+   * receipt carry externalPayee so replay rebuilds the throttle state
+   * exactly. Replaying the client key returns the ORIGINAL record and
+   * header: one purchase, one authorization, ever.
+   */
+  payExternal(req: {
+    agentId: string;
+    host: string;
+    payTo: string;
+    asset: string;
+    network: string;
+    resource: string;
+    amount: Micros;
+    idempotencyKey: string;
+    paymentHeader: string;
+    reverseAfter: number;
+  }): ExternalPayResult {
+    this.sweepExternal();
+    const from = this.mustAccount(req.agentId);
+    if (from.kind !== "agent") throw new Error("payExternal is the agent spend path");
+    if (!req.idempotencyKey) throw new Error("idempotencyKey is required");
+    const payee = `x402:${req.host}`;
+
+    // Replay: return the original record and the SAME payment header.
+    const priorId = this.externalByClientKey.get(req.idempotencyKey);
+    if (priorId) {
+      const payment = this.externalPayments.get(priorId)!;
+      if (payment.agentId !== req.agentId || payment.host !== req.host || payment.amount !== req.amount || payment.payTo !== req.payTo) {
+        return { status: "denied", code: "idempotency_conflict", reason: "idempotency key reused with different parameters" };
+      }
+      const transfer = this.ledger.findByIdempotencyKey(req.idempotencyKey)!;
+      const receipt = this.receipts.get(payment.receiptId)!;
+      return { status: "paid", payment, transfer, receipt, replayed: true };
+    }
+    if (this.ledger.findByIdempotencyKey(req.idempotencyKey)) {
+      return { status: "denied", code: "idempotency_conflict", reason: "idempotency key was already used for a non-external payment" };
+    }
+
+    const decision = this.policy.evaluate(req.agentId, payee, req.amount);
+    if (!decision.ok) {
+      if (decision.code === "escalate") {
+        return { status: "escalate", reason: decision.reason, mandateId: decision.mandateId };
+      }
+      return { status: "denied", code: decision.code, reason: decision.reason };
+    }
+    const permitId = decision.permit.id;
+
+    let transfer: Transfer;
+    try {
+      const applied = this.ledger.apply({
+        from: req.agentId,
+        to: EXTERNAL_X402,
+        amount: req.amount,
+        memo: `x402:${req.resource} → ${req.payTo}`,
+        idempotencyKey: req.idempotencyKey,
+        permitId,
+        externalPayee: payee,
+      });
+      transfer = applied.transfer;
+    } catch (err) {
+      if (err instanceof InsufficientFundsError) {
+        this.policy.release(permitId);
+        return { status: "denied", code: "insufficient_funds", reason: err.message };
+      }
+      throw err;
+    }
+
+    const consumed = this.policy.consume(permitId, req.agentId, payee, req.amount);
+    if (!consumed.ok) {
+      const { transfer: reversal } = this.ledger.apply({
+        from: EXTERNAL_X402,
+        to: req.agentId,
+        amount: req.amount,
+        memo: `reversal: ${consumed.reason}`,
+        idempotencyKey: `rev_${transfer.id}`,
+      });
+      this.policy.release(permitId);
+      const denial: ExternalPayResult = { status: "denied", code: "permit_invalid", reason: consumed.reason };
+      this.deniedByIdempotency.set(req.idempotencyKey, { status: "denied", code: "permit_invalid", reason: consumed.reason });
+      this.emit(
+        { type: "transfer", transfer },
+        { type: "transfer", transfer: reversal, denial: { forKey: req.idempotencyKey, result: { status: "denied", code: "permit_invalid", reason: consumed.reason } } }
+      );
+      return denial;
+    }
+
+    const receipt = this.receipts.append({
+      transferId: transfer.id,
+      from: req.agentId,
+      to: EXTERNAL_X402,
+      amount: req.amount,
+      memo: transfer.memo,
+      mandateId: consumed.mandateId,
+      permitId,
+      externalPayee: payee,
+    });
+    this.receiptByIdempotency.set(req.idempotencyKey, receipt.id);
+
+    const payment: ExternalPayment = {
+      id: `ext_${randomUUID()}`,
+      agentId: req.agentId,
+      host: req.host,
+      payTo: req.payTo,
+      asset: req.asset,
+      network: req.network,
+      resource: req.resource,
+      amount: req.amount,
+      transferId: transfer.id,
+      receiptId: receipt.id,
+      idempotencyKey: req.idempotencyKey,
+      paymentHeader: req.paymentHeader,
+      state: "pending",
+      createdAt: this.clock(),
+      reverseAfter: req.reverseAfter,
+    };
+    this.externalPayments.set(payment.id, payment);
+    this.externalByClientKey.set(req.idempotencyKey, payment.id);
+    this.emit({ type: "transfer", transfer, receipt }, { type: "external_payment", payment });
+
+    return { status: "paid", payment, transfer, receipt, replayed: false };
+  }
+
+  /** Finalize a pending external payment once settlement is confirmed.
+   *  Idempotent on confirmed; a reversed payment can never be confirmed. */
+  confirmExternal(paymentId: string, transaction?: string): { ok: true; payment: ExternalPayment } | { ok: false; reason: string } {
+    const payment = this.externalPayments.get(paymentId);
+    if (!payment) return { ok: false, reason: `unknown external payment ${paymentId}` };
+    if (payment.state === "confirmed") return { ok: true, payment };
+    if (payment.state === "reversed") {
+      return { ok: false, reason: "payment was already auto-reversed (unconfirmed past its deadline) — money returned to the agent" };
+    }
+    payment.state = "confirmed";
+    payment.settledTx = transaction;
+    this.emit({ type: "external_confirmed", paymentId, transaction });
+    return { ok: true, payment };
+  }
+
+  /**
+   * Auto-reverse pending external payments whose confirmation deadline has
+   * passed. Mandate counters are deliberately NOT decremented — a reversal
+   * must never hand budget back to a possibly-compromised agent. The window
+   * where the seller settled but never confirmed is a bounded company loss
+   * (≤ per-tx cap); closing it needs real facilitator integration.
+   */
+  sweepExternal(): ExternalPayment[] {
+    const now = this.clock();
+    const reversed: ExternalPayment[] = [];
+    for (const payment of this.externalPayments.values()) {
+      if (payment.state !== "pending" || now <= payment.reverseAfter) continue;
+      const { transfer: reversal } = this.ledger.apply({
+        from: EXTERNAL_X402,
+        to: payment.agentId,
+        amount: payment.amount,
+        memo: `reversal: external payment ${payment.id} unconfirmed past deadline`,
+        idempotencyKey: `rev_${payment.transferId}`,
+      });
+      payment.state = "reversed";
+      payment.reversalTransferId = reversal.id;
+      this.emit(
+        { type: "transfer", transfer: reversal },
+        { type: "external_reversed", paymentId: payment.id, reversalTransferId: reversal.id }
+      );
+      reversed.push(payment);
+    }
+    return reversed;
+  }
+
+  externalPayment(id: string): ExternalPayment | undefined {
+    return this.externalPayments.get(id);
+  }
+
+  listExternalPayments(): ExternalPayment[] {
+    return [...this.externalPayments.values()];
   }
 
   // ── Introspection ───────────────────────────────────────────────────────

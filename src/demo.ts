@@ -6,9 +6,13 @@
  *
  * Run: npm run demo
  */
+import { serve } from "@hono/node-server";
 import { rmSync } from "node:fs";
+import { createMockX402Server } from "./bridge/mock-x402.ts";
+import { MockWallet } from "./bridge/wallet.ts";
+import { decodeSettlement } from "./bridge/x402.ts";
 import { generateAgentKeypair, signedHeaders } from "./core/identity.ts";
-import { MoneyNetwork } from "./core/network.ts";
+import { EXTERNAL_X402, MoneyNetwork } from "./core/network.ts";
 import { verifyChain } from "./core/receipts.ts";
 import { fmt, usd } from "./core/types.ts";
 import { startServer } from "./server/api.ts";
@@ -39,7 +43,7 @@ async function waitForServer(url: string, attempts = 50): Promise<void> {
 async function main() {
   rmSync(DEMO_LOG, { force: true });
   const network = MoneyNetwork.open(DEMO_LOG);
-  const { server, provider, port } = startServer(network, 4021);
+  const { server, provider, wallet, port } = startServer(network, 4021);
   const base = `http://127.0.0.1:${port}`;
   await waitForServer(`${base}/verify`);
 
@@ -239,6 +243,54 @@ async function main() {
       ok("idempotency survives restart: the old key returns the original receipt, no double spend");
     }
 
+    section("9 · External x402 bridge: buying from the machine economy (mock)");
+    const scoutPost = (path: string, bodyObj: unknown) => {
+      const body = JSON.stringify(bodyObj);
+      return fetch(`${base}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...signedHeaders(scout.id, scoutKeys.privateKey, { method: "POST", path, body }) },
+        body,
+      });
+    };
+    const seller = createMockX402Server({
+      payTo: "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+      asset: "0x00000000000000000000000000000000000c0ffe",
+      network: "mock-local",
+      priceAtomic: String(usd(0.05)),
+      resourcePath: "/external/report",
+      verify: (auth, domain, sig) => (wallet as MockWallet).verifyAuthorization(auth, domain, sig),
+    });
+    const sellerServer = serve({ fetch: seller.app.fetch, port: 4022, hostname: "127.0.0.1" });
+    const sellerUrl = "http://127.0.0.1:4022/external/report";
+    try {
+      const demand = await fetch(sellerUrl);
+      const body402 = (await demand.json()) as any;
+      ok(`external seller answered ${demand.status} with an x402 v1 offer: ${fmt(Number(body402.accepts[0].maxAmountRequired))} USDC on ${body402.accepts[0].network}`);
+
+      // A hostile page can inflate the demand — the envelope doesn't care.
+      const inflated = { ...body402.accepts[0], maxAmountRequired: String(usd(0.5)) };
+      const lured = await scoutPost("/pay-external", { url: sellerUrl, requirement: inflated, idempotencyKey: "ext-lure-1" });
+      const luredBody = (await lured.json()) as any;
+      no(`inflated $0.50 first-touch demand → denied: ${luredBody.code} (the injection throttle covers external vendors too)`);
+
+      const paidRes = await scoutPost("/pay-external", { url: sellerUrl, requirement: body402.accepts[0], idempotencyKey: "ext-report-1" });
+      const extPayment = (await paidRes.json()) as any;
+      ok(`bridge signed an EIP-3009-shaped X-PAYMENT and debited scout ${fmt(extPayment.receipt.amount)} — state: ${extPayment.state}`);
+
+      const served = await fetch(sellerUrl, { headers: { "x-payment": extPayment.paymentHeader } });
+      const report = (await served.json()) as any;
+      ok(`seller verified the authorization and served: "${report.report}"`);
+
+      const settlementHeader = served.headers.get("x-payment-response");
+      const settlement = settlementHeader ? decodeSettlement(settlementHeader) : null;
+      const confirmPath = `/pay-external/${extPayment.externalId}/confirm`;
+      await scoutPost(confirmPath, { transaction: settlement?.transaction });
+      ok(`settlement ${settlement?.transaction ?? "?"} confirmed — unconfirmed payments auto-reverse, so money can't silently leak out of the loop`);
+      ok(`external:x402 boundary holds ${fmt(network.balanceOf(EXTERNAL_X402))} · zero-sum still ${network.ledger.zeroSum()}`);
+    } finally {
+      sellerServer.close();
+    }
+
     section("Done");
     line("  One balance. Agents paying agents and paying APIs, at will,");
     line("  inside a signed envelope the model can't reach. That's the network.");
@@ -248,7 +300,14 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main()
+  .then(() => {
+    // Two servers + Node 18's fetch keep-alive sockets can outlive close();
+    // the demo's work is all synchronous-flushed (appendFileSync), so a hard
+    // exit is safe and keeps `npm run demo` snappy.
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

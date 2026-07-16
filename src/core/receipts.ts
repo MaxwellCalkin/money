@@ -67,6 +67,7 @@ function canonical(r: Omit<Receipt, "hash">): string {
     memo: r.memo,
     mandateId: r.mandateId ?? null,
     permitId: r.permitId ?? null,
+    externalPayee: r.externalPayee ?? null,
     prevHash: r.prevHash,
   });
 }
