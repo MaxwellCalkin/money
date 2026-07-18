@@ -13,6 +13,8 @@ import {
   type Micros,
   type PayResult,
   type Receipt,
+  type RefundResult,
+  type Service,
   type Transfer,
 } from "./types.ts";
 
@@ -23,6 +25,25 @@ export const EXTERNAL_FUNDING = "external:funding";
 export const EXTERNAL_X402 = "external:x402";
 
 const CHALLENGE_TTL_MS = 10 * 60_000;
+const HANDLE_RE = /^[a-z][a-z0-9_-]{2,31}$/;
+const SERVICE_SLUG_RE = /^[a-z][a-z0-9-]{1,47}$/;
+
+/** Handles are stored without @ and compared case-insensitively. */
+export function normalizeHandle(value: string): string {
+  return value.trim().replace(/^@/, "").toLowerCase();
+}
+
+export function isValidHandle(value: string): boolean {
+  return HANDLE_RE.test(normalizeHandle(value));
+}
+
+export function normalizeServiceSlug(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+export function isValidServiceSlug(value: string): boolean {
+  return SERVICE_SLUG_RE.test(normalizeServiceSlug(value));
+}
 
 export interface PayRequest {
   from: string;
@@ -42,7 +63,13 @@ export class MoneyNetwork {
   readonly policy: PolicyEngine;
   readonly receipts: ReceiptChain;
   private accounts = new Map<string, Account>();
+  private accountsByHandle = new Map<string, string>();
+  private services = new Map<string, Service>();
+  private servicesByAddress = new Map<string, string>();
+  private serviceByIdempotency = new Map<string, string>();
   private challenges = new Map<string, Challenge>();
+  /** Only challenges that reached a signed payment attempt are durable. */
+  private persistedChallenges = new Set<string>();
   private externalPayments = new Map<string, ExternalPayment>();
   /** client idempotency key → external payment id, for exactly-once creates. */
   private externalByClientKey = new Map<string, string>();
@@ -125,6 +152,17 @@ export class MoneyNetwork {
     for (const e of events) {
       switch (e.type) {
         case "account_created":
+          if (this.accounts.has(e.account.id)) {
+            throw new Error(`replay: duplicate or reserved account id ${e.account.id}`);
+          }
+          if (e.account.handle) {
+            const handle = normalizeHandle(e.account.handle);
+            if (!isValidHandle(handle) || this.accountsByHandle.has(handle)) {
+              throw new Error(`replay: invalid or duplicate account handle @${e.account.handle}`);
+            }
+            e.account.handle = handle;
+            this.accountsByHandle.set(handle, e.account.id);
+          }
           this.accounts.set(e.account.id, e.account);
           this.ledger.ensureAccount(e.account.id);
           break;
@@ -134,13 +172,106 @@ export class MoneyNetwork {
           account.publicKey = e.publicKey;
           break;
         }
+        case "service_registered": {
+          const provider = this.accounts.get(e.service.providerId);
+          if (!provider || provider.kind !== "provider") {
+            throw new Error(`replay: service references unknown provider ${e.service.providerId}`);
+          }
+          if (!provider.ownerId || !provider.publicKey || !provider.handle) {
+            throw new Error(`replay: service ${e.service.id} belongs to an incomplete provider identity`);
+          }
+          if (!isValidServiceSlug(e.service.slug) || e.service.slug !== normalizeServiceSlug(e.service.slug)) {
+            throw new Error(`replay: service ${e.service.id} has an invalid slug`);
+          }
+          try {
+            const endpoint = new URL(e.service.endpointUrl);
+            if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") throw new Error("bad protocol");
+          } catch {
+            throw new Error(`replay: service ${e.service.id} has an invalid endpoint`);
+          }
+          assertMicros(e.service.price);
+          if (e.service.price <= 0) throw new Error(`replay: service ${e.service.id} has an invalid price`);
+          const address = this.serviceAddress(e.service.providerId, e.service.slug);
+          if (
+            this.services.has(e.service.id) ||
+            this.servicesByAddress.has(address) ||
+            this.serviceByIdempotency.has(e.service.idempotencyKey)
+          ) {
+            throw new Error(`replay: duplicate service ${e.service.id} or address ${address}`);
+          }
+          this.services.set(e.service.id, e.service);
+          this.servicesByAddress.set(address, e.service.id);
+          this.serviceByIdempotency.set(e.service.idempotencyKey, e.service.id);
+          break;
+        }
+        case "challenge_created": {
+          if (this.challenges.has(e.challenge.id)) throw new Error(`replay: duplicate challenge ${e.challenge.id}`);
+          const provider = this.accounts.get(e.challenge.providerId);
+          if (!provider || provider.kind !== "provider") {
+            throw new Error(`replay: challenge references unknown provider ${e.challenge.providerId}`);
+          }
+          assertMicros(e.challenge.amount);
+          if (e.challenge.amount <= 0 || e.challenge.expiresAt <= e.challenge.createdAt || e.challenge.redeemed) {
+            throw new Error(`replay: challenge ${e.challenge.id} has invalid terms`);
+          }
+          if (e.challenge.serviceId) {
+            const service = this.services.get(e.challenge.serviceId);
+            if (
+              !service ||
+              service.providerId !== e.challenge.providerId ||
+              service.price !== e.challenge.amount ||
+              service.endpointUrl !== e.challenge.resource
+            ) {
+              throw new Error(`replay: challenge ${e.challenge.id} does not match its registered service`);
+            }
+          }
+          this.challenges.set(e.challenge.id, e.challenge);
+          this.persistedChallenges.add(e.challenge.id);
+          break;
+        }
+        case "challenge_redeemed": {
+          const challenge = this.challenges.get(e.challengeId);
+          if (!challenge) throw new Error(`replay: redemption references unknown challenge ${e.challengeId}`);
+          if (challenge.redeemed || !challenge.receiptId) {
+            throw new Error(`replay: challenge ${e.challengeId} was redeemed twice or before payment`);
+          }
+          challenge.redeemed = true;
+          break;
+        }
         case "mandate_granted":
           this.policy.loadMandate(e.mandate);
           break;
         case "mandate_revoked":
           this.policy.revoke(e.mandateId);
           break;
-        case "transfer":
+        case "transfer": {
+          if (!this.accounts.has(e.transfer.from) || !this.accounts.has(e.transfer.to)) {
+            throw new Error(`replay: transfer ${e.transfer.id} references an unknown account`);
+          }
+          assertMicros(e.transfer.amount);
+          if (e.transfer.amount <= 0 || e.transfer.from === e.transfer.to || !e.transfer.idempotencyKey) {
+            throw new Error(`replay: transfer ${e.transfer.id} has invalid terms`);
+          }
+          if (e.receipt && this.receipts.get(e.receipt.id)) {
+            throw new Error(`replay: duplicate receipt id ${e.receipt.id}`);
+          }
+          const refundOf = e.receipt?.refundOf ?? e.transfer.refundOf;
+          if (refundOf !== undefined) {
+            const original = refundOf ? this.receipts.get(refundOf) : undefined;
+            if (
+              !original ||
+              original.refundOf ||
+              original.to !== e.transfer.from ||
+              original.from !== e.transfer.to ||
+              e.transfer.amount > original.amount - this.refundedAmount(original.id) ||
+              this.ledger.balance(e.transfer.from) < e.transfer.amount ||
+              e.receipt?.mandateId ||
+              e.receipt?.permitId ||
+              e.receipt?.externalPayee
+            ) {
+              throw new Error(`replay: refund transfer ${e.transfer.id} is invalid`);
+            }
+          }
           this.ledger.insert(e.transfer);
           if (e.receipt) {
             const r = e.receipt;
@@ -151,12 +282,33 @@ export class MoneyNetwork {
               r.from !== e.transfer.from ||
               r.to !== e.transfer.to ||
               r.amount !== e.transfer.amount ||
-              (r.externalPayee ?? null) !== (e.transfer.externalPayee ?? null)
+              r.memo !== e.transfer.memo ||
+              (r.permitId ?? null) !== (e.transfer.permitId ?? null) ||
+              (r.externalPayee ?? null) !== (e.transfer.externalPayee ?? null) ||
+              (r.refundOf ?? null) !== (e.transfer.refundOf ?? null)
             ) {
               throw new Error(`replay: receipt ${r.id} does not match transfer ${e.transfer.id} — the event log is corrupt`);
             }
             this.receipts.insertRaw(r);
             this.receiptByIdempotency.set(e.transfer.idempotencyKey, r.id);
+            // Challenge payment state is derived from the durable transfer,
+            // so a crash between payment and the caller receiving its response
+            // can never require a second charge after restart.
+            if (e.transfer.idempotencyKey.startsWith("chl_")) {
+              const challenge = this.challenges.get(e.transfer.idempotencyKey.slice(4));
+              if (challenge) {
+                if (
+                  e.transfer.to !== challenge.providerId ||
+                  e.transfer.amount !== challenge.amount ||
+                  e.transfer.memo !== `402:${challenge.resource}` ||
+                  r.refundOf
+                ) {
+                  throw new Error(`replay: payment does not match challenge ${challenge.id}`);
+                }
+                challenge.paidBy = e.transfer.from;
+                challenge.receiptId = r.id;
+              }
+            }
             if (r.mandateId) {
               // Counters rebuild against the POLICY payee: for bridge
               // payments that is the vendor host, not the boundary account.
@@ -165,6 +317,7 @@ export class MoneyNetwork {
           }
           if (e.denial) this.deniedByIdempotency.set(e.denial.forKey, e.denial.result);
           break;
+        }
         case "external_payment":
           this.externalPayments.set(e.payment.id, e.payment);
           this.externalByClientKey.set(e.payment.idempotencyKey, e.payment.id);
@@ -200,33 +353,44 @@ export class MoneyNetwork {
 
   /** publicKey (base64 SPKI Ed25519) is the owner's registered identity —
    *  required to authenticate admin HTTP requests (fund, agents, mandates). */
-  createUser(name: string, publicKey?: string): Account {
-    return this.createAccount("user", name, undefined, publicKey);
+  createUser(name: string, publicKey?: string, handle?: string): Account {
+    return this.createAccount("user", name, undefined, publicKey, handle);
   }
 
   /** publicKey (base64 SPKI Ed25519) is the agent's registered identity —
    *  required to authenticate HTTP spend requests. */
-  createAgent(name: string, ownerId: string, publicKey?: string): Account {
+  createAgent(name: string, ownerId: string, publicKey?: string, handle?: string): Account {
     const owner = this.accounts.get(ownerId);
     if (!owner || owner.kind !== "user") throw new Error(`agent owner ${ownerId} must be a user account`);
-    return this.createAccount("agent", name, ownerId, publicKey);
+    return this.createAccount("agent", name, ownerId, publicKey, handle);
   }
 
-  createProvider(name: string): Account {
-    return this.createAccount("provider", name);
+  createProvider(name: string, ownerId?: string, publicKey?: string, handle?: string): Account {
+    if (ownerId) {
+      const owner = this.accounts.get(ownerId);
+      if (!owner || owner.kind !== "user") throw new Error(`provider owner ${ownerId} must be a user account`);
+    }
+    return this.createAccount("provider", name, ownerId, publicKey, handle);
   }
 
-  private createAccount(kind: Account["kind"], name: string, ownerId?: string, publicKey?: string): Account {
+  private createAccount(kind: Account["kind"], name: string, ownerId?: string, publicKey?: string, rawHandle?: string): Account {
+    const handle = rawHandle ? normalizeHandle(rawHandle) : undefined;
+    if (handle && !isValidHandle(handle)) {
+      throw new Error("handle must be 3-32 characters: lowercase letters, numbers, _ or -, starting with a letter");
+    }
+    if (handle && this.accountsByHandle.has(handle)) throw new Error(`handle @${handle} is already taken`);
     const prefix = { user: "usr", agent: "agt", provider: "prv", external: "ext" }[kind];
     const account: Account = {
       id: `${prefix}_${randomUUID().slice(0, 8)}`,
       kind,
       name,
+      handle,
       ownerId,
       publicKey,
       createdAt: this.clock(),
     };
     this.accounts.set(account.id, account);
+    if (handle) this.accountsByHandle.set(handle, account.id);
     this.ledger.ensureAccount(account.id);
     this.emit({ type: "account_created", account });
     return account;
@@ -236,12 +400,119 @@ export class MoneyNetwork {
     return this.accounts.get(id);
   }
 
+  accountByHandle(handle: string): Account | undefined {
+    const id = this.accountsByHandle.get(normalizeHandle(handle));
+    return id ? this.accounts.get(id) : undefined;
+  }
+
+  /** Resolve either an opaque account id or a public @handle. */
+  resolveAccount(idOrHandle: string): Account | undefined {
+    return this.accounts.get(idOrHandle) ?? this.accountByHandle(idOrHandle);
+  }
+
   listAccounts(): Account[] {
     return [...this.accounts.values()];
   }
 
   balanceOf(id: string): Micros {
     return this.ledger.balance(id);
+  }
+
+  // Seller services
+
+  registerService(input: {
+    providerId: string;
+    slug: string;
+    name: string;
+    description?: string;
+    endpointUrl: string;
+    price: Micros;
+    idempotencyKey: string;
+  }): { service: Service; replayed: boolean } {
+    const provider = this.mustAccount(input.providerId);
+    if (provider.kind !== "provider") throw new Error("services must belong to a provider account");
+    if (!provider.ownerId || !provider.publicKey || !provider.handle) {
+      throw new Error("provider must be owner-controlled, keyed, and have a public handle");
+    }
+    const slug = normalizeServiceSlug(input.slug);
+    if (!isValidServiceSlug(slug)) {
+      throw new Error("service slug must be 2-48 lowercase letters, numbers, or hyphens, starting with a letter");
+    }
+    if (!input.idempotencyKey) throw new Error("idempotencyKey is required");
+    assertMicros(input.price);
+    if (input.price <= 0) throw new Error("service price must be positive");
+    let endpoint: URL;
+    try {
+      endpoint = new URL(input.endpointUrl);
+    } catch {
+      throw new Error("endpointUrl must be a valid absolute URL");
+    }
+    if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
+      throw new Error("endpointUrl must use http or https");
+    }
+
+    const priorId = this.serviceByIdempotency.get(input.idempotencyKey);
+    const prior = priorId ? this.services.get(priorId) : undefined;
+    if (prior) {
+      if (
+        prior.providerId !== input.providerId ||
+        prior.slug !== slug ||
+        prior.name !== input.name ||
+        prior.description !== (input.description ?? "") ||
+        prior.endpointUrl !== endpoint.toString() ||
+        prior.price !== input.price
+      ) {
+        throw new Error(`service idempotency key ${input.idempotencyKey} was already used with different terms`);
+      }
+      return { service: prior, replayed: true };
+    }
+
+    const address = this.serviceAddress(provider.id, slug);
+    if (this.servicesByAddress.has(address)) throw new Error(`@${provider.handle}/${slug} is already registered`);
+    const service: Service = {
+      id: `svc_${randomUUID().slice(0, 12)}`,
+      providerId: provider.id,
+      slug,
+      name: input.name,
+      description: input.description ?? "",
+      endpointUrl: endpoint.toString(),
+      price: input.price,
+      active: true,
+      idempotencyKey: input.idempotencyKey,
+      createdAt: this.clock(),
+    };
+    this.services.set(service.id, service);
+    this.servicesByAddress.set(address, service.id);
+    this.serviceByIdempotency.set(input.idempotencyKey, service.id);
+    this.emit({ type: "service_registered", service });
+    return { service, replayed: false };
+  }
+
+  service(id: string): Service | undefined {
+    return this.services.get(id);
+  }
+
+  listServices(): Service[] {
+    return [...this.services.values()].filter((service) => service.active);
+  }
+
+  serviceByAddress(providerHandle: string, slug: string): Service | undefined {
+    const provider = this.accountByHandle(providerHandle);
+    if (!provider || provider.kind !== "provider") return undefined;
+    const id = this.servicesByAddress.get(this.serviceAddress(provider.id, normalizeServiceSlug(slug)));
+    return id ? this.services.get(id) : undefined;
+  }
+
+  /** Issue a challenge from durable registry terms, never seller-supplied price. */
+  createServiceChallenge(providerId: string, serviceId: string): Challenge {
+    const service = this.services.get(serviceId);
+    if (!service || !service.active) throw new Error(`unknown or inactive service ${serviceId}`);
+    if (service.providerId !== providerId) throw new Error("service does not belong to the signing provider");
+    return this.createChallenge(providerId, service.price, service.endpointUrl, service.id);
+  }
+
+  private serviceAddress(providerId: string, slug: string): string {
+    return `${providerId}:${slug}`;
   }
 
   // ── Funding (the edge of the loop) ──────────────────────────────────────
@@ -302,8 +573,8 @@ export class MoneyNetwork {
    */
   rotateKey(accountId: string, publicKey: string): Account {
     const account = this.mustAccount(accountId);
-    if (account.kind !== "user" && account.kind !== "agent") {
-      throw new Error("only user and agent accounts carry identity keys");
+    if (account.kind !== "user" && account.kind !== "agent" && account.kind !== "provider") {
+      throw new Error("only user, agent, and provider accounts carry identity keys");
     }
     if (!publicKey) throw new Error("publicKey is required");
     account.publicKey = publicKey;
@@ -475,8 +746,114 @@ export class MoneyNetwork {
 
   // ── HTTP 402 challenges (pay-per-call, exactly-once) ────────────────────
 
-  createChallenge(providerId: string, amount: Micros, resource: string): Challenge {
+  /** Provider-signed return of value tied to an original purchase receipt.
+   * Refunds never restore mandate budget: a compromised agent must not be
+   * able to recycle spend capacity by colluding with a seller. */
+  refund(req: {
+    providerId: string;
+    receiptId: string;
+    amount: Micros;
+    memo: string;
+    idempotencyKey: string;
+  }): RefundResult {
+    const provider = this.mustAccount(req.providerId);
+    if (provider.kind !== "provider") {
+      return { status: "denied", code: "refund_invalid", reason: "only providers can issue refunds" };
+    }
+    const original = this.receipts.get(req.receiptId);
+    if (!original || original.refundOf) {
+      return { status: "denied", code: "refund_invalid", reason: "original purchase receipt not found" };
+    }
+    if (original.to !== provider.id) {
+      return { status: "denied", code: "refund_invalid", reason: "receipt was not paid to this provider" };
+    }
+    try {
+      assertMicros(req.amount);
+    } catch {
+      return { status: "denied", code: "invalid_amount", reason: "refund amount must be integer micros" };
+    }
+    if (req.amount <= 0) return { status: "denied", code: "invalid_amount", reason: "refund amount must be positive" };
+    if (!req.idempotencyKey) throw new Error("idempotencyKey is required");
+
+    const prior = this.ledger.findByIdempotencyKey(req.idempotencyKey);
+    const alreadyRefunded = this.refundedAmount(original.id);
+    const remainingBefore = original.amount - alreadyRefunded;
+    if (!prior && req.amount > remainingBefore) {
+      return {
+        status: "denied",
+        code: "refund_invalid",
+        reason: `refund exceeds remaining refundable amount (${remainingBefore} micros)`,
+      };
+    }
+
+    if (prior) {
+      if (
+        prior.from !== provider.id ||
+        prior.to !== original.from ||
+        prior.amount !== req.amount ||
+        prior.refundOf !== original.id
+      ) {
+        return { status: "denied", code: "idempotency_conflict", reason: "idempotency key reused with different refund parameters" };
+      }
+      const receiptId = this.receiptByIdempotency.get(req.idempotencyKey);
+      const receipt = receiptId ? this.receipts.get(receiptId) : undefined;
+      if (!receipt) throw new Error("refund ledger/receipt mismatch on idempotent replay");
+      return {
+        status: "refunded",
+        transfer: prior,
+        receipt,
+        replayed: true,
+        remaining: original.amount - this.refundedAmount(original.id),
+      };
+    }
+
+    let transfer: Transfer;
+    try {
+      transfer = this.ledger.apply({
+        from: provider.id,
+        to: original.from,
+        amount: req.amount,
+        memo: req.memo || `refund for ${original.id}`,
+        idempotencyKey: req.idempotencyKey,
+        refundOf: original.id,
+      }).transfer;
+    } catch (err) {
+      if (err instanceof InsufficientFundsError) {
+        return { status: "denied", code: "insufficient_funds", reason: err.message };
+      }
+      throw err;
+    }
+    const receipt = this.receipts.append({
+      transferId: transfer.id,
+      from: provider.id,
+      to: original.from,
+      amount: req.amount,
+      memo: transfer.memo,
+      refundOf: original.id,
+    });
+    this.receiptByIdempotency.set(req.idempotencyKey, receipt.id);
+    this.emit({ type: "transfer", transfer, receipt });
+    return {
+      status: "refunded",
+      transfer,
+      receipt,
+      replayed: false,
+      remaining: remainingBefore - req.amount,
+    };
+  }
+
+  refundedAmount(receiptId: string): Micros {
+    let total = 0;
+    for (const receipt of this.receipts.list()) {
+      if (receipt.refundOf === receiptId) total += receipt.amount;
+    }
+    assertMicros(total);
+    return total;
+  }
+
+  createChallenge(providerId: string, amount: Micros, resource: string, serviceId?: string): Challenge {
     assertMicros(amount);
+    if (amount <= 0) throw new Error("challenge amount must be positive");
     const provider = this.mustAccount(providerId);
     if (provider.kind !== "provider") throw new Error("challenges are created by providers");
     const now = this.clock();
@@ -488,6 +865,7 @@ export class MoneyNetwork {
     const challenge: Challenge = {
       id: `chl_${randomUUID()}`,
       providerId,
+      serviceId,
       amount,
       resource,
       createdAt: now,
@@ -510,6 +888,13 @@ export class MoneyNetwork {
       this.challenges.delete(challengeId);
       return { status: "denied", code: "challenge_invalid", reason: "challenge expired" };
     }
+    // Unpaid anonymous challenges stay in memory so bots cannot fill the
+    // durable ledger merely by requesting a paid page. Once an authenticated
+    // agent attempts payment, persist the terms BEFORE money can move.
+    if (!this.persistedChallenges.has(challenge.id)) {
+      this.emit({ type: "challenge_created", challenge });
+      this.persistedChallenges.add(challenge.id);
+    }
     const result = this.pay({
       from: agentId,
       to: challenge.providerId,
@@ -522,6 +907,25 @@ export class MoneyNetwork {
       challenge.receiptId = result.receipt.id;
     }
     return result;
+  }
+
+  redeemServiceChallenge(
+    providerId: string,
+    serviceId: string,
+    challengeId: string,
+    receiptId: string
+  ): { ok: true; challenge: Challenge } | { ok: false; reason: string } {
+    const service = this.services.get(serviceId);
+    if (!service || !service.active) return { ok: false, reason: "service not found or inactive" };
+    if (service.providerId !== providerId) return { ok: false, reason: "service does not belong to the signing provider" };
+    const challenge = this.challenges.get(challengeId);
+    if (!challenge || challenge.serviceId !== serviceId) {
+      return { ok: false, reason: "challenge was not issued for this service" };
+    }
+    return this.redeemChallenge(challengeId, receiptId, {
+      resource: service.endpointUrl,
+      amount: service.price,
+    });
   }
 
   /**
@@ -548,6 +952,7 @@ export class MoneyNetwork {
       return { ok: false, reason: "receipt does not match challenge" };
     }
     challenge.redeemed = true;
+    this.emit({ type: "challenge_redeemed", challengeId: challenge.id });
     return { ok: true, challenge };
   }
 

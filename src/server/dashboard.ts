@@ -78,6 +78,8 @@ export const dashboardHtml = `<!doctype html>
   <section>
     <h2>Balances</h2>
     <div class="panel"><table><tbody id="accounts"><tr><td class="empty">no accounts yet</td></tr></tbody></table></div>
+    <h2>Service catalog</h2>
+    <div class="panel" id="services"><div class="empty">no paid services yet</div></div>
     <h2>Mandates</h2>
     <div class="panel" id="mandates"><div class="empty">no mandates yet</div></div>
   </section>
@@ -122,9 +124,17 @@ function render(s) {
     (KIND_ORDER[a.kind] - KIND_ORDER[b.kind]) || a.name.localeCompare(b.name));
   $("accounts").innerHTML = accounts.map((a) =>
     "<tr><td><span class=\\"kind " + esc(a.kind) + "\\">" + esc(a.kind) + "</span></td>" +
-    "<td>" + esc(a.name) + " <span class=\\"id\\">" + esc(a.id) + "</span></td>" +
+    "<td>" + esc(a.name) + (a.handle ? ' <span class="id">@' + esc(a.handle) + "</span>" : "") +
+    ' <span class="id">' + esc(a.id) + "</span></td>" +
     "<td class=\\"amt" + (a.balanceMicros < 0 ? " neg" : "") + "\\">" + fmt(a.balanceMicros) + "</td></tr>"
   ).join("") || '<tr><td class="empty">no accounts yet</td></tr>';
+
+  $("services").innerHTML = (s.services || []).map((service) =>
+    '<div class="mandate"><div class="row"><div><b>' + esc(service.address || service.name) +
+    '</b><div class="id">' + esc(service.endpointUrl) + '</div></div><span class="amt">' +
+    fmt(service.priceMicros) + '</span></div><div class="caps">' +
+    esc(service.description || service.name) + '</div></div>'
+  ).join("") || '<div class="empty">no paid services yet</div>';
 
   const mandates = [...s.mandates].reverse();
   $("mandates").innerHTML = mandates.map((m) => {

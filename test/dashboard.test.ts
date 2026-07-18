@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { generateAgentKeypair } from "../src/core/identity.ts";
 import { MoneyNetwork } from "../src/core/network.ts";
 import { createApi } from "../src/server/api.ts";
 import { usd } from "../src/core/types.ts";
@@ -58,7 +59,16 @@ describe("live dashboard", () => {
   });
 
   it("/dashboard/state reports balances, mandate counters, and the feed", async () => {
-    const { network, app, agent, peer } = setup();
+    const { network, app, user, agent, peer } = setup();
+    const provider = network.createProvider("Research Cloud", user.id, generateAgentKeypair().publicKey, "research-cloud");
+    const service = network.registerService({
+      providerId: provider.id,
+      slug: "report",
+      name: "Report",
+      endpointUrl: "https://seller.example/report",
+      price: usd(0.05),
+      idempotencyKey: "dashboard-service",
+    }).service;
     const paid = network.pay({ from: agent.id, to: peer.id, amount: usd(0.25), memo: "subtask", idempotencyKey: "t1" });
     expect(paid.status).toBe("paid");
 
@@ -72,6 +82,9 @@ describe("live dashboard", () => {
     expect(state.mandates[0].seenPayees).toEqual([peer.id]);
     expect(state.feed).toHaveLength(1);
     expect(state.feed[0].memo).toBe("subtask");
+    expect(state.services).toEqual([
+      expect.objectContaining({ id: service.id, address: "@research-cloud/report", priceMicros: usd(0.05) }),
+    ]);
   });
 
   it("SSE sends the state on connect and pushes a fresh one when money moves", async () => {

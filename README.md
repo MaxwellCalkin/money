@@ -13,7 +13,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 3. **Prefunding buys the speed.** Authorization is a local policy + balance check — no external round-trip on the hot path.
 4. **Exactly-once by construction.** Idempotency keys on every transfer; 402 challenges pay-once/redeem-once. Agents retry by default — the network must shrug.
 
-## What's here (v0)
+## What's here (v0.2)
 
 | Piece | File | What it does |
 |---|---|---|
@@ -21,13 +21,15 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | Policy | `src/core/policy.ts` | Mandates (budget, per-tx cap, daily cap, escalation line, new-payee throttle, allowlist, expiry) → single-use permits bound to exact payee+amount |
 | Receipts | `src/core/receipts.ts` | Hash-chained evidence log; tamper detection |
 | Persistence | `src/core/store.ts` | Append-only JSONL event log; replay rebuilds everything and refuses tampered logs |
-| Identity | `src/core/identity.ts` | Ed25519 keypair per agent; spend requests are signed and verified against the registered key |
-| Network | `src/core/network.ts` | The facade: accounts, funding, agent-to-agent `pay()`, human `approveAndPay()`, 402 challenges |
-| HTTP API | `src/server/api.ts` | Hono server on **:4021** — network API + demo paid endpoints behind an x402-shaped 402 gate |
+| Identity | `src/core/identity.ts` | Ed25519 keys for owners, agents, and providers; every mutation is verified against the registered key |
+| Network | `src/core/network.ts` | Accounts + public handles, funding, agent payments, seller services, mandates, and durable 402 challenges |
+| Service registry | `src/core/network.ts` | Provider-owned `@handle/service` listings with endpoint and server-side price |
+| Seller SDK | `src/seller/middleware.ts` | Reusable Hono paywall plus a provider-signed client for challenges, receipt redemption, and partial refunds |
+| HTTP API | `src/server/api.ts` | Hono server on **:4021** — agent, owner, provider, catalog, and merchant APIs plus demo paid endpoints |
 | Dashboard | `src/server/dashboard.ts` | Live view at `/dashboard`: balances, mandates, real-time receipt feed over SSE |
 | x402 bridge | `src/bridge/` | Pay external x402 sellers (v1 wire, EIP-3009-shaped auth) via a two-phase pending→confirm/auto-reverse lifecycle, against a mock wallet + seller |
 | MCP server | `src/mcp/server.ts` | `money_balance`, `money_pay`, `money_fetch` (auto-pays internal 402s AND external x402 sellers within mandate), `money_feed` |
-| Demo | `src/demo.ts` | The full story end-to-end (9 sections), including denial, tamper, restart, owner-auth, and external-bridge cases |
+| Demo | `src/demo.ts` | The full story end-to-end (10 sections), including a separately authenticated seller joining and earning through the network |
 
 ## Run it
 
@@ -69,6 +71,59 @@ Or wire it manually — add to `.mcp.json`:
 
 The agent can then check its balance, pay other agents, and fetch 402-gated URLs that get paid automatically inside its mandate.
 
+### Publish a paid API
+
+Provider identities are created by an owner, then use their own signing key to
+publish services and redeem receipts. After `npm run onboard`, export the
+`MONEY_USER_ID` and `MONEY_OWNER_KEY` it prints, then run:
+
+```bash
+npm run onboard:seller -- \
+  --handle research-cloud \
+  --slug market-report \
+  --endpoint https://seller.example/report \
+  --price 0.05
+```
+
+The command prints `MONEY_PROVIDER_ID`, `MONEY_PROVIDER_KEY`, and
+`MONEY_SERVICE_ID`. It writes the provider key and stable registration keys to
+the gitignored `.money/` directory before contacting the network, so an
+interrupted run can be repeated without orphaning the handle or duplicating the
+service. Mount the reusable Hono middleware on the registered route:
+
+```ts
+import { Hono } from "hono";
+import { createMoneySellerClient, moneyPaid } from "./src/seller/middleware.ts";
+
+const app = new Hono();
+app.get("/report", moneyPaid({
+  networkUrl: process.env.MONEY_API!,
+  providerId: process.env.MONEY_PROVIDER_ID!,
+  providerKey: process.env.MONEY_PROVIDER_KEY!,
+  serviceId: process.env.MONEY_SERVICE_ID!,
+}), (c) => c.json({ report: "valuable machine-readable result" }));
+
+const seller = createMoneySellerClient({
+  networkUrl: process.env.MONEY_API!,
+  providerId: process.env.MONEY_PROVIDER_ID!,
+  providerKey: process.env.MONEY_PROVIDER_KEY!,
+});
+
+// Partial or full; the same key can be retried without issuing it twice.
+await seller.refund({
+  receiptId: "rcpt_...",
+  amountMicros: 10_000,
+  memo: "service credit",
+  idempotencyKey: "refund-order-123-v1",
+});
+```
+
+The public catalog is `GET /services`. Agents may also pay accounts by public
+handle (for example `@research-cloud`) instead of copying opaque ids. Refunds
+are tied to the original hash-chained receipt, cannot exceed the purchase, and
+do not restore mandate budget (so cooperating buyer and seller accounts cannot
+recycle an agent's spending authority).
+
 ## The mandate model
 
 ```
@@ -82,11 +137,12 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 ## Honest v0 shortcuts (the roadmap is the inverse)
 
 - Persistence is a local JSONL event log (`data/events.jsonl`, replayed and integrity-checked on boot; `MONEY_DATA` overrides the path) — durable across restarts, but single-node (→ Postgres, same event-sourced shape).
+- Paid challenges become durable before money moves, so a purchased service remains redeemable after restart. Unpaid anonymous challenges stay ephemeral so page requests cannot fill the ledger.
 - Identity is an Ed25519 keypair per account: agents sign spends and owners sign admin mutations (fund/allocate/mandates/revoke/rotate-key), over method+path+body+timestamp+nonce, verified against the key registered at creation. Key rotation is the leaked-key remediation path (→ RFC 9421 HTTP Message Signatures + `@authority` binding on the wire; keys chained to a KYC'd owner; signup rate-limiting and owner-key delivery off stdout).
 - Single-node; network and API share a process (→ policy/signer split into separate trust domains, as in the design brief).
 - External top-up is simulated, and the x402 bridge to the outside machine economy runs against a **mock** wallet + seller (protocol-faithful x402 v1 client, but Ed25519 stands in for EIP-712/secp256k1 signing and there's no on-chain settlement) — so mock-green certifies the accounting and policy, not chain finality (→ real USDC wallet + facilitator on Base; card/ACH top-up via sponsor-bank FBO).
-- Single-owner loop only: agents of one user pay each other and providers. **Cross-owner transfers are deliberately out** — that's the money-transmission line; it comes with licensing/partner structure, not before.
-- No subscriptions, refunds, sub-agent delegation, or insurance yet — these are the differentiators identified in the design brief and belong on the roadmap in that order.
+- The ledger can settle between accounts owned by different users, but this is still a development sandbox. Turning that path on for real customer funds requires the sponsor-bank/FBO, KYC/KYB, sanctions, fraud, safeguarding, and licensing program around it; code alone does not cross the money-transmission line.
+- No subscriptions, sub-agent delegation, or insurance yet — these are the next programmable-commerce layers after the now-working service registry and refunds.
 
 ## The bigger picture
 

@@ -7,9 +7,9 @@ import { createMockX402Server } from "../bridge/mock-x402.ts";
 import { buildXPayment, canonicalHostOf, requirementToMicros, type PaymentRequirements } from "../bridge/x402.ts";
 import { MockWallet, type ExternalWallet } from "../bridge/wallet.ts";
 import { isValidPublicKey, verifyRequest } from "../core/identity.ts";
-import { MoneyNetwork } from "../core/network.ts";
+import { isValidHandle, isValidServiceSlug, MoneyNetwork } from "../core/network.ts";
 import { serializeMandate } from "../core/store.ts";
-import { fmt, usd, type ExternalPayResult, type Micros, type PayResult } from "../core/types.ts";
+import { fmt, usd, type ExternalPayResult, type Micros, type PayResult, type Service } from "../core/types.ts";
 import { dashboardHtml } from "./dashboard.ts";
 
 /** Signed requests must be fresher than this (and nonces are remembered this long). */
@@ -21,7 +21,7 @@ const CLOCK_SKEW_MS = 30_000;
  *  an unauthenticated caller can make us buffer. */
 const MAX_SIGNED_BODY_BYTES = 256 * 1024;
 
-type ApiEnv = { Variables: { agentId: string; userId: string } };
+type ApiEnv = { Variables: { agentId: string; userId: string; providerId: string } };
 
 export const DEFAULT_PORT = 4021; // 402 + 1
 export const DEFAULT_DATA = "data/events.jsonl";
@@ -43,11 +43,11 @@ function payStatus(result: PayResult | ExternalPayResult): 200 | 400 | 402 | 409
  *      an x402-shaped HTTP 402 flow: no payment → 402 + challenge;
  *      pay the challenge → retry with receipt headers → 200.
  *
- * Spend routes (/pay, /pay-challenge) require agent-signed requests; admin
- * routes (/fund, /agents, /allocate, /mandates, revoke) require owner-signed
- * requests — both Ed25519 over method+path+sha256(body)+ts+nonce, verified
- * against the key registered at account creation. /providers and the read
- * routes stay open in v0. In-process callers (tests, the demo driving
+ * Spend routes require agent signatures; admin routes require owner
+ * signatures; service registration and redemption require provider
+ * signatures — all Ed25519 over method+path+sha256(body)+ts+nonce, verified
+ * against the key registered at account creation. In-process callers (tests,
+ * the demo driving
  * `network` directly) bypass HTTP auth by construction — the policy envelope
  * still governs every spend; production splits policy and signing into
  * separate trust domains per the design brief.
@@ -76,9 +76,9 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
    * any money moves. Agents sign spends (x-agent-id); owners sign admin
    * mutations (x-user-id) — same scheme, different trust domain.
    */
-  const requireSignedAccount = (kind: "agent" | "user") => {
-    const idHeader = kind === "agent" ? "x-agent-id" : "x-user-id";
-    const ctxKey = kind === "agent" ? ("agentId" as const) : ("userId" as const);
+  const requireSignedAccount = (kind: "agent" | "user" | "provider") => {
+    const idHeader = kind === "agent" ? "x-agent-id" : kind === "user" ? "x-user-id" : "x-provider-id";
+    const ctxKey = kind === "agent" ? ("agentId" as const) : kind === "user" ? ("userId" as const) : ("providerId" as const);
     return async (c: Context<ApiEnv>, next: Next) => {
       const claimedId = c.req.header(idHeader);
       const ts = Number(c.req.header("x-signature-ts"));
@@ -122,6 +122,7 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
   };
   const requireAgentSig = requireSignedAccount("agent");
   const requireOwnerSig = requireSignedAccount("user");
+  const requireProviderSig = requireSignedAccount("provider");
 
   const readBody = async <T>(c: Context): Promise<T | null> =>
     c.req.json<T>().catch(() => null);
@@ -171,7 +172,7 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
   // agents, and mandates from then on, so creating a user without one would
   // create an account nobody can ever administer.
   app.post("/users", async (c) => {
-    const body = await readBody<{ name: string; publicKey: string }>(c);
+    const body = await readBody<{ name: string; publicKey: string; handle?: string }>(c);
     if (!body || typeof body.name !== "string" || !body.name) {
       return c.json({ error: "invalid_request", reason: "need name" }, 400);
     }
@@ -181,29 +182,183 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
     if (!isValidPublicKey(body.publicKey)) {
       return c.json({ error: "invalid_request", reason: "need publicKey as a valid base64 SPKI Ed25519 key — the owner key authorizes all admin operations" }, 400);
     }
-    return c.json(network.createUser(body.name, body.publicKey));
+    if (body.handle !== undefined && !isValidHandle(body.handle)) {
+      return c.json({ error: "invalid_request", reason: "handle must be 3-32 lowercase letters, numbers, _ or -, starting with a letter" }, 400);
+    }
+    if (body.handle && network.accountByHandle(body.handle)) {
+      return c.json({ error: "handle_taken", reason: `@${body.handle} is already registered` }, 409);
+    }
+    return c.json(network.createUser(body.name, body.publicKey, body.handle));
   });
 
   app.post("/agents", requireOwnerSig, async (c) => {
     const owner = c.get("userId");
-    const body = await readBody<{ name: string; ownerId: string; publicKey?: string }>(c);
+    const body = await readBody<{ name: string; ownerId: string; publicKey?: string; handle?: string }>(c);
     if (!body || typeof body.name !== "string" || !body.name) {
       return c.json({ error: "invalid_request", reason: "need name and ownerId" }, 400);
     }
-    if (body.publicKey !== undefined && typeof body.publicKey !== "string") {
+    if (body.publicKey !== undefined && !isValidPublicKey(body.publicKey)) {
       return c.json({ error: "invalid_request", reason: "publicKey must be a base64 SPKI Ed25519 key" }, 400);
+    }
+    if (body.handle !== undefined && !isValidHandle(body.handle)) {
+      return c.json({ error: "invalid_request", reason: "invalid agent handle" }, 400);
+    }
+    if (body.handle && network.accountByHandle(body.handle)) {
+      return c.json({ error: "handle_taken", reason: `@${body.handle} is already registered` }, 409);
     }
     if (body.ownerId !== owner) {
       return c.json({ error: "forbidden", reason: "ownerId must be the signing user — you cannot create agents for someone else" }, 403);
     }
-    return c.json(network.createAgent(body.name, owner, body.publicKey));
+    return c.json(network.createAgent(body.name, owner, body.publicKey, body.handle));
   });
 
-  // No open /providers route: providers are created in-process (the demo one
-  // above) until provider onboarding gets its own auth story. An open route
-  // would let anyone append junk accounts to the durable event log forever.
-  // (/users stays open — it IS signup — but writes durable state too;
-  // production adds rate limiting there.)
+  /** A provider is a seller identity owned by a user but authenticated with
+   * its own key for service registration and challenge redemption. */
+  app.post("/providers", requireOwnerSig, async (c) => {
+    const owner = c.get("userId");
+    const body = await readBody<{ name: string; ownerId: string; handle: string; publicKey: string }>(c);
+    if (
+      !body ||
+      typeof body.name !== "string" ||
+      !body.name ||
+      body.ownerId !== owner ||
+      !isValidHandle(body.handle) ||
+      !isValidPublicKey(body.publicKey)
+    ) {
+      return c.json({ error: "invalid_request", reason: "need name, signing ownerId, unique handle, and valid provider publicKey" }, 400);
+    }
+    const existing = network.accountByHandle(body.handle);
+    if (existing) {
+      if (
+        existing.kind === "provider" &&
+        existing.ownerId === owner &&
+        existing.name === body.name &&
+        existing.publicKey === body.publicKey
+      ) {
+        return c.json({ ...existing, replayed: true });
+      }
+      return c.json({ error: "handle_taken", reason: `@${body.handle} is already registered` }, 409);
+    }
+    return c.json({ ...network.createProvider(body.name, owner, body.publicKey, body.handle), replayed: false });
+  });
+
+  app.post("/services", requireProviderSig, async (c) => {
+    const providerId = c.get("providerId");
+    const body = await readBody<{
+      slug: string;
+      name: string;
+      description?: string;
+      endpointUrl: string;
+      priceMicros: number;
+      idempotencyKey: string;
+    }>(c);
+    if (
+      !body ||
+      !isValidServiceSlug(body.slug) ||
+      typeof body.name !== "string" ||
+      !body.name ||
+      typeof body.endpointUrl !== "string" ||
+      !isPositiveMicros(body.priceMicros) ||
+      !validClientKey(body.idempotencyKey)
+    ) {
+      return c.json({ error: "invalid_request", reason: "need slug, name, absolute endpointUrl, positive priceMicros, and idempotencyKey" }, 400);
+    }
+    try {
+      const result = network.registerService({
+        providerId,
+        slug: body.slug,
+        name: body.name,
+        description: body.description,
+        endpointUrl: body.endpointUrl,
+        price: body.priceMicros,
+        idempotencyKey: body.idempotencyKey,
+      });
+      return c.json({ ...publicService(result.service), replayed: result.replayed });
+    } catch (err) {
+      return c.json({ error: "service_registration_failed", reason: (err as Error).message }, 409);
+    }
+  });
+
+  function publicService(service: Service) {
+    const provider = network.account(service.providerId);
+    const { price, idempotencyKey: _idempotencyKey, ...rest } = service;
+    return {
+      ...rest,
+      priceMicros: price,
+      providerHandle: provider?.handle,
+      address: provider?.handle ? `@${provider.handle}/${service.slug}` : undefined,
+      priceDisplay: fmt(price),
+    };
+  }
+
+  app.get("/services", (c) => c.json(network.listServices().map(publicService)));
+  app.get("/services/:id", (c) => {
+    const service = network.service(c.req.param("id") ?? "");
+    return service ? c.json(publicService(service)) : c.json({ error: "service_not_found" }, 404);
+  });
+
+  app.get("/handles/:handle", (c) => {
+    const account = network.accountByHandle(c.req.param("handle") ?? "");
+    if (!account) return c.json({ error: "handle_not_found" }, 404);
+    const { publicKey: _publicKey, ...safe } = account;
+    return c.json(safe);
+  });
+
+  /** Seller-side protocol. The provider signs both operations; pricing comes
+   * from the registered service rather than the seller's HTTP response. */
+  app.post("/merchant/challenges", requireProviderSig, async (c) => {
+    const providerId = c.get("providerId");
+    const body = await readBody<{ serviceId: string }>(c);
+    if (!body || typeof body.serviceId !== "string") {
+      return c.json({ error: "invalid_request", reason: "need serviceId" }, 400);
+    }
+    try {
+      const challenge = network.createServiceChallenge(providerId, body.serviceId);
+      return c.json({
+        error: "payment_required",
+        serviceId: body.serviceId,
+        resource: challenge.resource,
+        amountMicros: challenge.amount,
+        amountDisplay: fmt(challenge.amount),
+        payTo: challenge.providerId,
+        challengeId: challenge.id,
+      }, 402);
+    } catch (err) {
+      return c.json({ error: "challenge_failed", reason: (err as Error).message }, 400);
+    }
+  });
+
+  app.post("/merchant/redeem", requireProviderSig, async (c) => {
+    const providerId = c.get("providerId");
+    const body = await readBody<{ serviceId: string; challengeId: string; receiptId: string }>(c);
+    if (!body || typeof body.serviceId !== "string" || typeof body.challengeId !== "string" || typeof body.receiptId !== "string") {
+      return c.json({ error: "invalid_request", reason: "need serviceId, challengeId, and receiptId" }, 400);
+    }
+    const result = network.redeemServiceChallenge(providerId, body.serviceId, body.challengeId, body.receiptId);
+    return result.ok ? c.json({ ok: true, challengeId: result.challenge.id }) : c.json({ error: "payment_rejected", reason: result.reason }, 402);
+  });
+
+  app.post("/refunds", requireProviderSig, async (c) => {
+    const providerId = c.get("providerId");
+    const body = await readBody<{ receiptId: string; amountMicros: number; memo?: string; idempotencyKey: string }>(c);
+    if (
+      !body ||
+      typeof body.receiptId !== "string" ||
+      !isPositiveMicros(body.amountMicros) ||
+      !validClientKey(body.idempotencyKey)
+    ) {
+      return c.json({ error: "invalid_request", reason: "need receiptId, positive amountMicros, and idempotencyKey" }, 400);
+    }
+    const result = network.refund({
+      providerId,
+      receiptId: body.receiptId,
+      amount: body.amountMicros,
+      memo: body.memo ?? "",
+      idempotencyKey: body.idempotencyKey,
+    });
+    const status = result.status === "refunded" ? 200 : result.code === "idempotency_conflict" ? 409 : 400;
+    return c.json(result, status);
+  });
 
   app.post("/fund", requireOwnerSig, async (c) => {
     const owner = c.get("userId");
@@ -273,19 +428,20 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
   });
 
   // Key rotation: the remediation path for a leaked key. The OWNER's current
-  // key authorizes it — for their own account, or for an agent they own
-  // (a compromised agent must not be able to re-key itself or its siblings).
+  // key authorizes it — for their own account, agent, or provider.
   app.post("/accounts/:id/rotate-key", requireOwnerSig, async (c) => {
     const owner = c.get("userId");
     const targetId = c.req.param("id") ?? "";
     const target = network.account(targetId);
     if (!target) return c.json({ error: `unknown account ${targetId}` }, 404);
-    const authorized = target.id === owner || (target.kind === "agent" && target.ownerId === owner);
+    const authorized =
+      target.id === owner ||
+      ((target.kind === "agent" || target.kind === "provider") && target.ownerId === owner);
     if (!authorized) {
-      return c.json({ error: "forbidden", reason: "you can only rotate your own key or a key of an agent you own" }, 403);
+      return c.json({ error: "forbidden", reason: "you can only rotate your own key or a key of an agent/provider you own" }, 403);
     }
     const body = await readBody<{ publicKey: string }>(c);
-    if (!body || typeof body.publicKey !== "string" || !body.publicKey) {
+    if (!body || !isValidPublicKey(body.publicKey)) {
       return c.json({ error: "invalid_request", reason: "need publicKey (base64 SPKI Ed25519)" }, 400);
     }
     const account = network.rotateKey(targetId, body.publicKey);
@@ -311,7 +467,9 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
     if (!body || typeof body.to !== "string" || !isPositiveMicros(body.amountMicros) || !validClientKey(body.idempotencyKey)) {
       return c.json({ error: "invalid_request", reason: "need to, positive integer amountMicros, and idempotencyKey (not starting with chl_/rev_)" }, 400);
     }
-    const result = network.pay({ from, to: body.to, amount: body.amountMicros, memo: body.memo ?? "", idempotencyKey: body.idempotencyKey });
+    const payee = network.resolveAccount(body.to);
+    if (!payee) return c.json({ error: "payee_not_found", reason: `unknown account or handle ${body.to}` }, 404);
+    const result = network.pay({ from, to: payee.id, amount: body.amountMicros, memo: body.memo ?? "", idempotencyKey: body.idempotencyKey });
     return c.json(result, payStatus(result));
   });
 
@@ -392,10 +550,11 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
   });
 
   app.get("/balance/:id", (c) => {
-    const id = c.req.param("id");
-    if (!network.account(id)) return c.json({ error: `unknown account ${id}` }, 404);
-    const micros = network.balanceOf(id);
-    return c.json({ accountId: id, balanceMicros: micros, balanceDisplay: fmt(micros) });
+    const requested = c.req.param("id");
+    const account = network.resolveAccount(requested);
+    if (!account) return c.json({ error: `unknown account or handle ${requested}` }, 404);
+    const micros = network.balanceOf(account.id);
+    return c.json({ accountId: account.id, handle: account.handle, balanceMicros: micros, balanceDisplay: fmt(micros) });
   });
 
   app.get("/feed", (c) => {
@@ -413,6 +572,7 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
     receiptsOk: network.verifyReceipts().ok,
     receiptCount: network.receipts.length,
     accounts: network.listAccounts().map((a) => ({ ...a, balanceMicros: network.balanceOf(a.id) })),
+    services: network.listServices().map(publicService),
     mandates: network.listMandates().map(serializeMandate),
     feed: network.feed(25),
     // Bridge payments, credential omitted — the dashboard is a read surface

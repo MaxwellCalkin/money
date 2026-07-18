@@ -2,11 +2,13 @@
  * End-to-end demo of the money network: fund a user, mandate two agents,
  * agent-to-agent payment, retry-safe idempotency, HTTP 402 pay-per-call over
  * real localhost HTTP, the new-payee injection throttle, human escalation,
- * cap enforcement, and receipt-chain verification (including tamper detection).
+ * cap enforcement, receipt-chain verification (including tamper detection),
+ * independent seller onboarding, and retry-safe partial refunds.
  *
  * Run: npm run demo
  */
 import { serve } from "@hono/node-server";
+import { Hono } from "hono";
 import { rmSync } from "node:fs";
 import { createMockX402Server } from "./bridge/mock-x402.ts";
 import { MockWallet } from "./bridge/wallet.ts";
@@ -15,6 +17,7 @@ import { generateAgentKeypair, signedHeaders } from "./core/identity.ts";
 import { EXTERNAL_X402, MoneyNetwork } from "./core/network.ts";
 import { verifyChain } from "./core/receipts.ts";
 import { fmt, usd } from "./core/types.ts";
+import { createMoneySellerClient, moneyPaid } from "./seller/middleware.ts";
 import { startServer } from "./server/api.ts";
 
 /** The demo runs on its own event log, wiped at start for a clean story. */
@@ -289,6 +292,69 @@ async function main() {
       ok(`external:x402 boundary holds ${fmt(network.balanceOf(EXTERNAL_X402))} · zero-sum still ${network.ledger.zeroSum()}`);
     } finally {
       sellerServer.close();
+    }
+
+    section("10 · Two-sided network: an independent seller joins");
+    const providerKeys = generateAgentKeypair();
+    const marketplaceProvider = network.createProvider(
+      "Research Cloud",
+      max.id,
+      providerKeys.publicKey,
+      "research-cloud"
+    );
+    const registered = network.registerService({
+      providerId: marketplaceProvider.id,
+      slug: "market-report",
+      name: "Agent economy market report",
+      description: "Fresh machine-readable market intelligence",
+      endpointUrl: "http://127.0.0.1:4023/report",
+      price: usd(0.05),
+      idempotencyKey: "demo-register-market-report",
+    }).service;
+    const sellerClient = createMoneySellerClient({
+      networkUrl: base,
+      providerId: marketplaceProvider.id,
+      providerKey: providerKeys.privateKey,
+    });
+    const marketplaceSeller = new Hono();
+    marketplaceSeller.get(
+      "/report",
+      moneyPaid({
+        networkUrl: base,
+        providerId: marketplaceProvider.id,
+        providerKey: providerKeys.privateKey,
+        serviceId: registered.id,
+      }),
+      (c) => c.json({ report: "The closed loop is now a two-sided network." })
+    );
+    const marketplaceServer = serve({ fetch: marketplaceSeller.fetch, port: 4023, hostname: "127.0.0.1" });
+    try {
+      const demand = await fetch("http://127.0.0.1:4023/report");
+      const challenge = await demand.json() as any;
+      ok(`@research-cloud published @research-cloud/market-report for ${fmt(challenge.amountMicros)}`);
+      const paid = await signedPayChallenge(challenge.challengeId, scoutKeys.privateKey);
+      const payment = await paid.json() as any;
+      const delivered = await fetch("http://127.0.0.1:4023/report", {
+        headers: {
+          "x-payment-challenge": challenge.challengeId,
+          "x-payment-receipt": payment.receipt.id,
+        },
+      });
+      const result = await delivered.json() as any;
+      ok(`scout paid the independently authenticated seller and received: "${result.report}"`);
+      ok(`seller balance updated instantly to ${fmt(network.balanceOf(marketplaceProvider.id))}; receipt ${payment.receipt.id}`);
+
+      const refund = await sellerClient.refund({
+        receiptId: payment.receipt.id,
+        amountMicros: usd(0.01),
+        memo: "freshness guarantee credit",
+        idempotencyKey: "demo-market-refund",
+      });
+      if (refund.status !== 200) throw new Error(`refund failed: ${JSON.stringify(refund.body)}`);
+      ok(`seller refunded ${fmt(usd(0.01))} against the original receipt; retry-safe and auditable`);
+      ok(`seller now has ${fmt(network.balanceOf(marketplaceProvider.id))}; scout's mandate remains spent (refunds cannot recycle authority)`);
+    } finally {
+      marketplaceServer.close();
     }
 
     section("Done");

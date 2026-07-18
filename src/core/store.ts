@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, truncateSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Account, ExternalPayment, Mandate, PayResult, Receipt, Transfer } from "./types.ts";
+import type { Account, Challenge, ExternalPayment, Mandate, PayResult, Receipt, Service, Transfer } from "./types.ts";
 
 /**
  * Durability = event sourcing to an append-only JSONL log. Every state
@@ -9,9 +9,10 @@ import type { Account, ExternalPayment, Mandate, PayResult, Receipt, Transfer } 
  * timestamps, and receipt hashes — so replay is pure data application: no
  * randomUUID, no clock reads, no re-validation.
  *
- * Not persisted: 402 challenges (short-lived, per-server) and unconsumed
- * permits (60s TTL). Losing an unredeemed paid challenge on restart means the
- * agent may re-pay for that resource once — bounded by the challenge price.
+ * Unpaid anonymous 402 challenges and unconsumed permits are ephemeral. A
+ * challenge becomes durable before an authenticated payment attempt, so a
+ * successful purchase remains redeemable after restart without letting bots
+ * fill the log merely by requesting a paid page.
  */
 
 /** A mandate with its Set serialized for JSON. Stored counters are the
@@ -21,6 +22,9 @@ export type StoredMandate = Omit<Mandate, "seenPayees"> & { seenPayees: string[]
 export type NetworkEvent =
   | { type: "account_created"; account: Account }
   | { type: "key_rotated"; accountId: string; publicKey: string }
+  | { type: "service_registered"; service: Service }
+  | { type: "challenge_created"; challenge: Challenge }
+  | { type: "challenge_redeemed"; challengeId: string }
   | { type: "mandate_granted"; mandate: StoredMandate }
   | { type: "mandate_revoked"; mandateId: string }
   | {

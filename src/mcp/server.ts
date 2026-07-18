@@ -71,7 +71,7 @@ server.tool(
   "money_pay",
   "Pay another account on the money network (an agent, a provider, or a user). Spends from this agent's balance under its owner's mandate; may be denied or escalated by policy.",
   {
-    to: z.string().describe("destination account id, e.g. agt_1a2b3c4d or prv_9f8e7d6c"),
+    to: z.string().describe("destination account id or public handle, e.g. agt_1a2b3c4d or @researcher"),
     amount_usd: z.number().positive().describe("amount in dollars, e.g. 0.25"),
     memo: z.string().default("").describe("what this payment is for"),
     idempotency_key: z

@@ -69,12 +69,12 @@ export function verifyRequest(publicKeyB64: string, signatureB64: string, parts:
 }
 
 /** The headers a client attaches to a signed request. Agents identify via
- *  x-agent-id; owners (users) sign admin requests the same way via x-user-id. */
+ * x-agent-id, owners via x-user-id, and sellers via x-provider-id. */
 export function signedHeaders(
   accountId: string,
   privateKeyB64: string,
   parts: Omit<SignedRequestParts, "ts" | "nonce">,
-  idHeader: "x-agent-id" | "x-user-id" = "x-agent-id"
+  idHeader: "x-agent-id" | "x-user-id" | "x-provider-id" = "x-agent-id"
 ): Record<string, string> {
   const ts = Date.now();
   const nonce = randomUUID();

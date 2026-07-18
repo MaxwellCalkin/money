@@ -36,11 +36,29 @@ export interface Account {
   id: string;
   kind: AccountKind;
   name: string;
-  /** Agents are owned by a user; the owner's mandates govern their spending. */
+  /** Public network address, unique across users, agents, and providers. */
+  handle?: string;
+  /** Agents and providers may be owned by a user. */
   ownerId?: string;
-  /** Agent identity: base64 SPKI Ed25519 public key registered at creation.
-   *  HTTP spend requests must be signed by the matching private key. */
+  /** Account identity: base64 SPKI Ed25519 public key registered at creation.
+   *  HTTP requests must be signed by the matching private key. */
   publicKey?: string;
+  createdAt: number;
+}
+
+/** A paid HTTP service published by a provider on the network. Pricing and
+ * endpoint identity live here, outside seller-controlled 402 response text. */
+export interface Service {
+  id: string;
+  providerId: string;
+  /** Unique within the provider; public address is @provider/slug. */
+  slug: string;
+  name: string;
+  description: string;
+  endpointUrl: string;
+  price: Micros;
+  active: boolean;
+  idempotencyKey: string;
   createdAt: number;
 }
 
@@ -59,6 +77,8 @@ export interface Transfer {
    *  ("x402:<host>"). Replay rebuilds mandate counters from this field so
    *  the new-payee throttle state survives restarts exactly. */
   externalPayee?: string;
+  /** Present when this transfer returns value from a provider to the payer. */
+  refundOf?: string;
 }
 
 export interface Mandate {
@@ -116,7 +136,8 @@ export type DenialCode =
   | "insufficient_funds"
   | "idempotency_conflict"
   | "permit_invalid"
-  | "challenge_invalid";
+  | "challenge_invalid"
+  | "refund_invalid";
 
 export type Decision =
   | { ok: true; permit: Permit }
@@ -137,6 +158,8 @@ export interface Receipt {
   /** External vendor identity ("x402:<host>") — covered by the receipt hash,
    *  so a doctored log cannot repoint who an external payment went to. */
   externalPayee?: string;
+  /** Original purchase receipt this refund is economically tied to. */
+  refundOf?: string;
   prevHash: string;
   hash: string;
 }
@@ -145,6 +168,8 @@ export interface Receipt {
 export interface Challenge {
   id: string;
   providerId: string;
+  /** Present when issued from a registered seller service. */
+  serviceId?: string;
   amount: Micros;
   resource: string;
   createdAt: number;
@@ -158,6 +183,10 @@ export type PayResult =
   | { status: "paid"; transfer: Transfer; receipt: Receipt; replayed: boolean }
   | { status: "denied"; code: DenialCode; reason: string }
   | { status: "escalate"; reason: string; mandateId: string };
+
+export type RefundResult =
+  | { status: "refunded"; transfer: Transfer; receipt: Receipt; replayed: boolean; remaining: Micros }
+  | { status: "denied"; code: DenialCode; reason: string };
 
 /**
  * An external (out-of-loop) x402 purchase. Two-phase: the internal debit

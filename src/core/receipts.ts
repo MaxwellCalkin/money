@@ -56,7 +56,7 @@ export class ReceiptChain {
 
 /** Canonical serialization: fixed key order, so the hash is deterministic. */
 function canonical(r: Omit<Receipt, "hash">): string {
-  return JSON.stringify({
+  const base = {
     seq: r.seq,
     id: r.id,
     ts: r.ts,
@@ -68,8 +68,14 @@ function canonical(r: Omit<Receipt, "hash">): string {
     mandateId: r.mandateId ?? null,
     permitId: r.permitId ?? null,
     externalPayee: r.externalPayee ?? null,
-    prevHash: r.prevHash,
-  });
+  };
+  // Preserve the exact legacy byte representation for ordinary receipts so
+  // logs created before refunds existed remain verifiable after upgrade.
+  return JSON.stringify(
+    r.refundOf
+      ? { ...base, refundOf: r.refundOf, prevHash: r.prevHash }
+      : { ...base, prevHash: r.prevHash }
+  );
 }
 
 export function hashReceipt(r: Omit<Receipt, "hash">): string {
