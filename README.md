@@ -13,7 +13,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 3. **Prefunding buys the speed.** Authorization is a local policy + balance check — no external round-trip on the hot path.
 4. **Exactly-once by construction.** Idempotency keys on every transfer; 402 challenges pay-once/redeem-once. Agents retry by default — the network must shrug.
 
-## What's here (v0.4)
+## What's here (v0.5)
 
 | Piece | File | What it does |
 |---|---|---|
@@ -21,7 +21,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | Policy | `src/core/policy.ts` | Mandates (budget, per-tx cap, daily cap, escalation line, new-payee throttle, allowlist, expiry) → single-use permits bound to exact payee+amount |
 | Receipts | `src/core/receipts.ts` | Hash-chained evidence log; tamper detection |
 | Persistence | `src/core/store.ts` | Append-only JSONL event log; replay rebuilds everything and refuses tampered logs |
-| Production ledger kernel | `db/migrations/`, `src/db/` | Postgres double-entry journal, cached balances, deterministic row locking, actor-scoped idempotency, migration checksums, reconciliation, and SKIP LOCKED outbox |
+| Production money kernel | `db/migrations/`, `src/db/` | Postgres double-entry journal plus atomic mandate evaluation, durable exact-tuple approvals, policy evidence, deterministic row locking, actor-scoped idempotency, migration checksums, reconciliation, and SKIP LOCKED outbox |
 | Identity | `src/core/identity.ts` | Ed25519 keys for owners, agents, and providers; every mutation is verified against the registered key |
 | Network | `src/core/network.ts` | Accounts + public handles, funding, agent payments, durable approvals, seller services, mandates, and 402 challenges |
 | Service registry | `src/core/network.ts` | Provider-owned `@handle/service` listings with endpoint and server-side price |
@@ -42,7 +42,7 @@ npm run demo     # the whole story in one script
 npm run api      # the HTTP server on :4021 (durable: data/events.jsonl)
 ```
 
-### Run the production ledger kernel
+### Run the production money kernel
 
 The database path requires Node 20+ and PostgreSQL 18. Start the local database
 and transaction pool (the committed password is intentionally local-only):
@@ -52,6 +52,7 @@ docker compose up -d postgres pgbouncer
 export DATABASE_URL=postgres://money:money-dev-only@127.0.0.1:5432/money
 npm run db:migrate
 npm run db:reconcile
+npm run db:test
 ```
 
 Application traffic should use PgBouncer on port `6432`; migrations and
@@ -63,19 +64,21 @@ The Postgres kernel stores micros as signed 64-bit integers (not JavaScript
 numbers), locks both account rows in deterministic order, writes exactly two
 zero-sum journal entries, updates cached balances, creates receipt evidence,
 and enqueues an outbox event in one transaction. Exact retries return the same
-transfer and receipt; changed terms return an idempotency conflict. Normal API
-credentials can register identities and allocate funds but cannot invoke raw
-agent payment or treasury funding until the policy-aware database command is
-installed.
+transfer and receipt; changed terms return an idempotency conflict. Normal
+application credentials can register identities, allocate owner funds,
+grant/revoke mandates, request policy-governed agent payments, and resolve
+owner approvals. They cannot invoke raw agent payment, generic posting, or
+treasury funding.
 
 For operations health, set `MONEY_OPS_TOKEN` and run `npm run ops:db`.
 `GET /health/live` and `GET /health/ready` are safe for probes;
 `GET /ops/reconcile` requires that bearer token.
 
-The existing product API remains on the heavily tested in-process engine while
-mandate evaluation is moved into the Postgres posting transaction. The ops
-service intentionally exposes no database-backed payment endpoint before that
-invariant is complete.
+The policy-aware Postgres gateway is available in `src/db/policy.ts` and is
+tested independently of the older engine. The existing public product API
+still runs on the heavily tested JSONL engine until its signed identity,
+challenge, marketplace, and bridge routes are switched over coherently. The
+ops service intentionally exposes no payment endpoint.
 
 The dashboard is private. Export the `MONEY_USER_ID` and `MONEY_OWNER_KEY`
 printed during onboarding, then mint an eight-hour browser session:
@@ -181,11 +184,11 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 
 ## Honest v0 shortcuts (the roadmap is the inverse)
 
-- The complete product API still defaults to the local JSONL engine (`data/events.jsonl`; `MONEY_DATA` overrides it). The normalized Postgres ledger kernel now exists and is executable, but it is not exposed for agent payments until mandate counters and approvals join the same database transaction; splitting policy from posting would create a double-spend gap.
+- The complete product API still defaults to the local JSONL engine (`data/events.jsonl`; `MONEY_DATA` overrides it). The normalized Postgres kernel now atomically combines mandate policy, counters, approvals, payment posting, receipt evidence, and outbox events. The next migration is the signed HTTP/control-plane surface, followed by services, challenges, refunds, and external-rail orchestration.
 - Paid challenges become durable before money moves, so a purchased service remains redeemable after restart. Unpaid anonymous challenges stay ephemeral so page requests cannot fill the ledger.
 - Identity is an Ed25519 keypair per account: agents sign spends and owners sign admin mutations (fund/allocate/mandates/revoke/rotate-key), over method+path+body+timestamp+nonce, verified against the key registered at creation. Key rotation is the leaked-key remediation path (→ RFC 9421 HTTP Message Signatures + `@authority` binding on the wire; keys chained to a KYC'd owner; signup rate-limiting and owner-key delivery off stdout).
 - Browser access uses an eight-hour bearer session minted by an owner-signed request. Sessions are hashed in memory and disappear on restart (→ passkeys plus a distributed session store for production).
-- The JSONL product path is single-node and shares policy with the API. The Postgres path is multi-instance-safe at the posting layer; policy, approval, challenge, and bridge commands still need migration before it can replace the prototype API end-to-end.
+- The JSONL product path is single-node and shares policy with the API. The Postgres path is multi-instance-safe for ledger, mandate, and approval commands; signed identity/control-plane, challenge, marketplace, refund, and bridge commands still need migration before it can replace the prototype API end-to-end.
 - External top-up is simulated, and the x402 bridge to the outside machine economy runs against a **mock** wallet + seller (protocol-faithful x402 v1 client, but Ed25519 stands in for EIP-712/secp256k1 signing and there's no on-chain settlement) — so mock-green certifies the accounting and policy, not chain finality (→ real USDC wallet + facilitator on Base; card/ACH top-up via sponsor-bank FBO).
 - The ledger can settle between accounts owned by different users, but this is still a development sandbox. Turning that path on for real customer funds requires the sponsor-bank/FBO, KYC/KYB, sanctions, fraud, safeguarding, and licensing program around it; code alone does not cross the money-transmission line.
 - No subscriptions, sub-agent delegation, or insurance yet — these are the next programmable-commerce layers after the now-working service registry and refunds.

@@ -30,6 +30,19 @@ grant execute on function money_private.post_owner_allocation(text, text, text, 
   to money_app;
 grant execute on function money_private.register_account(text, text, text, text, text, text)
   to money_app;
+grant execute on function money_private.grant_mandate(text, text, text, bigint, bigint, bigint, bigint, bigint, text[], timestamptz, text)
+  to money_app;
+grant execute on function money_private.revoke_mandate(text, uuid)
+  to money_app;
+grant execute on function money_private.request_agent_payment(text, text, text, text, bigint, text)
+  to money_app;
+grant execute on function money_private.resolve_approval(text, uuid, text, text)
+  to money_app;
+grant execute on function money_private.get_mandate(text, uuid),
+  money_private.get_approval(text, uuid),
+  money_private.list_approvals(text, text, integer),
+  money_private.list_mandates(text, integer)
+  to money_app;
 
 grant usage on schema money, money_private to money_treasury;
 grant select on money.accounts, money.assets, money.balances to money_treasury;
@@ -41,5 +54,6 @@ grant select, update on money.outbox_events to money_worker;
 
 grant usage on schema money to money_ops;
 grant select on money.schema_migrations, money.accounts, money.assets,
-  money.balances, money.transfers, money.ledger_entries, money.receipts
+  money.balances, money.transfers, money.ledger_entries, money.receipts,
+  money.mandates, money.approvals, money.transfer_authorizations
   to money_ops;

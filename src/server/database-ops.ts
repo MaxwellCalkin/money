@@ -14,9 +14,9 @@ function sameToken(expected: string, authorization?: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** Operational surface for the database-backed kernel. It intentionally does
- * not expose a payment route until mandate enforcement has moved into the same
- * transaction as posting. */
+/** Operational surface for the database-backed kernel. Payment APIs live in
+ * the signed product control plane; this process exposes only probes and
+ * token-gated reconciliation. */
 export function createDatabaseOpsApi(
   db: TransactionalDatabase,
   ledger = new PostgresLedger(db),
@@ -39,7 +39,7 @@ export function createDatabaseOpsApi(
       }>(`
         select
           (select max(version) from money.schema_migrations) as version,
-          to_regprocedure('money_private.post_agent_payment(text,text,text,text,bigint,text,jsonb)') is not null as posting_ready
+          to_regprocedure('money_private.request_agent_payment(text,text,text,text,bigint,text)') is not null as posting_ready
       `);
       const row = result.rows[0];
       if (!row?.version || !row.posting_ready) {

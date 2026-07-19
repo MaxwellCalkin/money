@@ -66,9 +66,15 @@ describe("Postgres ledger kernel", () => {
 
   it("applies checksum-locked migrations idempotently", async () => {
     const replay = await runMigrations(db);
-    expect(replay).toEqual([expect.objectContaining({ version: "0001", applied: false })]);
+    expect(replay).toEqual([
+      expect.objectContaining({ version: "0001", applied: false }),
+      expect.objectContaining({ version: "0002", applied: false }),
+    ]);
     const rows = await db.query<{ version: string; checksum: string }>("select version, checksum from money.schema_migrations");
-    expect(rows.rows).toEqual([expect.objectContaining({ version: "0001", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) })]);
+    expect(rows.rows).toEqual([
+      expect.objectContaining({ version: "0001", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
+      expect.objectContaining({ version: "0002", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
+    ]);
     await db.query("update money.schema_migrations set checksum = repeat('0', 64) where version = '0001'");
     await expect(runMigrations(db)).rejects.toThrow(/checksum changed/);
   });
@@ -211,7 +217,7 @@ describe("Postgres ledger kernel", () => {
     expect((await app.request("/health/live")).status).toBe(200);
     const ready = await app.request("/health/ready");
     expect(ready.status).toBe(200);
-    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0001" }));
+    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0002" }));
     expect((await app.request("/ops/reconcile")).status).toBe(404);
     const reconciled = await app.request("/ops/reconcile", { headers: { authorization: "Bearer ops-secret" } });
     expect(reconciled.status).toBe(200);
@@ -222,9 +228,14 @@ describe("Postgres ledger kernel", () => {
     await db.executeScript(readFileSync(resolve("db/roles.sql"), "utf8"));
     const privileges = await db.query<{
       app_pay: boolean;
+      app_safe_pay: boolean;
+      app_grant_mandate: boolean;
+      app_policy_read: boolean;
       app_fund: boolean;
       app_generic: boolean;
       app_balances: boolean;
+      app_approvals: boolean;
+      app_mandates: boolean;
       treasury_fund: boolean;
       worker_outbox: boolean;
       worker_ledger: boolean;
@@ -232,9 +243,14 @@ describe("Postgres ledger kernel", () => {
     }>(`
       select
         has_function_privilege('money_app', 'money_private.post_agent_payment(text,text,text,text,bigint,text,jsonb)', 'EXECUTE') as app_pay,
+        has_function_privilege('money_app', 'money_private.request_agent_payment(text,text,text,text,bigint,text)', 'EXECUTE') as app_safe_pay,
+        has_function_privilege('money_app', 'money_private.grant_mandate(text,text,text,bigint,bigint,bigint,bigint,bigint,text[],timestamptz,text)', 'EXECUTE') as app_grant_mandate,
+        has_function_privilege('money_app', 'money_private.list_approvals(text,text,integer)', 'EXECUTE') as app_policy_read,
         has_function_privilege('money_app', 'money_private.post_confirmed_funding(text,text,text,bigint,jsonb)', 'EXECUTE') as app_fund,
         has_function_privilege('money_app', 'money_private.post_transfer(text,text,text,text,text,text,bigint,text,jsonb)', 'EXECUTE') as app_generic,
         has_table_privilege('money_app', 'money.balances', 'SELECT') as app_balances,
+        has_table_privilege('money_app', 'money.approvals', 'SELECT') as app_approvals,
+        has_table_privilege('money_app', 'money.mandates', 'SELECT') as app_mandates,
         has_function_privilege('money_treasury', 'money_private.post_confirmed_funding(text,text,text,bigint,jsonb)', 'EXECUTE') as treasury_fund,
         has_table_privilege('money_worker', 'money.outbox_events', 'UPDATE') as worker_outbox,
         has_table_privilege('money_worker', 'money.ledger_entries', 'SELECT') as worker_ledger,
@@ -242,9 +258,14 @@ describe("Postgres ledger kernel", () => {
     `);
     expect(privileges.rows[0]).toEqual({
       app_pay: false,
+      app_safe_pay: true,
+      app_grant_mandate: true,
+      app_policy_read: true,
       app_fund: false,
       app_generic: false,
       app_balances: false,
+      app_approvals: false,
+      app_mandates: false,
       treasury_fund: true,
       worker_outbox: true,
       worker_ledger: false,
