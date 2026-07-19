@@ -48,8 +48,19 @@ the pre-v0.7 request-hash and receipt-hash shape for non-refund transfers, so
 in-flight retries and historical reconciliation remain valid during a live
 upgrade.
 
+Migration `0005_external_settlement.sql` moves x402 outflow into the same
+transactional boundary. It binds policy to canonical host plus destination,
+stores payment authorizations as application-encrypted ciphertext, atomically
+creates either an exact owner approval or a pending debit, and permits only a
+verified confirmation to make that debit final. A separate least-privilege
+worker uses `FOR UPDATE SKIP LOCKED` to reverse expired pending debits. The
+confirmation and reversal functions lock the same lifecycle row, so only one
+can win. Reversals restore the agent balance but deliberately do not restore
+mandate counters. Historical non-external request and receipt hashes remain
+byte-for-byte compatible across the v0.7 to v0.8 upgrade.
+
 `money_private.post_transfer_kernel(...)` is the generalized posting kernel
-under v0.7. It is not granted to the application role. The old
+under v0.8. It is not granted to the application role. The old
 `post_transfer(...)` signature remains a compatibility wrapper; application
 traffic receives only narrow marketplace commands such as
 `request_challenge_payment(...)` and `issue_refund(...)`.

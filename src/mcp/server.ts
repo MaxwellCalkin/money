@@ -55,7 +55,7 @@ function text(value: unknown) {
   return { content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };
 }
 
-const server = new McpServer({ name: "money", version: "0.3.0" });
+const server = new McpServer({ name: "money", version: "0.8.0" });
 
 server.tool(
   "money_balance",
@@ -113,7 +113,7 @@ const pendingApprovals = new Map<string, WaitingApproval>();
  * the same key and the network returns the original header — never a second
  * debit or a second signed authorization.
  */
-const pendingExternal = new Map<string, { idempotencyKey: string; externalId?: string; paymentHeader?: string; paidMicros?: number }>();
+const pendingExternal = new Map<string, PendingExternal>();
 
 async function fetchWithReceipt(url: string, challengeId: string, receiptId: string): Promise<Response> {
   return fetch(url, {
@@ -200,12 +200,55 @@ async function discoverApproval(url: string): Promise<WaitingApproval | undefine
   };
 }
 
-type PendingExternal = { idempotencyKey: string; externalId?: string; paymentHeader?: string; paidMicros?: number };
+type PendingExternal = {
+  idempotencyKey: string;
+  externalId?: string;
+  paymentHeader?: string;
+  paidMicros?: number;
+  settlementHeader?: string;
+  deliveredStatus?: number;
+  deliveredBody?: string;
+};
+
+async function confirmExternalDelivery(url: string, pending: PendingExternal) {
+  if (!pending.externalId || !pending.settlementHeader) {
+    return text({
+      status: pending.deliveredStatus ?? 502,
+      paid: fmt(pending.paidMicros ?? 0),
+      error: "seller delivered without a verifiable x402 settlement claim; the pending debit will auto-reverse",
+      body: safeJson(pending.deliveredBody ?? ""),
+    });
+  }
+  const confirmation = await api(`/pay-external/${pending.externalId}/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ settlement: pending.settlementHeader }),
+  }).catch(() => ({ status: 0, body: { error: "network_unavailable" } }));
+  if (confirmation.status >= 200 && confirmation.status < 300 && confirmation.body?.ok === true) {
+    pendingExternal.delete(url);
+    return text({
+      status: pending.deliveredStatus ?? 200,
+      paid: fmt(pending.paidMicros ?? 0),
+      ...(confirmation.body.settledTx ? { settledTx: confirmation.body.settledTx } : {}),
+      body: safeJson(pending.deliveredBody ?? ""),
+    });
+  }
+  // Keep the seller's claim and response in memory. The next tool call retries
+  // confirmation only; it never resends the one-time payment authorization.
+  return text({
+    status: confirmation.status,
+    paid: fmt(pending.paidMicros ?? 0),
+    externalId: pending.externalId,
+    error: "seller delivered, but settlement confirmation has not completed; call money_fetch again to retry confirmation",
+    confirmation: confirmation.body,
+    body: safeJson(pending.deliveredBody ?? ""),
+  });
+}
 
 /** Retry an external URL with an already-issued X-PAYMENT header, then
  *  confirm settlement (finalizing the pending debit — unconfirmed payments
  *  auto-reverse server-side). */
 async function retryExternal(url: string, pending: PendingExternal) {
+  if (pending.settlementHeader) return confirmExternalDelivery(url, pending);
   let res: Response;
   try {
     res = await fetch(url, { headers: { "x-payment": pending.paymentHeader! } });
@@ -220,18 +263,19 @@ async function retryExternal(url: string, pending: PendingExternal) {
   const bodyText = await res.text();
   if (res.ok) {
     const settlementHeader = res.headers.get("x-payment-response");
-    const settlement = settlementHeader ? decodeSettlement(settlementHeader) : null;
-    await api(`/pay-external/${pending.externalId}/confirm`, {
-      method: "POST",
-      body: JSON.stringify({ transaction: settlement?.transaction }),
-    }).catch(() => {});
-    pendingExternal.delete(url);
-    return text({
-      status: res.status,
-      paid: fmt(pending.paidMicros ?? 0),
-      ...(settlement?.transaction ? { settledTx: settlement.transaction } : {}),
-      body: safeJson(bodyText),
-    });
+    pending.deliveredStatus = res.status;
+    pending.deliveredBody = bodyText;
+    if (!settlementHeader || !decodeSettlement(settlementHeader)) {
+      pendingExternal.delete(url);
+      return text({
+        status: res.status,
+        paid: fmt(pending.paidMicros ?? 0),
+        error: "seller delivered without a valid x402 settlement response; the pending debit will auto-reverse",
+        body: safeJson(bodyText),
+      });
+    }
+    pending.settlementHeader = settlementHeader;
+    return confirmExternalDelivery(url, pending);
   }
   // The seller refused the header (expired, replayed, or hostile). Drop the
   // local state; the unredeemed pending payment auto-reverses server-side.
@@ -262,6 +306,14 @@ async function externalFetch(url: string, accepts: unknown[]) {
     method: "POST",
     body: JSON.stringify({ url, requirement, idempotencyKey: pending.idempotencyKey }),
   });
+  if (payment.body?.status === "approval_required") {
+    return text({
+      status: 202,
+      approval: payment.body.approval,
+      externalId: payment.body.externalId,
+      note: "external payment is waiting in the owner's approval inbox; call money_fetch again after the owner decides",
+    });
+  }
   if (payment.body?.status !== "paid") {
     pendingExternal.delete(url); // nothing debited — a future attempt starts fresh
     return text({ status: 402, error: "external payment was not authorized by policy", decision: payment.body });

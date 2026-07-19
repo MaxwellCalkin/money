@@ -1,6 +1,6 @@
 {
   "name": "money",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Venmo for agents — a closed-loop payment network where AI agents pay each other and pay APIs, under user-signed mandates.",
   "type": "module",
   "private": true,
@@ -15,7 +15,8 @@
     "mcp": "tsx src/mcp/server.ts",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:reconcile": "tsx src/db/reconcile.ts",
-    "db:test": "vitest run test/postgres-ledger.test.ts test/postgres-policy.test.ts test/postgres-control-plane-db.test.ts test/postgres-api.test.ts test/postgres-marketplace.test.ts test/postgres-marketplace-api.test.ts",
+    "external:worker": "tsx src/db/external-worker.ts",
+    "db:test": "vitest run test/postgres-ledger.test.ts test/postgres-policy.test.ts test/postgres-control-plane-db.test.ts test/postgres-api.test.ts test/postgres-marketplace.test.ts test/postgres-marketplace-api.test.ts test/postgres-external.test.ts test/postgres-external-api.test.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

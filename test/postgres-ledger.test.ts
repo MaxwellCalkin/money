@@ -71,6 +71,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0002", applied: false }),
       expect.objectContaining({ version: "0003", applied: false }),
       expect.objectContaining({ version: "0004", applied: false }),
+      expect.objectContaining({ version: "0005", applied: false }),
     ]);
     const rows = await db.query<{ version: string; checksum: string }>("select version, checksum from money.schema_migrations");
     expect(rows.rows).toEqual([
@@ -78,6 +79,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0002", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0003", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0004", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
+      expect.objectContaining({ version: "0005", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
     ]);
     await db.query("update money.schema_migrations set checksum = repeat('0', 64) where version = '0001'");
     await expect(runMigrations(db)).rejects.toThrow(/checksum changed/);
@@ -221,7 +223,7 @@ describe("Postgres ledger kernel", () => {
     expect((await app.request("/health/live")).status).toBe(200);
     const ready = await app.request("/health/ready");
     expect(ready.status).toBe(200);
-    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0004" }));
+    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0005" }));
     expect((await app.request("/ops/reconcile")).status).toBe(404);
     const reconciled = await app.request("/ops/reconcile", { headers: { authorization: "Bearer ops-secret" } });
     expect(reconciled.status).toBe(200);
@@ -245,6 +247,12 @@ describe("Postgres ledger kernel", () => {
       app_market_refund: boolean;
       app_market_kernel: boolean;
       app_challenges: boolean;
+      app_external_request: boolean;
+      app_external_confirm: boolean;
+      app_external_secret: boolean;
+      app_external_reverse: boolean;
+      app_external_sweep: boolean;
+      app_external_table: boolean;
       app_fund: boolean;
       app_generic: boolean;
       app_balances: boolean;
@@ -254,6 +262,8 @@ describe("Postgres ledger kernel", () => {
       app_sessions: boolean;
       treasury_fund: boolean;
       worker_outbox: boolean;
+      worker_external_sweep: boolean;
+      worker_external_table: boolean;
       worker_ledger: boolean;
       ops_ledger: boolean;
       ops_global_health: boolean;
@@ -274,6 +284,12 @@ describe("Postgres ledger kernel", () => {
         has_function_privilege('money_app', 'money_private.issue_refund(text,uuid,bigint,text,text)', 'EXECUTE') as app_market_refund,
         has_function_privilege('money_app', 'money_private.post_transfer_kernel(text,text,text,text,text,text,bigint,text,jsonb,uuid)', 'EXECUTE') as app_market_kernel,
         has_table_privilege('money_app', 'money.challenges', 'SELECT') as app_challenges,
+        has_function_privilege('money_app', 'money_private.request_external_payment(uuid,text,text,text,text,text,text,text,text,bigint,bytea,bytea,timestamptz,timestamptz)', 'EXECUTE') as app_external_request,
+        has_function_privilege('money_app', 'money_private.confirm_external_payment(text,uuid,text)', 'EXECUTE') as app_external_confirm,
+        has_function_privilege('money_app', 'money_private.get_external_payment_secret(text,uuid)', 'EXECUTE') as app_external_secret,
+        has_function_privilege('money_app', 'money_private.reverse_external_payment(uuid)', 'EXECUTE') as app_external_reverse,
+        has_function_privilege('money_app', 'money_private.sweep_external_payments(integer)', 'EXECUTE') as app_external_sweep,
+        has_table_privilege('money_app', 'money.external_payments', 'SELECT') as app_external_table,
         has_function_privilege('money_app', 'money_private.post_confirmed_funding(text,text,text,bigint,jsonb)', 'EXECUTE') as app_fund,
         has_function_privilege('money_app', 'money_private.post_transfer(text,text,text,text,text,text,bigint,text,jsonb)', 'EXECUTE') as app_generic,
         has_table_privilege('money_app', 'money.balances', 'SELECT') as app_balances,
@@ -283,6 +299,8 @@ describe("Postgres ledger kernel", () => {
         has_table_privilege('money_app', 'money.owner_sessions', 'SELECT') as app_sessions,
         has_function_privilege('money_treasury', 'money_private.post_confirmed_funding(text,text,text,bigint,jsonb)', 'EXECUTE') as treasury_fund,
         has_table_privilege('money_worker', 'money.outbox_events', 'UPDATE') as worker_outbox,
+        has_function_privilege('money_worker', 'money_private.sweep_external_payments(integer)', 'EXECUTE') as worker_external_sweep,
+        has_table_privilege('money_worker', 'money.external_payments', 'SELECT') as worker_external_table,
         has_table_privilege('money_worker', 'money.ledger_entries', 'SELECT') as worker_ledger,
         has_table_privilege('money_ops', 'money.ledger_entries', 'SELECT') as ops_ledger,
         has_function_privilege('money_ops', 'money_private.ledger_health()', 'EXECUTE') as ops_global_health,
@@ -303,6 +321,12 @@ describe("Postgres ledger kernel", () => {
       app_market_refund: true,
       app_market_kernel: false,
       app_challenges: false,
+      app_external_request: true,
+      app_external_confirm: true,
+      app_external_secret: true,
+      app_external_reverse: false,
+      app_external_sweep: false,
+      app_external_table: false,
       app_fund: false,
       app_generic: false,
       app_balances: false,
@@ -312,6 +336,8 @@ describe("Postgres ledger kernel", () => {
       app_sessions: false,
       treasury_fund: true,
       worker_outbox: true,
+      worker_external_sweep: true,
+      worker_external_table: false,
       worker_ledger: false,
       ops_ledger: true,
       ops_global_health: true,
@@ -334,7 +360,7 @@ describe("Postgres ledger kernel", () => {
       );
       expect((await db.query("select * from money_private.account_state('usr_role0001', 'USD')")).rows).toHaveLength(1);
       expect((await db.query("select * from money_private.list_public_services(10, null, null)")).rows).toEqual([]);
-      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0004" });
+      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0005" });
       await expect(db.query(
         "select * from money_private.register_account('usr_bypass01', 'user', 'Bypass', null, null, $1)",
         [`bypass-public-key-${"x".repeat(40)}`]

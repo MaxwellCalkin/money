@@ -1,13 +1,31 @@
 import { serve } from "@hono/node-server";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Hono, type Context, type Next } from "hono";
+import { decryptPaymentHeader, encryptPaymentHeader, parseExternalHeaderKey, type ExternalAuthorizationBinding } from "../bridge/cipher.ts";
+import {
+  buildXPayment,
+  canonicalHostOf,
+  decodeSettlement,
+  decodeXPayment,
+  requirementToMicros,
+  type PaymentRequirements,
+  type SettlementResponse,
+  type XPaymentPayload,
+} from "../bridge/x402.ts";
+import { MockWallet, type ExternalWallet } from "../bridge/wallet.ts";
 import { isValidPublicKey, verifyRequest } from "../core/identity.ts";
 import { isValidHandle, isValidServiceSlug, normalizeServiceSlug } from "../core/network.ts";
 import type { DatabaseAccount } from "../db/ledger.ts";
 import { PostgresLedger, type DatabaseTransferResult } from "../db/ledger.ts";
 import { PostgresControlPlane, type AccountBalance, type DatabaseService, type PaymentEvidence } from "../db/control-plane.ts";
 import type { TransactionalDatabase } from "../db/database.ts";
+import {
+  PostgresExternal,
+  type DatabaseExternalPayment,
+  type DatabaseExternalPaymentSecret,
+  type ExternalCommandResult,
+} from "../db/external.ts";
 import { PostgresMarketplace, type DatabaseChallenge } from "../db/marketplace.ts";
 import { runMigrations } from "../db/migrate.ts";
 import { PostgresPolicy, type DatabaseApproval, type DatabaseMandate, type PolicyPaymentResult } from "../db/policy.ts";
@@ -24,7 +42,23 @@ type IdentityKind = "user" | "agent" | "provider";
 export interface PostgresApiOptions {
   /** Local demos only. Real top-ups arrive through the separate treasury role. */
   allowDevelopmentFunding?: boolean;
+  /** All three external options are required; otherwise x402 routes fail closed. */
+  externalWallet?: ExternalWallet;
+  externalHeaderKey?: Uint8Array;
+  verifyExternalSettlement?: ExternalSettlementVerifier;
+  now?: () => number;
 }
+
+export interface ExternalSettlementVerificationInput {
+  payment: DatabaseExternalPaymentSecret;
+  paymentHeader: string;
+  authorization: XPaymentPayload;
+  settlement: SettlementResponse;
+}
+
+export type ExternalSettlementVerifier = (
+  input: ExternalSettlementVerificationInput
+) => Promise<{ ok: boolean; reason?: string }> | { ok: boolean; reason?: string };
 
 function databaseCode(error: unknown): string | undefined {
   let cursor: unknown = error;
@@ -144,6 +178,48 @@ function challengeView(challenge: DatabaseChallenge) {
   };
 }
 
+function externalView(payment: DatabaseExternalPayment) {
+  return {
+    id: payment.id,
+    agentId: payment.agentId,
+    state: payment.state,
+    host: payment.host,
+    payTo: payment.payTo,
+    settlementAsset: payment.settlementAsset,
+    settlementNetwork: payment.settlementNetwork,
+    resource: payment.resource,
+    policyPayee: payment.policyPayee,
+    amountMicros: jsonInteger(payment.amountMicros),
+    amountDisplay: formatMicros(payment.amountMicros),
+    ...(payment.transferId ? { transferId: payment.transferId } : {}),
+    ...(payment.receiptId ? { receiptId: payment.receiptId } : {}),
+    ...(payment.approvalId ? { approvalId: payment.approvalId } : {}),
+    authorizationExpiresAt: payment.authorizationExpiresAt.getTime(),
+    reverseAfter: payment.reverseAfter.getTime(),
+    ...(payment.settledTx ? { settledTx: payment.settledTx } : {}),
+    ...(payment.reversalTransferId ? { reversalTransferId: payment.reversalTransferId } : {}),
+    createdAt: payment.createdAt.getTime(),
+    updatedAt: payment.updatedAt.getTime(),
+  };
+}
+
+function externalBinding(payment: DatabaseExternalPaymentSecret): ExternalAuthorizationBinding {
+  return {
+    externalId: payment.id,
+    agentId: payment.agentId,
+    idempotencyKey: payment.idempotencyKey,
+    host: payment.host,
+    payTo: payment.payTo,
+    settlementAsset: payment.settlementAsset,
+    settlementNetwork: payment.settlementNetwork,
+    resource: payment.resource,
+    policyPayee: payment.policyPayee,
+    amountMicros: payment.amountMicros,
+    authorizationExpiresAt: payment.authorizationExpiresAt,
+    reverseAfter: payment.reverseAfter,
+  };
+}
+
 function approvalView(approval: DatabaseApproval, challenge?: DatabaseChallenge) {
   return {
     id: approval.id,
@@ -200,14 +276,23 @@ function serviceView(service: DatabaseService, provider?: DatabaseAccount) {
 }
 
 /** Core production API backed by the atomic Postgres money kernel. Identity,
- * policy, marketplace, challenge, and refund commands are durable here;
- * external-rail settlement remains on the legacy API until its two-phase
- * state machine moves into Postgres. */
+ * policy, marketplace, refunds, and the external settlement state machine are
+ * durable here. Real rail adapters are injected and the API fails closed when
+ * wallet, encryption, or independent settlement verification is absent. */
 export function createPostgresApi(db: TransactionalDatabase, options: PostgresApiOptions = {}) {
   const control = new PostgresControlPlane(db);
   const ledger = new PostgresLedger(db);
   const policy = new PostgresPolicy(db);
   const marketplace = new PostgresMarketplace(db);
+  const external = new PostgresExternal(db);
+  const clock = options.now ?? Date.now;
+  const externalHeaderKey = options.externalHeaderKey ? Buffer.from(options.externalHeaderKey) : undefined;
+  if (externalHeaderKey && externalHeaderKey.length !== 32) {
+    throw new Error("externalHeaderKey must contain exactly 32 bytes");
+  }
+  const externalBridgeReady = Boolean(
+    options.externalWallet && externalHeaderKey && options.verifyExternalSettlement
+  );
   const app = new Hono<ApiEnv>();
 
   app.onError((error, c) => {
@@ -222,6 +307,8 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   app.use("/owner/*", noStore);
   app.use("/agent/*", noStore);
   app.use("/provider/*", noStore);
+  app.use("/pay-external", noStore);
+  app.use("/pay-external/*", noStore);
   app.use("/dashboard/state", noStore);
 
   const readBody = async <T>(c: Context): Promise<T | null> => c.req.json<T>().catch(() => null);
@@ -383,6 +470,128 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     };
   };
 
+  const decryptExternalHeader = (payment: DatabaseExternalPaymentSecret): {
+    header: string;
+    authorization: XPaymentPayload;
+  } => {
+    if (!externalHeaderKey || !options.externalWallet) throw new Error("external bridge is unavailable");
+    const header = decryptPaymentHeader(
+      payment.paymentHeaderCiphertext,
+      externalHeaderKey,
+      externalBinding(payment)
+    );
+    const digest = createHash("sha256").update(header, "utf8").digest();
+    if (!digest.equals(payment.authorizationHash)) throw new Error("external authorization hash mismatch");
+    const authorization = decodeXPayment(header);
+    const auth = authorization?.payload.authorization;
+    if (!authorization || !auth || authorization.scheme !== "exact"
+      || authorization.network !== payment.settlementNetwork
+      || auth.from.toLowerCase() !== options.externalWallet.address.toLowerCase()
+      || auth.to.toLowerCase() !== payment.payTo.toLowerCase()
+      || auth.value !== payment.amountMicros.toString()
+      || Number(auth.validBefore) * 1_000 !== payment.authorizationExpiresAt.getTime()) {
+      throw new Error("stored external authorization does not match durable payment terms");
+    }
+    return { header, authorization };
+  };
+
+  const sameExternalTerms = (
+    payment: DatabaseExternalPaymentSecret,
+    input: {
+      host: string;
+      payTo: string;
+      settlementAsset: string;
+      settlementNetwork: string;
+      resource: string;
+      policyPayee: string;
+      amountMicros: bigint;
+    }
+  ) => payment.host === input.host
+    && payment.payTo.toLowerCase() === input.payTo.toLowerCase()
+    && payment.settlementAsset.toLowerCase() === input.settlementAsset.toLowerCase()
+    && payment.settlementNetwork === input.settlementNetwork
+    && payment.resource === input.resource
+    && payment.policyPayee === input.policyPayee
+    && payment.amountMicros === input.amountMicros;
+
+  const requestExistingExternal = (payment: DatabaseExternalPaymentSecret) => external.request({
+    externalId: payment.id,
+    agentId: payment.agentId,
+    idempotencyKey: payment.idempotencyKey,
+    host: payment.host,
+    payTo: payment.payTo,
+    settlementAsset: payment.settlementAsset,
+    settlementNetwork: payment.settlementNetwork,
+    resource: payment.resource,
+    policyPayee: payment.policyPayee,
+    amountMicros: payment.amountMicros,
+    paymentHeaderCiphertext: payment.paymentHeaderCiphertext,
+    authorizationHash: payment.authorizationHash,
+    authorizationExpiresAt: payment.authorizationExpiresAt,
+    reverseAfter: payment.reverseAfter,
+  });
+
+  const externalCommandView = async (
+    requesterId: string,
+    result: ExternalCommandResult,
+    exposeHeader: boolean,
+    payingAgentId = requesterId
+  ) => {
+    if (result.status === "denied") {
+      return {
+        status: "denied" as const,
+        replayed: result.replayed,
+        ...(result.externalId ? { externalId: result.externalId } : {}),
+        ...(result.externalState ? { state: result.externalState } : {}),
+        code: result.code ?? "denied",
+        reason: result.reason ?? "external payment denied",
+      };
+    }
+    if (!result.externalId || !result.externalState) {
+      throw new Error("external command is missing durable identity");
+    }
+    if (result.status === "approval_required") {
+      if (!result.approvalId) throw new Error("external approval result is missing approval id");
+      const approval = await policy.approval(requesterId, result.approvalId);
+      if (!approval) throw new Error("external approval is not visible to its requester");
+      return {
+        status: "approval_required" as const,
+        externalId: result.externalId,
+        state: result.externalState,
+        approval: approvalView(approval),
+        replayed: result.replayed,
+      };
+    }
+    if (!result.receiptId || !result.transferId) {
+      throw new Error("posted external payment is missing journal evidence");
+    }
+    const payment = await external.secret(payingAgentId, result.externalId);
+    if (!payment) throw new Error("posted external payment is not visible to its agent");
+    const evidence = await control.receipt(requesterId, result.receiptId);
+    if (!evidence) throw new Error("posted external receipt is not visible to its agent");
+    const decrypted = exposeHeader ? decryptExternalHeader(payment) : undefined;
+    return {
+      status: "paid" as const,
+      externalId: payment.id,
+      state: payment.state,
+      policyPayee: payment.policyPayee,
+      amountMicros: jsonInteger(payment.amountMicros),
+      settlementNetwork: payment.settlementNetwork,
+      settlementAsset: payment.settlementAsset,
+      resource: payment.resource,
+      ...(decrypted ? { paymentHeader: decrypted.header } : {}),
+      transfer: {
+        id: result.transferId,
+        from: evidence.from,
+        to: evidence.to,
+        amount: jsonInteger(evidence.amountMicros),
+        memo: evidence.memo,
+      },
+      receipt: evidenceView(evidence),
+      replayed: result.replayed,
+    };
+  };
+
   const stateFeed = async (requesterId: string, limit: number) => {
     const feed = await control.paymentFeed(requesterId, limit);
     const profiles = await profilesFor(feed);
@@ -396,12 +605,13 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   };
 
   const ownerSnapshot = async (userId: string) => {
-    const [accounts, mandates, approvals, feed, services] = await Promise.all([
+    const [accounts, mandates, approvals, feed, services, externalPayments] = await Promise.all([
       control.accountState(userId),
       policy.listMandates(userId, 100),
       policy.listApprovals(userId, undefined, 100),
       stateFeed(userId, 25),
       servicesView(userId),
+      external.list(userId, 100),
     ]);
     const renderedApprovals = await approvalViews(userId, approvals.reverse());
     return {
@@ -415,17 +625,18 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       mandates: mandates.map(mandateView),
       approvals: renderedApprovals,
       feed,
-      external: [],
+      external: externalPayments.map(externalView),
     };
   };
 
   const childSnapshot = async (accountId: string, limit = 25) => {
-    const [accounts, mandates, approvals, feed, services] = await Promise.all([
+    const [accounts, mandates, approvals, feed, services, externalPayments] = await Promise.all([
       control.accountState(accountId),
       policy.listMandates(accountId, 100),
       policy.listApprovals(accountId, undefined, 100),
       stateFeed(accountId, limit),
       servicesView(accountId),
+      external.list(accountId, Math.min(limit, 100)),
     ]);
     const activeMandate = mandates.find((mandate) => !mandate.revokedAt && mandate.expiresAt.getTime() > Date.now());
     const renderedApprovals = await approvalViews(accountId, approvals.reverse());
@@ -436,6 +647,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       approvals: renderedApprovals,
       feed,
       services,
+      external: externalPayments.map(externalView),
     };
   };
 
@@ -446,7 +658,9 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
         select (select max(version) from money.schema_migrations) as version,
           to_regprocedure('money_private.consume_signed_request(text,text,text,text,bigint,bytea)') is not null
           and to_regprocedure('money_private.request_agent_payment(text,text,text,text,bigint,text)') is not null
-          and to_regprocedure('money_private.request_challenge_payment(text,uuid)') is not null as ready
+          and to_regprocedure('money_private.request_challenge_payment(text,uuid)') is not null
+          and to_regprocedure('money_private.request_external_payment(uuid,text,text,text,text,text,text,text,text,bigint,bytea,bytea,timestamptz,timestamptz)') is not null
+          and to_regprocedure('money_private.confirm_external_payment(text,uuid,text)') is not null as ready
       `);
       return result.rows[0]?.ready
         ? c.json({ ok: true, schemaVersion: result.rows[0].version })
@@ -819,6 +1033,171 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     }
   });
 
+  // The agent forwards one allowlisted x402 requirement from the URL it
+  // actually fetched. The authorization is encrypted before it reaches the
+  // database and is released only after an atomic debit (or owner approval).
+  app.post("/pay-external", requireAgentSig, async (c) => {
+    if (!externalBridgeReady || !options.externalWallet || !externalHeaderKey) {
+      return c.json({
+        error: "external_bridge_unavailable",
+        reason: "wallet, header encryption, and settlement verification must all be configured",
+      }, 503);
+    }
+    const agentId = c.get("agentId");
+    const body = await readBody<{
+      url: string;
+      requirement: PaymentRequirements;
+      idempotencyKey: string;
+    }>(c);
+    if (!body || typeof body.url !== "string" || body.url.length < 1 || body.url.length > 2_048
+      || !body.requirement || typeof body.requirement !== "object" || !validClientKey(body.idempotencyKey)) {
+      return c.json({ error: "invalid_request", reason: "need url, requirement, and idempotencyKey" }, 400);
+    }
+    const host = canonicalHostOf(body.url);
+    if (!host.ok) return c.json({ error: "invalid_request", reason: host.reason }, 400);
+    const amount = requirementToMicros(body.requirement);
+    if (!amount.ok) return c.json({ error: "invalid_request", reason: amount.reason }, 400);
+    const amountMicros = BigInt(amount.micros);
+    const terms = {
+      host: host.host,
+      payTo: body.requirement.payTo,
+      settlementAsset: body.requirement.asset,
+      settlementNetwork: body.requirement.network,
+      resource: body.url,
+      policyPayee: `x402:${host.host}:${body.requirement.payTo.toLowerCase()}`,
+      amountMicros,
+    };
+
+    try {
+      // This read avoids an unnecessary HSM signature on ordinary retries.
+      // The database command below remains the concurrency authority.
+      const prior = await external.secretByKey(agentId, body.idempotencyKey);
+      if (prior) {
+        if (!sameExternalTerms(prior, terms)) {
+          return c.json({
+            status: "denied",
+            code: "idempotency_conflict",
+            reason: "idempotency key was reused with different external terms",
+            replayed: true,
+          }, 409);
+        }
+        const result = await requestExistingExternal(prior);
+        const view = await externalCommandView(agentId, result, true);
+        if (view.status === "paid") return c.json(view, 200);
+        if (view.status === "approval_required") return c.json(view, 202);
+        return c.json(view, view.code === "idempotency_conflict" || view.state === "reversed" ? 409 : 402);
+      }
+
+      const issuedAt = clock();
+      const { header, authorization } = buildXPayment(options.externalWallet, body.requirement, issuedAt);
+      const validBeforeSeconds = Number(authorization.validBefore);
+      if (!Number.isSafeInteger(validBeforeSeconds) || validBeforeSeconds * 1_000 <= issuedAt) {
+        return c.json({ error: "invalid_request", reason: "payment authorization has no usable validity window" }, 400);
+      }
+      const externalId = randomUUID();
+      const authorizationExpiresAt = new Date(validBeforeSeconds * 1_000);
+      // Keep a bounded confirmation grace window after the authorization can
+      // no longer be spent. This absorbs facilitator/chain verification lag
+      // without leaving a pending ledger debit indefinitely.
+      const reverseAfter = new Date(authorizationExpiresAt.getTime() + 5 * 60_000);
+      const binding: ExternalAuthorizationBinding = {
+        externalId,
+        agentId,
+        idempotencyKey: body.idempotencyKey,
+        ...terms,
+        authorizationExpiresAt,
+        reverseAfter,
+      };
+      const ciphertext = encryptPaymentHeader(header, externalHeaderKey, binding);
+      const result = await external.request({
+        externalId,
+        agentId,
+        idempotencyKey: body.idempotencyKey,
+        ...terms,
+        paymentHeaderCiphertext: ciphertext,
+        authorizationHash: createHash("sha256").update(header, "utf8").digest(),
+        authorizationExpiresAt,
+        reverseAfter,
+      });
+      const view = await externalCommandView(agentId, result, true);
+      if (view.status === "paid") return c.json(view, 200);
+      if (view.status === "approval_required") return c.json(view, 202);
+      return c.json(view, view.code === "idempotency_conflict" ? 409 : 402);
+    } catch (error) {
+      return databaseFailure(c, error, "external_payment_failed");
+    }
+  });
+
+  // Settlement verification deliberately happens before the short database
+  // transaction. The final command then serializes confirmation against the
+  // reversal worker; exactly one state transition can win.
+  app.post("/pay-external/:id/confirm", requireAgentSig, async (c) => {
+    if (!externalBridgeReady || !options.externalWallet || !options.verifyExternalSettlement) {
+      return c.json({ error: "external_bridge_unavailable" }, 503);
+    }
+    const agentId = c.get("agentId");
+    const externalId = c.req.param("id") ?? "";
+    const body = await readBody<{ settlement: string }>(c);
+    if (!validUuid(externalId) || !body || typeof body.settlement !== "string"
+      || body.settlement.length < 1 || body.settlement.length > 65_536) {
+      return c.json({ error: "invalid_request", reason: "need external payment id and settlement header" }, 400);
+    }
+    try {
+      const payment = await external.secret(agentId, externalId);
+      if (!payment) return c.json({ error: "external_payment_not_found" }, 404);
+      if (payment.state === "reversed") {
+        return c.json({ error: "confirm_failed", reason: "payment was already reversed", state: payment.state }, 409);
+      }
+      if (payment.state === "approval_required") {
+        return c.json({ error: "confirm_failed", reason: "payment has not been approved and debited", state: payment.state }, 409);
+      }
+      if (payment.state === "cancelled") {
+        return c.json({ error: "confirm_failed", reason: "payment authorization was cancelled", state: payment.state }, 409);
+      }
+      const settlement = decodeSettlement(body.settlement);
+      const decrypted = decryptExternalHeader(payment);
+      const auth = decrypted.authorization.payload.authorization;
+      if (!settlement || settlement.success !== true
+        || typeof settlement.transaction !== "string" || settlement.transaction.length < 1 || settlement.transaction.length > 256
+        || settlement.network !== payment.settlementNetwork
+        || typeof settlement.payer !== "string"
+        || settlement.payer.toLowerCase() !== auth.from.toLowerCase()) {
+        return c.json({ error: "settlement_unverified", reason: "settlement claim does not match the payment authorization" }, 409);
+      }
+      if (payment.state === "confirmed") {
+        if (payment.settledTx !== settlement.transaction) {
+          return c.json({ error: "confirm_failed", reason: "payment was confirmed with a different transaction", state: payment.state }, 409);
+        }
+        return c.json({ ok: true, state: payment.state, settledTx: payment.settledTx, replayed: true });
+      }
+
+      let verified: { ok: boolean; reason?: string };
+      try {
+        verified = await options.verifyExternalSettlement({
+          payment,
+          paymentHeader: decrypted.header,
+          authorization: decrypted.authorization,
+          settlement,
+        });
+      } catch (error) {
+        console.error("external settlement verifier failed", error);
+        return c.json({ error: "settlement_verifier_unavailable" }, 503);
+      }
+      if (!verified.ok) {
+        return c.json({
+          error: "settlement_unverified",
+          reason: verified.reason ?? "independent settlement verification failed",
+        }, 409);
+      }
+      const result = await external.confirm(agentId, externalId, settlement.transaction);
+      return result.ok
+        ? c.json({ ok: true, state: result.state, settledTx: result.settledTx, replayed: result.replayed })
+        : c.json({ error: "confirm_failed", reason: result.reason, state: result.state, replayed: result.replayed }, 409);
+    } catch (error) {
+      return databaseFailure(c, error, "external_confirmation_failed");
+    }
+  });
+
   app.post("/pay-challenge", requireAgentSig, async (c) => {
     const agentId = c.get("agentId");
     const body = await readBody<{ challengeId: string }>(c);
@@ -855,9 +1234,18 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   app.post("/owner/approvals/:id/approve", requireOwnerAccess, async (c) => {
     const userId = c.get("userId");
     const approvalId = c.req.param("id") ?? "";
+    if (!validUuid(approvalId)) return c.json({ error: "approval_not_found" }, 404);
     const approval = await policy.approval(userId, approvalId);
     if (!approval) return c.json({ error: "approval_not_found" }, 404);
     try {
+      if (await external.isExternalApproval(userId, approvalId)) {
+        const result = await external.resolveApproval(userId, approvalId, "approve");
+        const updated = await policy.approval(userId, approvalId);
+        if (!updated) throw new Error("resolved external approval could not be read back");
+        const payment = await externalCommandView(userId, result, false, approval.agentId);
+        const status = payment.status === "paid" ? 200 : payment.status === "approval_required" ? 202 : 409;
+        return c.json({ approval: approvalView(updated), external: payment, replayed: result.replayed }, status);
+      }
       const result = await policy.resolveApproval(userId, approvalId, "approve");
       const updated = await policy.approval(userId, approvalId);
       if (!updated) throw new Error("resolved approval could not be read back");
@@ -871,11 +1259,22 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   app.post("/owner/approvals/:id/reject", requireOwnerAccess, async (c) => {
     const userId = c.get("userId");
     const approvalId = c.req.param("id") ?? "";
+    if (!validUuid(approvalId)) return c.json({ error: "approval_not_found" }, 404);
     const approval = await policy.approval(userId, approvalId);
     if (!approval) return c.json({ error: "approval_not_found" }, 404);
     const body = await readBody<{ reason?: string }>(c);
     const reason = typeof body?.reason === "string" ? body.reason.slice(0, 500) : "rejected by owner";
     try {
+      if (await external.isExternalApproval(userId, approvalId)) {
+        const result = await external.resolveApproval(userId, approvalId, "reject", reason);
+        const updated = await policy.approval(userId, approvalId);
+        if (!updated) throw new Error("rejected external approval could not be read back");
+        return c.json({
+          approval: approvalView(updated),
+          external: await externalCommandView(userId, result, false, approval.agentId),
+          replayed: result.replayed,
+        });
+      }
       const result = await policy.resolveApproval(userId, approvalId, "reject", reason);
       const updated = await policy.approval(userId, approvalId);
       if (!updated) throw new Error("rejected approval could not be read back");
@@ -893,13 +1292,37 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   });
   app.get("/dashboard/state", requireOwnerAccess, async (c) => c.json(await ownerSnapshot(c.get("userId"))));
 
-  return { app, control, ledger, policy, marketplace };
+  return { app, control, ledger, policy, marketplace, external };
 }
 
 export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) {
   const db = new PostgresDatabase({ applicationName: "money-product-api" });
   if (process.env.MONEY_AUTO_MIGRATE === "true") await runMigrations(db);
-  const { app } = createPostgresApi(db, { allowDevelopmentFunding: process.env.MONEY_ALLOW_DEV_FUNDING === "true" });
+  const mockExternal = process.env.MONEY_EXTERNAL_MOCK === "true";
+  if (mockExternal && process.env.NODE_ENV === "production") {
+    throw new Error("MONEY_EXTERNAL_MOCK cannot be enabled in production");
+  }
+  const configuredKey = process.env.MONEY_EXTERNAL_HEADER_KEY
+    ? parseExternalHeaderKey(process.env.MONEY_EXTERNAL_HEADER_KEY)
+    : undefined;
+  if (mockExternal && !configuredKey) {
+    throw new Error("MONEY_EXTERNAL_HEADER_KEY is required when MONEY_EXTERNAL_MOCK=true");
+  }
+  const mockWallet = mockExternal ? new MockWallet() : undefined;
+  const { app } = createPostgresApi(db, {
+    allowDevelopmentFunding: process.env.MONEY_ALLOW_DEV_FUNDING === "true",
+    ...(configuredKey ? { externalHeaderKey: configuredKey } : {}),
+    ...(mockWallet ? {
+      externalWallet: mockWallet,
+      // Explicit local-only fake rail. Production injects a facilitator or
+      // chain verifier and must never rely on seller-controlled claim fields.
+      verifyExternalSettlement: ({ settlement }: ExternalSettlementVerificationInput) => ({
+        ok: /^0xmock[0-9a-z_-]{1,240}$/i.test(settlement.transaction),
+        ...(!/^0xmock[0-9a-z_-]{1,240}$/i.test(settlement.transaction)
+          ? { reason: "mock settlement transaction must start with 0xmock" } : {}),
+      }),
+    } : {}),
+  });
   const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port });
   console.log(`Postgres money API listening on http://127.0.0.1:${port}`);
   console.log(`private owner dashboard at http://127.0.0.1:${port}/dashboard`);

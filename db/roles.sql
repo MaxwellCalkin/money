@@ -48,6 +48,13 @@ grant execute on function money_private.register_public_identity(text, text, tex
   money_private.redeem_service_challenge(text, uuid, uuid, uuid),
   money_private.issue_refund(text, uuid, bigint, text, text),
   money_private.get_marketplace_challenges(text, uuid[]),
+  money_private.request_external_payment(uuid, text, text, text, text, text, text, text, text, bigint, bytea, bytea, timestamptz, timestamptz),
+  money_private.resolve_external_approval(text, uuid, text, text),
+  money_private.confirm_external_payment(text, uuid, text),
+  money_private.list_external_payments_for_requester(text, integer),
+  money_private.get_external_payment_secret(text, uuid),
+  money_private.get_external_payment_secret_by_key(text, text),
+  money_private.is_external_approval(text, uuid),
   money_private.payment_feed(text, integer),
   money_private.get_receipt(text, uuid)
   to money_app;
@@ -70,8 +77,9 @@ grant select on money.accounts, money.assets, money.balances to money_treasury;
 grant execute on function money_private.post_confirmed_funding(text, text, text, bigint, jsonb)
   to money_treasury;
 
-grant usage on schema money to money_worker;
+grant usage on schema money, money_private to money_worker;
 grant select, update on money.outbox_events to money_worker;
+grant execute on function money_private.sweep_external_payments(integer) to money_worker;
 
 grant usage on schema money, money_private to money_ops;
 grant select on money.schema_migrations, money.accounts, money.assets,

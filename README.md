@@ -13,7 +13,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 3. **Prefunding buys the speed.** Authorization is a local policy + balance check — no external round-trip on the hot path.
 4. **Exactly-once by construction.** Idempotency keys on every transfer; 402 challenges pay-once/redeem-once. Agents retry by default — the network must shrug.
 
-## What's here (v0.7)
+## What's here (v0.8)
 
 | Piece | File | What it does |
 |---|---|---|
@@ -21,16 +21,16 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | Policy | `src/core/policy.ts` | Mandates (budget, per-tx cap, daily cap, escalation line, new-payee throttle, allowlist, expiry) → single-use permits bound to exact payee+amount |
 | Receipts | `src/core/receipts.ts` | Hash-chained evidence log; tamper detection |
 | Persistence | `src/core/store.ts` | Append-only JSONL event log; replay rebuilds everything and refuses tampered logs |
-| Production money kernel | `db/migrations/`, `src/db/` | Postgres double-entry journal plus atomic mandate evaluation, exact-tuple approvals, marketplace challenges, cumulative refunds, policy evidence, deterministic row locking, actor-scoped idempotency, migration checksums, reconciliation, and SKIP LOCKED outbox |
+| Production money kernel | `db/migrations/`, `src/db/` | Postgres double-entry journal plus atomic mandate evaluation, exact-tuple approvals, marketplace challenges, cumulative refunds, durable external settlement, policy evidence, deterministic row locking, actor-scoped idempotency, reconciliation, and SKIP LOCKED workers |
 | Identity | `src/core/identity.ts` | Ed25519 keys for owners, agents, and providers; every mutation is verified against the registered key |
 | Network | `src/core/network.ts` | Accounts + public handles, funding, agent payments, durable approvals, seller services, mandates, and 402 challenges |
 | Service registry | `src/core/network.ts`, `src/db/marketplace.ts` | Provider-owned `@handle/service` listings, registry-authoritative prices, safe shutdown, and public keyset pagination |
 | Seller SDK | `src/seller/middleware.ts` | Reusable Hono paywall plus a provider-signed client for challenges, receipt redemption, and partial refunds |
 | HTTP API | `src/server/api.ts` | Hono server on **:4021** — agent, owner, provider, catalog, and merchant APIs plus demo paid endpoints |
-| Postgres signed API | `src/server/postgres-api.ts` | Multi-instance-safe Ed25519 auth, durable nonce replay defense, hashed owner sessions, payments, provider catalog, 402 challenge/redeem, refunds, tenant-scoped state, and the private dashboard |
+| Postgres signed API | `src/server/postgres-api.ts` | Multi-instance-safe Ed25519 auth, durable nonce replay defense, hashed owner sessions, internal and external payments, provider catalog, 402 challenge/redeem, refunds, tenant-scoped state, and the private dashboard |
 | Owner control plane | `src/server/dashboard.ts` | Private, session-gated balances, activity, services, mandates, and an exact-payment approval inbox |
 | Database operations | `src/server/database-ops.ts` | Liveness, schema readiness, and token-gated ledger reconciliation on **:4022**; deliberately no ungoverned payment route |
-| x402 bridge | `src/bridge/` | Pay external x402 sellers (v1 wire, EIP-3009-shaped auth) via a two-phase pending→confirm/auto-reverse lifecycle, against a mock wallet + seller |
+| x402 boundary | `src/bridge/`, `src/db/external.ts` | Allowlisted x402 v1 authorizations, AES-256-GCM header custody, HSM-friendly retry recovery, exact external approvals, verifier-gated confirmation, and automatic journal reversal |
 | MCP server | `src/mcp/server.ts` | `money_balance`, `money_pay`, `money_fetch` (auto-pays internal 402s AND external x402 sellers within mandate), `money_feed` |
 | Demo | `src/demo.ts` | The full story end-to-end (10 sections), including a separately authenticated seller joining and earning through the network |
 
@@ -55,6 +55,7 @@ npm run db:migrate
 npm run db:reconcile
 npm run db:test
 npm run api:db
+npm run external:worker
 ```
 
 Application traffic should use PgBouncer on port `6432`; migrations and
@@ -76,16 +77,29 @@ For operations health, set `MONEY_OPS_TOKEN` and run `npm run ops:db`.
 `GET /health/live` and `GET /health/ready` are safe for probes;
 `GET /ops/reconcile` requires that bearer token.
 
-The policy and marketplace Postgres gateways are `src/db/policy.ts` and
-`src/db/marketplace.ts`; the signed product API is
+The policy, marketplace, and external-settlement Postgres gateways are
+`src/db/policy.ts`, `src/db/marketplace.ts`, and `src/db/external.ts`; the signed product API is
 `src/server/postgres-api.ts` (`npm run api:db`). It covers identity onboarding,
 durable replay-safe authentication, owner sessions, allocation, mandates,
 agent payments, exact owner approvals, key rotation, provider service
 publishing, public discovery, registry-priced 402 challenges, single-use
-redemption, cumulative-capped refunds, scoped balances/activity, and the
-private dashboard. The legacy `npm run api` remains the complete local
-showcase only because external x402 settlement has not moved to Postgres yet.
-The ops service intentionally exposes no payment endpoint.
+redemption, cumulative-capped refunds, durable external x402 settlement,
+scoped balances/activity, and the private dashboard. The ops service
+intentionally exposes no payment endpoint.
+
+External routes fail closed unless a wallet, a 32-byte header-encryption key,
+and an independent settlement verifier are all configured. `POST
+/pay-external` stores only AES-256-GCM ciphertext plus a plaintext-header hash,
+then returns the original authorization after an atomic debit. The agent sends
+the seller's complete settlement response to `POST
+/pay-external/:id/confirm`; the verifier runs before the short database
+transaction, and confirmation races safely against the SKIP LOCKED reversal
+worker. See `docs/EXTERNAL_SETTLEMENT.md` for the API and deployment contract.
+
+For local protocol-shaped testing only, set `MONEY_EXTERNAL_MOCK=true` and a
+stable `MONEY_EXTERNAL_HEADER_KEY` (32 bytes, base64 or 64 hex characters).
+Mock mode is refused when `NODE_ENV=production`. A deployed process must
+inject a real EIP-712 wallet/HSM adapter and facilitator or chain verifier.
 
 Owner-signed `/fund` is disabled on the Postgres API by default because real
 top-ups belong to a separately credentialed treasury integration. For an
@@ -192,17 +206,17 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 ```
 
 - **Escalation**: above the ask-me line, the agent receives a durable `approval_required` intent. The owner inbox shows the stored payee, amount, and memo; approving executes that immutable tuple through a one-time permit ("approval is the mandate" — no gap between what the human saw and what executes). Requests survive restart, expire after 24 hours, and recover exactly once across a crash at settlement.
-- **New-payee throttle**: the first payment to any unseen payee is capped at cents — including external x402 vendors, keyed on their canonical host. A prompt-injected agent lured to an attacker's endpoint can leak cents/day, not the envelope. Payees inside the owner's own trust domain (the owner, sibling agents they own) are exempt — money paid to them never leaves the owner's accounts. Everything else (caps, budget, escalation) still applies to them.
+- **New-payee throttle**: the first payment to any unseen payee is capped at cents — including external x402 vendors, keyed on canonical host plus destination address. A prompt-injected agent lured to an attacker's endpoint can leak cents/day, not the envelope, and swapping `payTo` cannot inherit a vendor's trust. Payees inside the owner's own trust domain (the owner, sibling agents they own) are exempt — money paid to them never leaves the owner's accounts. Everything else (caps, budget, escalation) still applies to them.
 - **Permits**: single-use, 60s TTL, bound to (agent, payee, amount). Replay and amount-inflation are structurally dead.
 
 ## Honest v0 shortcuts (the roadmap is the inverse)
 
-- The complete showcase API still defaults to the local JSONL engine (`data/events.jsonl`; `MONEY_DATA` overrides it). The Postgres API now serves the signed identity, payment, approval, owner control plane, service marketplace, challenge, redemption, and refund paths. External x402 orchestration is the remaining showcase route to migrate before `api:db` replaces it end-to-end.
+- The complete showcase API still defaults to the local JSONL engine (`data/events.jsonl`; `MONEY_DATA` overrides it). The Postgres API now serves the signed identity, payment, approval, owner control plane, service marketplace, challenge, redemption, refund, and external x402 paths; new deployment work should target `api:db`.
 - Postgres marketplace challenges are durable, claimed by at most one agent, paid once, and redeemed once; paid retries win over expiry. Expired unpaid rows are cleaned in bounded batches. At truly enormous anonymous-request volume, challenge issuance should move to signed stateless edge tokens so unpaid 402 traffic does not require one database write per offer.
 - Identity is an Ed25519 keypair per account: agents sign spends and owners sign admin mutations over method+path+body+timestamp+nonce. The Postgres API records accepted nonces durably, rejects replay across replicas, makes public-key onboarding retry-safe, and revokes browser sessions when an owner rotates keys (→ RFC 9421 HTTP Message Signatures + `@authority` binding on the wire; keys chained to a KYC'd owner; signup rate-limiting and owner-key delivery off stdout).
 - Browser access uses an eight-hour bearer session minted by an owner-signed request. Only SHA-256 token hashes are stored; sessions survive restart, cap at ten per owner, expire, revoke individually, and die on owner-key rotation (→ passkeys for the production owner ceremony).
-- The JSONL product path is single-node and shares policy with the showcase API. The Postgres path is multi-instance-safe for ledger, mandate, approval, signed identity, nonce, session, tenant-scoped control-plane, marketplace, challenge, redemption, and refund commands. The external bridge still needs its two-phase state machine migrated before the Postgres API replaces the prototype end-to-end.
-- External top-up is simulated, and the x402 bridge to the outside machine economy runs against a **mock** wallet + seller (protocol-faithful x402 v1 client, but Ed25519 stands in for EIP-712/secp256k1 signing and there's no on-chain settlement) — so mock-green certifies the accounting and policy, not chain finality (→ real USDC wallet + facilitator on Base; card/ACH top-up via sponsor-bank FBO).
+- The JSONL product path is single-node and remains a showcase. The Postgres path is multi-instance-safe for ledger, mandate, approval, signed identity, nonce, session, tenant-scoped control-plane, marketplace, challenge, redemption, refunds, and the pending/confirmed/cancelled/reversed external state machine.
+- External top-up is simulated. The repository ships a protocol-faithful x402 v1 client and mock wallet/seller, but the mock uses Ed25519 instead of EIP-712/secp256k1 and cannot certify chain finality. The production adapter is still required: real USDC wallet/HSM plus facilitator or chain verification on the selected network, followed by card/ACH top-up and payout through a sponsor-bank FBO program.
 - The ledger can settle between accounts owned by different users, but this is still a development sandbox. Turning that path on for real customer funds requires the sponsor-bank/FBO, KYC/KYB, sanctions, fraud, safeguarding, and licensing program around it; code alone does not cross the money-transmission line.
 - No subscriptions, sub-agent delegation, seller payouts, disputes, or insurance yet. Those are later programmable-commerce and risk layers after the internal marketplace and external settlement rail.
 
