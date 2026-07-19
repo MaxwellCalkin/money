@@ -28,6 +28,14 @@ journal entries, updates both balances, creates independently hashed receipt
 evidence, and enqueues an outbox event atomically. It never performs an HTTP
 or blockchain call while holding locks.
 
+Migration `0003_control_plane.sql` adds the signed product boundary: accepted
+Ed25519 request envelopes reserve actor-scoped nonces in Postgres, public-key
+identity onboarding is retry-safe, key rotation is owner-bound, browser
+session tokens are stored only as hashes, and all balance/activity/receipt
+views are tenant-scoped security-definer functions. This makes authentication
+and the private control plane safe across multiple API replicas; run it with
+`npm run api:db`.
+
 Run `db/roles.sql` separately as an administrator. Production login roles
 should inherit exactly one narrow role: `money_app`, `money_treasury`,
 `money_worker`, or `money_ops`. They should never own the schema or receive

@@ -1,4 +1,4 @@
-import type { TransactionalDatabase } from "./database.ts";
+import type { SqlExecutor } from "./database.ts";
 
 export interface DatabaseMandate {
   id: string;
@@ -206,7 +206,7 @@ function parseApproval(row: ApprovalRow): DatabaseApproval {
  * SECURITY DEFINER database function whose transaction covers the decision,
  * counters, approval evidence, journal entries, receipt, and outbox event. */
 export class PostgresPolicy {
-  constructor(readonly db: TransactionalDatabase) {}
+  constructor(readonly db: SqlExecutor) {}
 
   async grantMandate(input: {
     userId: string;

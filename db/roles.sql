@@ -25,10 +25,22 @@ revoke all on all tables in schema money from public;
 revoke all on all functions in schema money_private from public;
 
 grant usage on schema money, money_private to money_app;
-grant select on money.accounts, money.assets, money.services to money_app;
+grant select on money.schema_migrations, money.accounts, money.assets, money.services to money_app;
+revoke execute on function money_private.register_account(text, text, text, text, text, text)
+  from money_app;
 grant execute on function money_private.post_owner_allocation(text, text, text, text, bigint, text, jsonb)
   to money_app;
-grant execute on function money_private.register_account(text, text, text, text, text, text)
+grant execute on function money_private.register_public_identity(text, text, text, text, text, text, text),
+  money_private.consume_signed_request(text, text, text, text, bigint, bytea),
+  money_private.rotate_public_key(text, text, text),
+  money_private.create_owner_session(text, bytea),
+  money_private.resolve_owner_session(bytea),
+  money_private.revoke_owner_session(text, bytea),
+  money_private.resolve_public_account(text),
+  money_private.account_state(text, text),
+  money_private.list_services_for_requester(text),
+  money_private.payment_feed(text, integer),
+  money_private.get_receipt(text, uuid)
   to money_app;
 grant execute on function money_private.grant_mandate(text, text, text, bigint, bigint, bigint, bigint, bigint, text[], timestamptz, text)
   to money_app;
@@ -52,8 +64,10 @@ grant execute on function money_private.post_confirmed_funding(text, text, text,
 grant usage on schema money to money_worker;
 grant select, update on money.outbox_events to money_worker;
 
-grant usage on schema money to money_ops;
+grant usage on schema money, money_private to money_ops;
 grant select on money.schema_migrations, money.accounts, money.assets,
   money.balances, money.transfers, money.ledger_entries, money.receipts,
-  money.mandates, money.approvals, money.transfer_authorizations
+  money.mandates, money.approvals, money.transfer_authorizations,
+  money.signed_request_nonces, money.owner_sessions
   to money_ops;
+grant execute on function money_private.ledger_health() to money_ops;
