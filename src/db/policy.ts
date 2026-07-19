@@ -68,7 +68,7 @@ export interface DeniedPolicyPayment {
 
 export type PolicyPaymentResult = PostedPolicyPayment | PendingPolicyApproval | DeniedPolicyPayment;
 
-interface PaymentRow extends Record<string, unknown> {
+export interface PaymentFunctionRow extends Record<string, unknown> {
   status: "posted" | "approval_required" | "denied";
   replayed: boolean;
   transfer_id: string | null;
@@ -122,7 +122,7 @@ function optionalBigInt(value: string | number | bigint | null): bigint | undefi
   return value === null ? undefined : BigInt(value);
 }
 
-function parsePayment(row?: PaymentRow): PolicyPaymentResult {
+export function parsePolicyPayment(row?: PaymentFunctionRow): PolicyPaymentResult {
   if (!row) throw new Error("policy function returned no result");
   if (row.status === "approval_required") {
     if (!row.approval_id) throw new Error("approval result is missing its durable id");
@@ -264,11 +264,11 @@ export class PostgresPolicy {
     asset?: string;
     memo?: string;
   }): Promise<PolicyPaymentResult> {
-    const result = await this.db.query<PaymentRow>(
+    const result = await this.db.query<PaymentFunctionRow>(
       "select * from money_private.request_agent_payment($1, $2, $3, $4, $5::bigint, $6)",
       [input.agentId, input.idempotencyKey, input.to, input.asset ?? "USD", BigInt(input.amountMicros).toString(), input.memo ?? ""]
     );
-    return parsePayment(result.rows[0]);
+    return parsePolicyPayment(result.rows[0]);
   }
 
   async resolveApproval(
@@ -277,11 +277,11 @@ export class PostgresPolicy {
     action: "approve" | "reject",
     reason?: string
   ): Promise<PolicyPaymentResult> {
-    const result = await this.db.query<PaymentRow>(
+    const result = await this.db.query<PaymentFunctionRow>(
       "select * from money_private.resolve_approval($1, $2::uuid, $3, $4)",
       [userId, approvalId, action, reason ?? null]
     );
-    return parsePayment(result.rows[0]);
+    return parsePolicyPayment(result.rows[0]);
   }
 
   async mandate(requesterId: string, id: string): Promise<DatabaseMandate | undefined> {

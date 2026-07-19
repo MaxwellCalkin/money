@@ -39,6 +39,15 @@ grant execute on function money_private.register_public_identity(text, text, tex
   money_private.resolve_public_account(text),
   money_private.account_state(text, text),
   money_private.list_services_for_requester(text),
+  money_private.list_public_services(integer, timestamptz, uuid),
+  money_private.get_public_service(text),
+  money_private.register_service(text, text, text, text, text, text, bigint, text),
+  money_private.set_service_active(text, uuid, boolean),
+  money_private.create_service_challenge(text, uuid),
+  money_private.request_challenge_payment(text, uuid),
+  money_private.redeem_service_challenge(text, uuid, uuid, uuid),
+  money_private.issue_refund(text, uuid, bigint, text, text),
+  money_private.get_marketplace_challenges(text, uuid[]),
   money_private.payment_feed(text, integer),
   money_private.get_receipt(text, uuid)
   to money_app;
@@ -68,6 +77,7 @@ grant usage on schema money, money_private to money_ops;
 grant select on money.schema_migrations, money.accounts, money.assets,
   money.balances, money.transfers, money.ledger_entries, money.receipts,
   money.mandates, money.approvals, money.transfer_authorizations,
+  money.services, money.challenges, money.external_payments,
   money.signed_request_nonces, money.owner_sessions
   to money_ops;
 grant execute on function money_private.ledger_health() to money_ops;

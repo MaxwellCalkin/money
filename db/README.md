@@ -36,6 +36,24 @@ views are tenant-scoped security-definer functions. This makes authentication
 and the private control plane safe across multiple API replicas; run it with
 `npm run api:db`.
 
+Migration `0004_marketplace.sql` moves the two-sided service economy into the
+same transactional boundary. Providers publish immutable, retry-safe service
+terms and can deactivate listings; sellers issue registry-priced challenges;
+one agent can claim and pay each challenge; approval expiry is shortened to
+the offer expiry; approved settlement binds back to the challenge in the same
+transaction; and redemption is single-use. Provider refunds are linked to the
+original receipt, serialized on that receipt, cumulatively capped at the
+purchase amount, and never restore mandate counters. The migration preserves
+the pre-v0.7 request-hash and receipt-hash shape for non-refund transfers, so
+in-flight retries and historical reconciliation remain valid during a live
+upgrade.
+
+`money_private.post_transfer_kernel(...)` is the generalized posting kernel
+under v0.7. It is not granted to the application role. The old
+`post_transfer(...)` signature remains a compatibility wrapper; application
+traffic receives only narrow marketplace commands such as
+`request_challenge_payment(...)` and `issue_refund(...)`.
+
 Run `db/roles.sql` separately as an administrator. Production login roles
 should inherit exactly one narrow role: `money_app`, `money_treasury`,
 `money_worker`, or `money_ops`. They should never own the schema or receive

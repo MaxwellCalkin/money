@@ -3,11 +3,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Hono, type Context, type Next } from "hono";
 import { isValidPublicKey, verifyRequest } from "../core/identity.ts";
-import { isValidHandle } from "../core/network.ts";
+import { isValidHandle, isValidServiceSlug, normalizeServiceSlug } from "../core/network.ts";
 import type { DatabaseAccount } from "../db/ledger.ts";
 import { PostgresLedger, type DatabaseTransferResult } from "../db/ledger.ts";
 import { PostgresControlPlane, type AccountBalance, type DatabaseService, type PaymentEvidence } from "../db/control-plane.ts";
 import type { TransactionalDatabase } from "../db/database.ts";
+import { PostgresMarketplace, type DatabaseChallenge } from "../db/marketplace.ts";
 import { runMigrations } from "../db/migrate.ts";
 import { PostgresPolicy, type DatabaseApproval, type DatabaseMandate, type PolicyPaymentResult } from "../db/policy.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
@@ -83,6 +84,11 @@ function validClientKey(value: unknown): value is string {
     && !value.startsWith("chl_") && !value.startsWith("rev_");
 }
 
+function validUuid(value: unknown): value is string {
+  return typeof value === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 function accountView(account: DatabaseAccount | AccountBalance) {
   return {
     id: account.id,
@@ -119,7 +125,26 @@ function mandateView(mandate: DatabaseMandate) {
   };
 }
 
-function approvalView(approval: DatabaseApproval) {
+function challengeView(challenge: DatabaseChallenge) {
+  return {
+    id: challenge.id,
+    providerId: challenge.providerId,
+    ...(challenge.serviceId ? { serviceId: challenge.serviceId } : {}),
+    asset: challenge.asset,
+    amountMicros: jsonInteger(challenge.amountMicros),
+    amountDisplay: formatMicros(challenge.amountMicros),
+    resource: challenge.resource,
+    ...(challenge.claimedBy ? { claimedBy: challenge.claimedBy } : {}),
+    ...(challenge.paidBy ? { paidBy: challenge.paidBy } : {}),
+    ...(challenge.receiptId ? { receiptId: challenge.receiptId } : {}),
+    expiresAt: challenge.expiresAt.getTime(),
+    redeemed: Boolean(challenge.redeemedAt),
+    ...(challenge.redeemedAt ? { redeemedAt: challenge.redeemedAt.getTime() } : {}),
+    createdAt: challenge.createdAt.getTime(),
+  };
+}
+
+function approvalView(approval: DatabaseApproval, challenge?: DatabaseChallenge) {
   return {
     id: approval.id,
     userId: approval.userId,
@@ -135,6 +160,7 @@ function approvalView(approval: DatabaseApproval) {
     ...(approval.resolvedAt ? { resolvedAt: approval.resolvedAt.getTime() } : {}),
     ...(approval.receiptId ? { receiptId: approval.receiptId } : {}),
     ...(approval.reason ? { reason: approval.reason } : {}),
+    ...(challenge ? { challenge: challengeView(challenge) } : {}),
   };
 }
 
@@ -173,13 +199,15 @@ function serviceView(service: DatabaseService, provider?: DatabaseAccount) {
   };
 }
 
-/** Core production API backed by the atomic Postgres money kernel. Marketplace,
- * challenge, refund, and external-rail routes remain on the legacy API until
- * their own commands move into database transactions. */
+/** Core production API backed by the atomic Postgres money kernel. Identity,
+ * policy, marketplace, challenge, and refund commands are durable here;
+ * external-rail settlement remains on the legacy API until its two-phase
+ * state machine moves into Postgres. */
 export function createPostgresApi(db: TransactionalDatabase, options: PostgresApiOptions = {}) {
   const control = new PostgresControlPlane(db);
   const ledger = new PostgresLedger(db);
   const policy = new PostgresPolicy(db);
+  const marketplace = new PostgresMarketplace(db);
   const app = new Hono<ApiEnv>();
 
   app.onError((error, c) => {
@@ -283,6 +311,25 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     return new Map(accounts.map((account) => [account.id, account]));
   };
 
+  const challengeIdForApproval = (approval: DatabaseApproval): string | undefined => {
+    const match = /^chl_([0-9a-fA-F-]{36})$/.exec(approval.idempotencyKey);
+    return match?.[1];
+  };
+
+  const approvalViews = async (requesterId: string, approvals: readonly DatabaseApproval[]) => {
+    const ids = approvals.flatMap((approval) => {
+      const id = challengeIdForApproval(approval);
+      return id ? [id] : [];
+    });
+    const challenges = new Map(
+      (await marketplace.challenges(requesterId, ids)).map((challenge) => [challenge.id, challenge])
+    );
+    return approvals.map((approval) => approvalView(
+      approval,
+      challengeIdForApproval(approval) ? challenges.get(challengeIdForApproval(approval)!) : undefined
+    ));
+  };
+
   const paymentView = async (requesterId: string, result: PolicyPaymentResult) => {
     if (result.status === "denied") {
       return { status: "denied" as const, code: result.code, reason: result.reason, replayed: result.replayed };
@@ -290,7 +337,8 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     if (result.status === "approval_required") {
       const approval = await policy.approval(requesterId, result.approvalId);
       if (!approval) throw new Error("approval result is not visible to its requester");
-      return { status: "approval_required" as const, approval: approvalView(approval), replayed: result.replayed };
+      const [view] = await approvalViews(requesterId, [approval]);
+      return { status: "approval_required" as const, approval: view!, replayed: result.replayed };
     }
     const evidence = await control.receipt(requesterId, result.receiptId);
     if (!evidence) throw new Error("posted payment receipt is not visible to its requester");
@@ -355,6 +403,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       stateFeed(userId, 25),
       servicesView(userId),
     ]);
+    const renderedApprovals = await approvalViews(userId, approvals.reverse());
     return {
       now: Date.now(),
       // Posting constraints enforce zero-sum journals and immutable evidence.
@@ -364,7 +413,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       accounts: accounts.map(accountView),
       services,
       mandates: mandates.map(mandateView),
-      approvals: approvals.reverse().map(approvalView),
+      approvals: renderedApprovals,
       feed,
       external: [],
     };
@@ -379,11 +428,12 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       servicesView(accountId),
     ]);
     const activeMandate = mandates.find((mandate) => !mandate.revokedAt && mandate.expiresAt.getTime() > Date.now());
+    const renderedApprovals = await approvalViews(accountId, approvals.reverse());
     return {
       now: Date.now(),
       account: accounts[0] ? accountView(accounts[0]) : undefined,
       ...(activeMandate ? { mandate: mandateView(activeMandate) } : {}),
-      approvals: approvals.reverse().map(approvalView),
+      approvals: renderedApprovals,
       feed,
       services,
     };
@@ -395,7 +445,8 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       const result = await db.query<{ version: string | null; ready: boolean }>(`
         select (select max(version) from money.schema_migrations) as version,
           to_regprocedure('money_private.consume_signed_request(text,text,text,text,bigint,bytea)') is not null
-          and to_regprocedure('money_private.request_agent_payment(text,text,text,text,bigint,text)') is not null as ready
+          and to_regprocedure('money_private.request_agent_payment(text,text,text,text,bigint,text)') is not null
+          and to_regprocedure('money_private.request_challenge_payment(text,uuid)') is not null as ready
       `);
       return result.rows[0]?.ready
         ? c.json({ ok: true, schemaVersion: result.rows[0].version })
@@ -456,6 +507,195 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   app.get("/handles/:handle", async (c) => {
     const account = await control.resolvePublicAccount(`@${c.req.param("handle") ?? ""}`);
     return account ? c.json(accountView(account)) : c.json({ error: "handle_not_found" }, 404);
+  });
+
+  app.post("/services", requireProviderSig, async (c) => {
+    const providerId = c.get("providerId");
+    const body = await readBody<{
+      slug: string;
+      name: string;
+      description?: string;
+      endpointUrl: string;
+      priceMicros: number | string;
+      idempotencyKey: string;
+    }>(c);
+    const price = body ? positiveMicros(body.priceMicros) : undefined;
+    const slug = typeof body?.slug === "string" ? normalizeServiceSlug(body.slug) : "";
+    let endpoint: URL | undefined;
+    try {
+      endpoint = body?.endpointUrl ? new URL(body.endpointUrl) : undefined;
+    } catch {
+      endpoint = undefined;
+    }
+    if (!body || !isValidServiceSlug(slug) || typeof body.name !== "string" || body.name.length < 1 || body.name.length > 200
+      || (body.description !== undefined && (typeof body.description !== "string" || body.description.length > 2_000))
+      || !endpoint || !["http:", "https:"].includes(endpoint.protocol) || price === undefined
+      || !validClientKey(body.idempotencyKey)) {
+      return c.json({
+        error: "invalid_request",
+        reason: "need slug, name, absolute HTTP(S) endpointUrl, positive priceMicros, and idempotencyKey",
+      }, 400);
+    }
+    try {
+      const service = await marketplace.registerService({
+        providerId,
+        slug,
+        name: body.name,
+        description: body.description ?? "",
+        endpointUrl: endpoint.toString(),
+        priceMicros: price,
+        idempotencyKey: body.idempotencyKey,
+      });
+      const provider = (await control.publicAccounts([providerId]))[0];
+      return c.json({ ...serviceView(service, provider), replayed: service.replayed });
+    } catch (error) {
+      return databaseFailure(c, error, "service_registration_failed");
+    }
+  });
+
+  app.post("/services/:id/status", requireProviderSig, async (c) => {
+    const body = await readBody<{ active: boolean }>(c);
+    if (!body || typeof body.active !== "boolean" || !validUuid(c.req.param("id"))) {
+      return c.json({ error: "invalid_request", reason: "need boolean active" }, 400);
+    }
+    try {
+      return c.json(await marketplace.setServiceActive(
+        c.get("providerId"),
+        c.req.param("id") ?? "",
+        body.active
+      ));
+    } catch (error) {
+      return databaseFailure(c, error, "service_status_failed");
+    }
+  });
+
+  app.get("/services", async (c) => {
+    const requested = Number(c.req.query("limit") ?? 50);
+    const beforeCreatedRaw = c.req.query("beforeCreated");
+    const beforeId = c.req.query("beforeId");
+    if (!Number.isSafeInteger(requested) || requested < 1 || requested > 100 || Boolean(beforeCreatedRaw) !== Boolean(beforeId)) {
+      return c.json({ error: "invalid_request", reason: "limit must be 1-100; cursor requires beforeCreated and beforeId" }, 400);
+    }
+    const beforeCreated = beforeCreatedRaw ? new Date(beforeCreatedRaw) : undefined;
+    if (beforeCreated && !Number.isFinite(beforeCreated.getTime())) {
+      return c.json({ error: "invalid_request", reason: "beforeCreated must be a valid timestamp" }, 400);
+    }
+    try {
+      const services = await marketplace.publicServices({ limit: requested, beforeCreated, beforeId });
+      const providers = new Map(
+        (await control.publicAccounts(services.map((service) => service.providerId)))
+          .map((provider) => [provider.id, provider])
+      );
+      return c.json(services.map((service) => serviceView(service, providers.get(service.providerId))));
+    } catch (error) {
+      return databaseFailure(c, error, "service_catalog_failed");
+    }
+  });
+
+  app.get("/services/:id", async (c) => {
+    const service = await marketplace.publicService(c.req.param("id") ?? "");
+    if (!service) return c.json({ error: "service_not_found" }, 404);
+    const provider = (await control.publicAccounts([service.providerId]))[0];
+    return c.json(serviceView(service, provider));
+  });
+
+  app.get("/catalog/:handle/:slug", async (c) => {
+    const service = await marketplace.publicService(`@${c.req.param("handle")}/${c.req.param("slug")}`);
+    if (!service) return c.json({ error: "service_not_found" }, 404);
+    const provider = (await control.publicAccounts([service.providerId]))[0];
+    return c.json(serviceView(service, provider));
+  });
+
+  app.post("/merchant/challenges", requireProviderSig, async (c) => {
+    const body = await readBody<{ serviceId: string }>(c);
+    if (!body || !validUuid(body.serviceId)) {
+      return c.json({ error: "invalid_request", reason: "need serviceId" }, 400);
+    }
+    try {
+      const challenge = await marketplace.createChallenge(c.get("providerId"), body.serviceId);
+      return c.json({
+        scheme: "money",
+        serviceId: challenge.serviceId,
+        resource: challenge.resource,
+        amountMicros: jsonInteger(challenge.amountMicros),
+        amountDisplay: formatMicros(challenge.amountMicros),
+        asset: challenge.asset,
+        payTo: challenge.providerId,
+        challengeId: challenge.id,
+        expiresAt: challenge.expiresAt.getTime(),
+        instruction: "POST /pay-challenge as the agent, then retry with x-payment-challenge and x-payment-receipt",
+      }, 402);
+    } catch (error) {
+      return databaseFailure(c, error, "challenge_failed");
+    }
+  });
+
+  app.post("/merchant/redeem", requireProviderSig, async (c) => {
+    const body = await readBody<{ serviceId: string; challengeId: string; receiptId: string }>(c);
+    if (!body || !validUuid(body.serviceId) || !validUuid(body.challengeId) || !validUuid(body.receiptId)) {
+      return c.json({ error: "invalid_request", reason: "need serviceId, challengeId, and receiptId" }, 400);
+    }
+    try {
+      const result = await marketplace.redeem({ providerId: c.get("providerId"), ...body });
+      return result.ok
+        ? c.json({ ok: true, challengeId: result.challengeId, redeemedAt: result.redeemedAt?.getTime() })
+        : c.json({ error: "payment_rejected", reason: result.reason }, 402);
+    } catch (error) {
+      return databaseFailure(c, error, "redemption_failed");
+    }
+  });
+
+  app.post("/refunds", requireProviderSig, async (c) => {
+    const body = await readBody<{
+      receiptId: string;
+      amountMicros: number | string;
+      memo?: string;
+      idempotencyKey: string;
+    }>(c);
+    const amount = body ? positiveMicros(body.amountMicros) : undefined;
+    if (!body || !validUuid(body.receiptId) || amount === undefined
+      || (body.memo !== undefined && (typeof body.memo !== "string" || body.memo.length > 500))
+      || !validClientKey(body.idempotencyKey)) {
+      return c.json({ error: "invalid_request", reason: "need receiptId, positive amountMicros, optional memo, and idempotencyKey" }, 400);
+    }
+    try {
+      const result = await marketplace.refund({
+        providerId: c.get("providerId"),
+        receiptId: body.receiptId,
+        amountMicros: amount,
+        memo: body.memo,
+        idempotencyKey: body.idempotencyKey,
+      });
+      if (result.status === "denied") {
+        const status = result.code === "idempotency_conflict" ? 409 : result.code === "insufficient_funds" ? 402 : 400;
+        return c.json({
+          status: "denied",
+          code: result.code,
+          reason: result.reason,
+          replayed: result.replayed,
+          ...(result.remainingMicros !== undefined ? { remaining: jsonInteger(result.remainingMicros) } : {}),
+        }, status);
+      }
+      const evidence = await control.receipt(c.get("providerId"), result.receiptId);
+      if (!evidence) throw new Error("refund receipt is not visible to its provider");
+      return c.json({
+        status: "refunded",
+        replayed: result.replayed,
+        remaining: jsonInteger(result.remainingMicros),
+        transfer: {
+          id: result.transferId,
+          from: evidence.from,
+          to: evidence.to,
+          amount: jsonInteger(evidence.amountMicros),
+          memo: evidence.memo,
+          idempotencyKey: evidence.idempotencyKey,
+          refundOf: result.refundOf,
+        },
+        receipt: { ...evidenceView(evidence), refundOf: result.refundOf },
+      });
+    } catch (error) {
+      return databaseFailure(c, error, "refund_failed");
+    }
   });
 
   app.post("/owner/sessions", requireOwnerSig, async (c) => {
@@ -579,6 +819,25 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     }
   });
 
+  app.post("/pay-challenge", requireAgentSig, async (c) => {
+    const agentId = c.get("agentId");
+    const body = await readBody<{ challengeId: string }>(c);
+    if (!body || !validUuid(body.challengeId)) {
+      return c.json({ error: "invalid_request", reason: "need challengeId" }, 400);
+    }
+    try {
+      const result = await marketplace.payChallenge(agentId, body.challengeId);
+      const payment = await paymentView(agentId, result);
+      const challenge = (await marketplace.challenges(agentId, [body.challengeId]))[0];
+      const status = payment.status === "paid" ? 200
+        : payment.status === "approval_required" ? 202
+          : payment.code === "idempotency_conflict" ? 409 : 402;
+      return c.json({ ...payment, ...(challenge ? { challenge: challengeView(challenge) } : {}) }, status);
+    } catch (error) {
+      return databaseFailure(c, error, "challenge_payment_failed");
+    }
+  });
+
   app.get("/agent/state", requireAgentSig, async (c) => {
     const requested = Number(c.req.query("limit") ?? 25);
     const limit = Number.isSafeInteger(requested) ? Math.max(1, Math.min(100, requested)) : 25;
@@ -634,7 +893,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   });
   app.get("/dashboard/state", requireOwnerAccess, async (c) => c.json(await ownerSnapshot(c.get("userId"))));
 
-  return { app, control, ledger, policy };
+  return { app, control, ledger, policy, marketplace };
 }
 
 export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) {
