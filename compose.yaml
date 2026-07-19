@@ -1,0 +1,54 @@
+name: money
+
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    environment:
+      POSTGRES_DB: money
+      POSTGRES_USER: money
+      POSTGRES_PASSWORD: money-dev-only
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      # PostgreSQL 18 moved the official image volume root here.
+      - money-postgres:/var/lib/postgresql
+    command:
+      - postgres
+      - -c
+      - max_connections=100
+      - -c
+      - wal_compression=on
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_lock_waits=on
+      - -c
+      - deadlock_timeout=200ms
+      - -c
+      - idle_in_transaction_session_timeout=10s
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U money -d money"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  pgbouncer:
+    image: percona/percona-pgbouncer:1.25.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:6432:6432"
+    volumes:
+      - ./ops/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./ops/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U money -d money"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  money-postgres:
