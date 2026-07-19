@@ -123,6 +123,28 @@ export interface Permit {
   humanApproved: boolean;
 }
 
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired" | "failed";
+
+/** A durable request for a human to authorize one exact payment. The owner
+ * approves this stored tuple; clients never resubmit editable payment terms
+ * on the approval endpoint. */
+export interface ApprovalRequest {
+  id: string;
+  userId: string;
+  mandateId: string;
+  agentId: string;
+  to: string;
+  amount: Micros;
+  memo: string;
+  idempotencyKey: string;
+  createdAt: number;
+  expiresAt: number;
+  status: ApprovalStatus;
+  resolvedAt?: number;
+  receiptId?: string;
+  reason?: string;
+}
+
 export type DenialCode =
   | "invalid_amount"
   | "no_mandate"
@@ -137,7 +159,10 @@ export type DenialCode =
   | "idempotency_conflict"
   | "permit_invalid"
   | "challenge_invalid"
-  | "refund_invalid";
+  | "refund_invalid"
+  | "approval_rejected"
+  | "approval_expired"
+  | "approval_limit";
 
 export type Decision =
   | { ok: true; permit: Permit }
@@ -183,6 +208,16 @@ export type PayResult =
   | { status: "paid"; transfer: Transfer; receipt: Receipt; replayed: boolean }
   | { status: "denied"; code: DenialCode; reason: string }
   | { status: "escalate"; reason: string; mandateId: string };
+
+export type PaymentRequestResult =
+  | PayResult
+  | { status: "approval_required"; approval: ApprovalRequest; replayed: boolean };
+
+export interface ApprovalActionResult {
+  approval: ApprovalRequest;
+  payment?: PayResult;
+  replayed: boolean;
+}
 
 export type RefundResult =
   | { status: "refunded"; transfer: Transfer; receipt: Receipt; replayed: boolean; remaining: Micros }

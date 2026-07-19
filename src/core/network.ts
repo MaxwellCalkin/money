@@ -6,12 +6,15 @@ import { JsonlStore, serializeMandate, type EventSink, type NetworkEvent } from 
 import {
   assertMicros,
   type Account,
+  type ApprovalActionResult,
+  type ApprovalRequest,
   type Challenge,
   type ExternalPayment,
   type ExternalPayResult,
   type Mandate,
   type Micros,
   type PayResult,
+  type PaymentRequestResult,
   type Receipt,
   type RefundResult,
   type Service,
@@ -25,6 +28,9 @@ export const EXTERNAL_FUNDING = "external:funding";
 export const EXTERNAL_X402 = "external:x402";
 
 const CHALLENGE_TTL_MS = 10 * 60_000;
+const APPROVAL_TTL_MS = 24 * 60 * 60_000;
+const APPROVAL_RETRY_COOLDOWN_MS = 5 * 60_000;
+const MAX_PENDING_APPROVALS_PER_AGENT = 20;
 const HANDLE_RE = /^[a-z][a-z0-9_-]{2,31}$/;
 const SERVICE_SLUG_RE = /^[a-z][a-z0-9-]{1,47}$/;
 
@@ -70,6 +76,8 @@ export class MoneyNetwork {
   private challenges = new Map<string, Challenge>();
   /** Only challenges that reached a signed payment attempt are durable. */
   private persistedChallenges = new Set<string>();
+  private approvals = new Map<string, ApprovalRequest>();
+  private approvalByIdempotency = new Map<string, string>();
   private externalPayments = new Map<string, ExternalPayment>();
   /** client idempotency key → external payment id, for exactly-once creates. */
   private externalByClientKey = new Map<string, string>();
@@ -244,6 +252,82 @@ export class MoneyNetwork {
         case "mandate_revoked":
           this.policy.revoke(e.mandateId);
           break;
+        case "approval_requested": {
+          const approval = e.approval;
+          const mandate = this.policy.get(approval.mandateId);
+          const agent = this.accounts.get(approval.agentId);
+          const payee = this.accounts.get(approval.to);
+          assertMicros(approval.amount);
+          if (
+            !approval.id.startsWith("apr_") ||
+            approval.status !== "pending" ||
+            approval.amount <= 0 ||
+            typeof approval.memo !== "string" ||
+            !approval.idempotencyKey ||
+            !Number.isSafeInteger(approval.createdAt) ||
+            !Number.isSafeInteger(approval.expiresAt) ||
+            approval.expiresAt <= approval.createdAt ||
+            approval.resolvedAt !== undefined ||
+            approval.receiptId !== undefined ||
+            approval.reason !== undefined ||
+            !mandate ||
+            mandate.userId !== approval.userId ||
+            mandate.agentId !== approval.agentId ||
+            approval.expiresAt > mandate.expiresAt ||
+            !agent ||
+            agent.kind !== "agent" ||
+            !payee ||
+            payee.kind === "external" ||
+            approval.agentId === approval.to ||
+            this.approvals.has(approval.id) ||
+            this.approvalByIdempotency.has(approval.idempotencyKey)
+          ) {
+            throw new Error(`replay: approval request ${approval.id} is invalid or duplicated`);
+          }
+          this.approvals.set(approval.id, approval);
+          this.approvalByIdempotency.set(approval.idempotencyKey, approval.id);
+          break;
+        }
+        case "approval_resolved": {
+          const approval = this.approvals.get(e.approvalId);
+          if (!approval) {
+            throw new Error(`replay: approval resolution references invalid request ${e.approvalId}`);
+          }
+          if (
+            !["approved", "rejected", "expired", "failed"].includes(e.status) ||
+            !Number.isSafeInteger(e.resolvedAt) ||
+            e.resolvedAt < approval.createdAt
+          ) {
+            throw new Error(`replay: approval ${approval.id} has an invalid resolution`);
+          }
+          if (e.status === "approved") {
+            const receipt = e.receiptId ? this.receipts.get(e.receiptId) : undefined;
+            if (
+              !receipt ||
+              receipt.from !== approval.agentId ||
+              receipt.to !== approval.to ||
+              receipt.amount !== approval.amount ||
+              receipt.mandateId !== approval.mandateId
+            ) {
+              throw new Error(`replay: approval ${approval.id} references an invalid payment receipt`);
+            }
+          } else if (e.receiptId) {
+            throw new Error(`replay: non-approved request ${approval.id} carries a receipt`);
+          }
+          // A successful transfer can derive "approved" before this explicit
+          // audit event is replayed. Any other double resolution is corrupt.
+          if (
+            approval.status !== "pending" &&
+            (approval.status !== e.status || approval.receiptId !== e.receiptId)
+          ) {
+            throw new Error(`replay: approval ${approval.id} was resolved inconsistently`);
+          }
+          approval.status = e.status;
+          approval.resolvedAt = e.resolvedAt;
+          approval.receiptId = e.receiptId;
+          approval.reason = e.reason;
+          break;
+        }
         case "transfer": {
           if (!this.accounts.has(e.transfer.from) || !this.accounts.has(e.transfer.to)) {
             throw new Error(`replay: transfer ${e.transfer.id} references an unknown account`);
@@ -291,6 +375,22 @@ export class MoneyNetwork {
             }
             this.receipts.insertRaw(r);
             this.receiptByIdempotency.set(e.transfer.idempotencyKey, r.id);
+            const approvalId = this.approvalByIdempotency.get(e.transfer.idempotencyKey);
+            if (approvalId) {
+              const approval = this.approvals.get(approvalId)!;
+              if (
+                approval.status !== "pending" ||
+                e.transfer.from !== approval.agentId ||
+                e.transfer.to !== approval.to ||
+                e.transfer.amount !== approval.amount ||
+                r.mandateId !== approval.mandateId
+              ) {
+                throw new Error(`replay: transfer does not match approval ${approval.id}`);
+              }
+              approval.status = "approved";
+              approval.resolvedAt = e.transfer.ts;
+              approval.receiptId = r.id;
+            }
             // Challenge payment state is derived from the durable transfer,
             // so a crash between payment and the caller receiving its response
             // can never require a second charge after restart.
@@ -597,6 +697,215 @@ export class MoneyNetwork {
 
   // ── Paying (the core loop) ──────────────────────────────────────────────
 
+  /** Agent-facing payment entrypoint. Payments inside the autonomous envelope
+   * settle immediately; an escalation becomes one durable request containing
+   * the exact immutable terms the owner will approve or reject. */
+  requestPayment(req: PayRequest): PaymentRequestResult {
+    const priorApprovalId = this.approvalByIdempotency.get(req.idempotencyKey);
+    const priorApproval = priorApprovalId ? this.approvals.get(priorApprovalId) : undefined;
+    if (priorApproval) {
+      if (
+        priorApproval.agentId !== req.from ||
+        priorApproval.to !== req.to ||
+        priorApproval.amount !== req.amount ||
+        priorApproval.memo !== req.memo
+      ) {
+        return { status: "denied", code: "idempotency_conflict", reason: "idempotency key reused with different payment terms" };
+      }
+      return this.paymentResultForApproval(priorApproval, true);
+    }
+
+    this.sweepApprovals();
+    const now = this.clock();
+    const matching = [...this.approvals.values()].filter((approval) =>
+      approval.agentId === req.from &&
+      approval.to === req.to &&
+      approval.amount === req.amount &&
+      approval.memo === req.memo
+    );
+    const duplicatePending = [...matching].reverse().find((approval) => approval.status === "pending");
+    if (duplicatePending) {
+      return { status: "approval_required", approval: duplicatePending, replayed: true };
+    }
+    const recentRejection = [...matching].reverse().find((approval) =>
+      (approval.status === "rejected" || approval.status === "failed" || approval.status === "expired") &&
+      (approval.resolvedAt ?? 0) > now - APPROVAL_RETRY_COOLDOWN_MS
+    );
+    if (recentRejection) {
+      return {
+        status: "denied",
+        code: recentRejection.status === "expired" ? "approval_expired" : "approval_rejected",
+        reason: `${recentRejection.reason ?? `approval ${recentRejection.status}`} (matching requests are cooled down for 5 minutes)`,
+      };
+    }
+    const pendingCount = [...this.approvals.values()].filter(
+      (approval) => approval.agentId === req.from && approval.status === "pending"
+    ).length;
+    if (pendingCount >= MAX_PENDING_APPROVALS_PER_AGENT) {
+      return {
+        status: "denied",
+        code: "approval_limit",
+        reason: `agent already has ${MAX_PENDING_APPROVALS_PER_AGENT} pending approvals`,
+      };
+    }
+
+    const result = this.pay(req);
+    if (result.status !== "escalate") return result;
+    const mandate = this.policy.get(result.mandateId);
+    if (!mandate) throw new Error(`escalation references missing mandate ${result.mandateId}`);
+    if (mandate.expiresAt <= now) {
+      return { status: "denied", code: "expired", reason: "mandate expired before approval could be requested" };
+    }
+    const approval: ApprovalRequest = {
+      id: `apr_${randomUUID()}`,
+      userId: mandate.userId,
+      mandateId: mandate.id,
+      agentId: req.from,
+      to: req.to,
+      amount: req.amount,
+      memo: req.memo,
+      idempotencyKey: req.idempotencyKey,
+      createdAt: now,
+      expiresAt: Math.min(now + APPROVAL_TTL_MS, mandate.expiresAt),
+      status: "pending",
+    };
+    this.approvals.set(approval.id, approval);
+    this.approvalByIdempotency.set(approval.idempotencyKey, approval.id);
+    this.emit({ type: "approval_requested", approval });
+    return { status: "approval_required", approval, replayed: false };
+  }
+
+  approval(id: string): ApprovalRequest | undefined {
+    const approval = this.approvals.get(id);
+    if (approval) this.expireApprovalIfNeeded(approval);
+    return approval;
+  }
+
+  listApprovals(userId?: string): ApprovalRequest[] {
+    this.sweepApprovals();
+    return [...this.approvals.values()].filter((approval) => !userId || approval.userId === userId);
+  }
+
+  listAgentApprovals(agentId: string): ApprovalRequest[] {
+    this.sweepApprovals();
+    return [...this.approvals.values()].filter((approval) => approval.agentId === agentId);
+  }
+
+  approvePayment(userId: string, approvalId: string): ApprovalActionResult {
+    const approval = this.approvals.get(approvalId);
+    if (!approval) throw new Error(`unknown approval ${approvalId}`);
+    if (approval.userId !== userId) throw new Error("approval belongs to a different user");
+    this.expireApprovalIfNeeded(approval);
+    if (approval.status === "approved") {
+      const payment = this.pay(this.requestFromApproval(approval));
+      return { approval, payment, replayed: true };
+    }
+    if (approval.status !== "pending") {
+      return { approval, payment: this.denialForApproval(approval), replayed: true };
+    }
+
+    const payment = this.approveAndPay(approval.mandateId, this.requestFromApproval(approval));
+    const resolvedAt = this.clock();
+    if (payment.status === "paid") {
+      approval.status = "approved";
+      approval.receiptId = payment.receipt.id;
+      approval.resolvedAt = resolvedAt;
+      this.bindChallengePayment(approval.idempotencyKey, approval.agentId, payment.receipt.id);
+      this.emit({
+        type: "approval_resolved",
+        approvalId: approval.id,
+        status: "approved",
+        resolvedAt,
+        receiptId: payment.receipt.id,
+      });
+    } else {
+      approval.status = "failed";
+      approval.reason = payment.reason;
+      approval.resolvedAt = resolvedAt;
+      this.emit({
+        type: "approval_resolved",
+        approvalId: approval.id,
+        status: "failed",
+        resolvedAt,
+        reason: payment.reason,
+      });
+    }
+    return { approval, payment, replayed: false };
+  }
+
+  rejectApproval(userId: string, approvalId: string, reason = "rejected by owner"): ApprovalActionResult {
+    const approval = this.approvals.get(approvalId);
+    if (!approval) throw new Error(`unknown approval ${approvalId}`);
+    if (approval.userId !== userId) throw new Error("approval belongs to a different user");
+    this.expireApprovalIfNeeded(approval);
+    if (approval.status !== "pending") {
+      return { approval, payment: this.denialForApproval(approval), replayed: true };
+    }
+    const resolvedAt = this.clock();
+    approval.status = "rejected";
+    approval.reason = reason || "rejected by owner";
+    approval.resolvedAt = resolvedAt;
+    this.emit({
+      type: "approval_resolved",
+      approvalId: approval.id,
+      status: "rejected",
+      resolvedAt,
+      reason: approval.reason,
+    });
+    return { approval, payment: this.denialForApproval(approval), replayed: false };
+  }
+
+  sweepApprovals(): ApprovalRequest[] {
+    const expired: ApprovalRequest[] = [];
+    for (const approval of this.approvals.values()) {
+      if (approval.status === "pending" && this.clock() >= approval.expiresAt) {
+        this.expireApprovalIfNeeded(approval);
+        expired.push(approval);
+      }
+    }
+    return expired;
+  }
+
+  private paymentResultForApproval(approval: ApprovalRequest, replayed: boolean): PaymentRequestResult {
+    this.expireApprovalIfNeeded(approval);
+    if (approval.status === "pending") return { status: "approval_required", approval, replayed };
+    if (approval.status === "approved") return this.pay(this.requestFromApproval(approval));
+    return this.denialForApproval(approval);
+  }
+
+  private requestFromApproval(approval: ApprovalRequest): PayRequest {
+    return {
+      from: approval.agentId,
+      to: approval.to,
+      amount: approval.amount,
+      memo: approval.memo,
+      idempotencyKey: approval.idempotencyKey,
+    };
+  }
+
+  private denialForApproval(approval: ApprovalRequest): PayResult {
+    return {
+      status: "denied",
+      code: approval.status === "expired" ? "approval_expired" : "approval_rejected",
+      reason: approval.reason ?? `approval ${approval.status}`,
+    };
+  }
+
+  private expireApprovalIfNeeded(approval: ApprovalRequest): void {
+    if (approval.status !== "pending" || this.clock() < approval.expiresAt) return;
+    const resolvedAt = this.clock();
+    approval.status = "expired";
+    approval.reason = "approval request expired";
+    approval.resolvedAt = resolvedAt;
+    this.emit({
+      type: "approval_resolved",
+      approvalId: approval.id,
+      status: "expired",
+      resolvedAt,
+      reason: approval.reason,
+    });
+  }
+
   /**
    * An agent pays any account on the network — another agent, a provider,
    * or a user. Full path: idempotency replay check → policy evaluation →
@@ -876,8 +1185,12 @@ export class MoneyNetwork {
     return challenge;
   }
 
+  challenge(id: string): Challenge | undefined {
+    return this.challenges.get(id);
+  }
+
   /** The payer side: settle a challenge from an agent's mandate. Idempotent per challenge. */
-  payChallenge(agentId: string, challengeId: string): PayResult {
+  payChallenge(agentId: string, challengeId: string): PaymentRequestResult {
     const challenge = this.challenges.get(challengeId);
     if (!challenge) return { status: "denied", code: "challenge_invalid", reason: `challenge ${challengeId} not found` };
     // Replay must win over expiry: an agent that already paid but lost the
@@ -895,7 +1208,7 @@ export class MoneyNetwork {
       this.emit({ type: "challenge_created", challenge });
       this.persistedChallenges.add(challenge.id);
     }
-    const result = this.pay({
+    const result = this.requestPayment({
       from: agentId,
       to: challenge.providerId,
       amount: challenge.amount,
@@ -907,6 +1220,14 @@ export class MoneyNetwork {
       challenge.receiptId = result.receipt.id;
     }
     return result;
+  }
+
+  private bindChallengePayment(idempotencyKey: string, agentId: string, receiptId: string): void {
+    if (!idempotencyKey.startsWith("chl_")) return;
+    const challenge = this.challenges.get(idempotencyKey.slice(4));
+    if (!challenge) return;
+    challenge.paidBy = agentId;
+    challenge.receiptId = receiptId;
   }
 
   redeemServiceChallenge(

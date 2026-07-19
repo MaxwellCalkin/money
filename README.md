@@ -13,7 +13,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 3. **Prefunding buys the speed.** Authorization is a local policy + balance check — no external round-trip on the hot path.
 4. **Exactly-once by construction.** Idempotency keys on every transfer; 402 challenges pay-once/redeem-once. Agents retry by default — the network must shrug.
 
-## What's here (v0.2)
+## What's here (v0.3)
 
 | Piece | File | What it does |
 |---|---|---|
@@ -22,11 +22,11 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | Receipts | `src/core/receipts.ts` | Hash-chained evidence log; tamper detection |
 | Persistence | `src/core/store.ts` | Append-only JSONL event log; replay rebuilds everything and refuses tampered logs |
 | Identity | `src/core/identity.ts` | Ed25519 keys for owners, agents, and providers; every mutation is verified against the registered key |
-| Network | `src/core/network.ts` | Accounts + public handles, funding, agent payments, seller services, mandates, and durable 402 challenges |
+| Network | `src/core/network.ts` | Accounts + public handles, funding, agent payments, durable approvals, seller services, mandates, and 402 challenges |
 | Service registry | `src/core/network.ts` | Provider-owned `@handle/service` listings with endpoint and server-side price |
 | Seller SDK | `src/seller/middleware.ts` | Reusable Hono paywall plus a provider-signed client for challenges, receipt redemption, and partial refunds |
 | HTTP API | `src/server/api.ts` | Hono server on **:4021** — agent, owner, provider, catalog, and merchant APIs plus demo paid endpoints |
-| Dashboard | `src/server/dashboard.ts` | Live view at `/dashboard`: balances, mandates, real-time receipt feed over SSE |
+| Owner control plane | `src/server/dashboard.ts` | Private, session-gated balances, activity, services, mandates, and an exact-payment approval inbox |
 | x402 bridge | `src/bridge/` | Pay external x402 sellers (v1 wire, EIP-3009-shaped auth) via a two-phase pending→confirm/auto-reverse lifecycle, against a mock wallet + seller |
 | MCP server | `src/mcp/server.ts` | `money_balance`, `money_pay`, `money_fetch` (auto-pays internal 402s AND external x402 sellers within mandate), `money_feed` |
 | Demo | `src/demo.ts` | The full story end-to-end (10 sections), including a separately authenticated seller joining and earning through the network |
@@ -40,8 +40,16 @@ npm run demo     # the whole story in one script
 npm run api      # the HTTP server on :4021 (durable: data/events.jsonl)
 ```
 
-Then open **http://127.0.0.1:4021/dashboard** to watch balances, mandates, and
-receipts update live as agents pay.
+The dashboard is private. Export the `MONEY_USER_ID` and `MONEY_OWNER_KEY`
+printed during onboarding, then mint an eight-hour browser session:
+
+```bash
+npm run dashboard:login
+```
+
+Open the fragment-token link it prints. The long-lived owner key never enters
+browser storage, financial reads are tenant-scoped, and logging out revokes the
+in-memory session immediately.
 
 ### Give a Claude Code agent a wallet
 
@@ -130,7 +138,7 @@ recycle an agent's spending authority).
 grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first-touch 10¢ · expires 30d
 ```
 
-- **Escalation**: above the ask-me line, the network returns `escalate`; a human approval mints a one-time permit bound to the *exact* payee+amount approved ("approval is the mandate" — no gap between what the human saw and what executes).
+- **Escalation**: above the ask-me line, the agent receives a durable `approval_required` intent. The owner inbox shows the stored payee, amount, and memo; approving executes that immutable tuple through a one-time permit ("approval is the mandate" — no gap between what the human saw and what executes). Requests survive restart, expire after 24 hours, and recover exactly once across a crash at settlement.
 - **New-payee throttle**: the first payment to any unseen payee is capped at cents — including external x402 vendors, keyed on their canonical host. A prompt-injected agent lured to an attacker's endpoint can leak cents/day, not the envelope. Payees inside the owner's own trust domain (the owner, sibling agents they own) are exempt — money paid to them never leaves the owner's accounts. Everything else (caps, budget, escalation) still applies to them.
 - **Permits**: single-use, 60s TTL, bound to (agent, payee, amount). Replay and amount-inflation are structurally dead.
 
@@ -139,6 +147,7 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 - Persistence is a local JSONL event log (`data/events.jsonl`, replayed and integrity-checked on boot; `MONEY_DATA` overrides the path) — durable across restarts, but single-node (→ Postgres, same event-sourced shape).
 - Paid challenges become durable before money moves, so a purchased service remains redeemable after restart. Unpaid anonymous challenges stay ephemeral so page requests cannot fill the ledger.
 - Identity is an Ed25519 keypair per account: agents sign spends and owners sign admin mutations (fund/allocate/mandates/revoke/rotate-key), over method+path+body+timestamp+nonce, verified against the key registered at creation. Key rotation is the leaked-key remediation path (→ RFC 9421 HTTP Message Signatures + `@authority` binding on the wire; keys chained to a KYC'd owner; signup rate-limiting and owner-key delivery off stdout).
+- Browser access uses an eight-hour bearer session minted by an owner-signed request. Sessions are hashed in memory and disappear on restart (→ passkeys plus a distributed session store for production).
 - Single-node; network and API share a process (→ policy/signer split into separate trust domains, as in the design brief).
 - External top-up is simulated, and the x402 bridge to the outside machine economy runs against a **mock** wallet + seller (protocol-faithful x402 v1 client, but Ed25519 stands in for EIP-712/secp256k1 signing and there's no on-chain settlement) — so mock-green certifies the accounting and policy, not chain finality (→ real USDC wallet + facilitator on Base; card/ACH top-up via sponsor-bank FBO).
 - The ledger can settle between accounts owned by different users, but this is still a development sandbox. Turning that path on for real customer funds requires the sponsor-bank/FBO, KYC/KYB, sanctions, fraud, safeguarding, and licensing program around it; code alone does not cross the money-transmission line.

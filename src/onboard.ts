@@ -62,6 +62,7 @@ async function main() {
     newPayeeCapMicros: usd(0.1),
     idempotencyKey: `onboard-mandate-${randomUUID()}`,
   });
+  const dashboardSession = await ownerPost<{ dashboardPath: string; expiresAt: number }>("/owner/sessions", {});
 
   console.log(`user    ${user.id}`);
   console.log(`agent   ${agent.id} ("${agentName}") — allocated ${fmt(budget)}, Ed25519 key registered`);
@@ -69,6 +70,9 @@ async function main() {
   console.log();
   console.log("Owner key — save it somewhere safe; it signs future funding, mandates, and revokes:");
   console.log(JSON.stringify({ MONEY_USER_ID: user.id, MONEY_OWNER_KEY: ownerKeys.privateKey }));
+  console.log();
+  console.log("Private owner dashboard (8-hour session; the owner key stays out of the browser):");
+  console.log(`${API}${dashboardSession.dashboardPath}`);
   console.log();
   console.log("Paste into .mcp.json (MONEY_AGENT_KEY is the agent's private key — keep it out of git):");
   console.log(

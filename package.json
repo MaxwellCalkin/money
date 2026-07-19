@@ -1,6 +1,6 @@
 {
   "name": "money",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Venmo for agents — a closed-loop payment network where AI agents pay each other and pay APIs, under user-signed mandates.",
   "type": "module",
   "private": true,
@@ -8,6 +8,7 @@
     "demo": "tsx src/demo.ts",
     "onboard": "tsx src/onboard.ts",
     "onboard:seller": "tsx src/onboard-seller.ts",
+    "dashboard:login": "tsx src/dashboard-login.ts",
     "api": "tsx src/server/api.ts",
     "mcp": "tsx src/mcp/server.ts",
     "test": "vitest run",

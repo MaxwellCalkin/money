@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { generateAgentKeypair } from "../src/core/identity.ts";
+import { generateAgentKeypair, signedHeaders } from "../src/core/identity.ts";
 import { MoneyNetwork } from "../src/core/network.ts";
 import { createApi } from "../src/server/api.ts";
 import { usd } from "../src/core/types.ts";
@@ -7,59 +7,66 @@ import { usd } from "../src/core/types.ts";
 function setup() {
   const network = new MoneyNetwork();
   const { app } = createApi(network);
-  const user = network.createUser("Max");
+  const ownerKeys = generateAgentKeypair();
+  const agentKeys = generateAgentKeypair();
+  const user = network.createUser("Max", ownerKeys.publicKey, "max");
   network.fund(user.id, usd(20), "seed-fund");
-  const agent = network.createAgent("scout", user.id);
+  const agent = network.createAgent("scout", user.id, agentKeys.publicKey, "scout");
   network.allocate(user.id, agent.id, usd(10), "seed-alloc");
   const peer = network.createAgent("writer", user.id);
   network.grantMandate({
     userId: user.id,
     agentId: agent.id,
     budget: usd(10),
-    perTxCap: usd(1),
-    dailyCap: usd(5),
+    perTxCap: usd(10),
+    dailyCap: usd(10),
     escalateAbove: usd(2),
     newPayeeCap: usd(0.1),
   });
-  return { network, app, user, agent, peer };
+  return { network, app, user, agent, peer, ownerKeys, agentKeys };
 }
 
-/** Read from an SSE stream until `predicate` matches or the deadline hits. */
-async function readUntil(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  predicate: (buf: string) => boolean,
-  deadlineMs = 3000
+async function ownerSession(
+  app: ReturnType<typeof createApi>["app"],
+  userId: string,
+  privateKey: string
 ): Promise<string> {
-  const decoder = new TextDecoder();
-  const deadline = Date.now() + deadlineMs;
-  let buf = "";
-  while (!predicate(buf)) {
-    const timeLeft = deadline - Date.now();
-    if (timeLeft <= 0) throw new Error(`timed out waiting for SSE data; got: ${buf.slice(0, 400)}`);
-    const chunk = await Promise.race([
-      reader.read(),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SSE read timeout")), timeLeft)),
-    ]);
-    if (chunk.done) break;
-    buf += decoder.decode(chunk.value, { stream: true });
-  }
-  return buf;
+  const path = "/owner/sessions";
+  const body = "{}";
+  const response = await app.request(path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...signedHeaders(userId, privateKey, { method: "POST", path, body }, "x-user-id"),
+    },
+    body,
+  });
+  expect(response.status).toBe(200);
+  return ((await response.json()) as { token: string }).token;
 }
 
-describe("live dashboard", () => {
-  it("serves a self-contained page — no external resources", async () => {
+describe("private owner control plane", () => {
+  it("serves a self-contained login and approval UI with no external resources", async () => {
     const { app } = setup();
     const res = await app.request("/dashboard");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
+    expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     const html = await res.text();
     expect(html).toContain("closed-loop agent payment network");
-    // Self-contained: nothing loaded from another origin.
+    expect(html).toContain("Approval inbox");
+    expect(html).toContain("Approve exact payment");
+    expect(html).toContain("a.agentId");
+    expect(html).toContain("a.to");
     expect(html).not.toMatch(/(?:src|href)\s*=\s*["']https?:/i);
+    const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    expect(script).toBeTruthy();
+    expect(() => new Function(script!)).not.toThrow();
   });
 
-  it("/dashboard/state reports balances, mandate counters, and the feed", async () => {
-    const { network, app, user, agent, peer } = setup();
+  it("requires a short-lived owner session and returns only that owner's world", async () => {
+    const { network, app, user, agent, peer, ownerKeys } = setup();
+    const other = network.createUser("Ada", generateAgentKeypair().publicKey, "ada");
     const provider = network.createProvider("Research Cloud", user.id, generateAgentKeypair().publicKey, "research-cloud");
     const service = network.registerService({
       providerId: provider.id,
@@ -69,49 +76,35 @@ describe("live dashboard", () => {
       price: usd(0.05),
       idempotencyKey: "dashboard-service",
     }).service;
-    const paid = network.pay({ from: agent.id, to: peer.id, amount: usd(0.25), memo: "subtask", idempotencyKey: "t1" });
-    expect(paid.status).toBe("paid");
+    expect(network.pay({ from: agent.id, to: peer.id, amount: usd(0.25), memo: "subtask", idempotencyKey: "t1" }).status).toBe("paid");
 
-    const state = (await (await app.request("/dashboard/state")).json()) as any;
+    expect((await app.request("/dashboard/state")).status).toBe(401);
+    const token = await ownerSession(app, user.id, ownerKeys.privateKey);
+    const response = await app.request("/dashboard/state", { headers: { authorization: `Bearer ${token}` } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const state = await response.json() as any;
     expect(state.zeroSum).toBe(true);
     expect(state.receiptsOk).toBe(true);
-    expect(state.receiptCount).toBe(1);
-    expect(state.accounts.find((a: any) => a.id === agent.id).balanceMicros).toBe(usd(9.75));
-    expect(state.mandates).toHaveLength(1);
-    expect(state.mandates[0].spent).toBe(usd(0.25));
-    expect(state.mandates[0].seenPayees).toEqual([peer.id]);
+    expect(state.accounts.map((account: any) => account.id)).toEqual(expect.arrayContaining([user.id, agent.id, peer.id, provider.id]));
+    expect(state.accounts.map((account: any) => account.id)).not.toContain(other.id);
+    expect(state.accounts.every((account: any) => account.publicKey === undefined)).toBe(true);
+    expect(state.accounts.find((account: any) => account.id === agent.id).balanceMicros).toBe(usd(9.75));
     expect(state.feed).toHaveLength(1);
-    expect(state.feed[0].memo).toBe("subtask");
-    expect(state.services).toEqual([
-      expect.objectContaining({ id: service.id, address: "@research-cloud/report", priceMicros: usd(0.05) }),
-    ]);
-  });
+    expect(state.services).toEqual([expect.objectContaining({ id: service.id, address: "@research-cloud/report" })]);
 
-  it("SSE sends the state on connect and pushes a fresh one when money moves", async () => {
-    const { network, app, agent, peer } = setup();
-    const res = await app.request("/dashboard/events");
-    expect(res.headers.get("content-type")).toContain("text/event-stream");
-    const reader = res.body!.getReader();
-    try {
-      const initial = await readUntil(reader, (b) => b.includes("event: state") && b.includes("\n\n"));
-      expect(initial).toContain('"receiptCount":0');
-
-      const paid = network.pay({ from: agent.id, to: peer.id, amount: usd(0.25), memo: "live", idempotencyKey: "sse-1" });
-      expect(paid.status).toBe("paid");
-      if (paid.status !== "paid") return;
-
-      // The next push (≤250ms coalescing) must carry the new receipt.
-      const updated = await readUntil(reader, (b) => b.includes(paid.receipt.id));
-      expect(updated).toContain('"receiptCount":1');
-    } finally {
-      await reader.cancel();
-    }
+    const logout = await app.request("/owner/sessions/current", {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(logout.status).toBe(200);
+    expect((await app.request("/dashboard/state", { headers: { authorization: `Bearer ${token}` } })).status).toBe(401);
   });
 
   it("network.onEvent notifies observers and unsubscribe stops it", () => {
     const { network, agent, peer } = setup();
     const seen: string[] = [];
-    const unsubscribe = network.onEvent((e) => seen.push(e.type));
+    const unsubscribe = network.onEvent((event) => seen.push(event.type));
     network.pay({ from: agent.id, to: peer.id, amount: usd(0.1), memo: "m", idempotencyKey: "o1" });
     expect(seen).toEqual(["transfer"]);
     unsubscribe();
@@ -121,10 +114,7 @@ describe("live dashboard", () => {
 
   it("a throwing observer cannot break a payment", () => {
     const { network, agent, peer } = setup();
-    network.onEvent(() => {
-      throw new Error("bad observer");
-    });
-    const paid = network.pay({ from: agent.id, to: peer.id, amount: usd(0.1), memo: "m", idempotencyKey: "x1" });
-    expect(paid.status).toBe("paid");
+    network.onEvent(() => { throw new Error("bad observer"); });
+    expect(network.pay({ from: agent.id, to: peer.id, amount: usd(0.1), memo: "m", idempotencyKey: "x1" }).status).toBe("paid");
   });
 });

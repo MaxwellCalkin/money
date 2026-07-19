@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, truncateSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Account, Challenge, ExternalPayment, Mandate, PayResult, Receipt, Service, Transfer } from "./types.ts";
+import type { Account, ApprovalRequest, Challenge, ExternalPayment, Mandate, PayResult, Receipt, Service, Transfer } from "./types.ts";
 
 /**
  * Durability = event sourcing to an append-only JSONL log. Every state
@@ -25,6 +25,15 @@ export type NetworkEvent =
   | { type: "service_registered"; service: Service }
   | { type: "challenge_created"; challenge: Challenge }
   | { type: "challenge_redeemed"; challengeId: string }
+  | { type: "approval_requested"; approval: ApprovalRequest }
+  | {
+      type: "approval_resolved";
+      approvalId: string;
+      status: Exclude<ApprovalRequest["status"], "pending">;
+      resolvedAt: number;
+      receiptId?: string;
+      reason?: string;
+    }
   | { type: "mandate_granted"; mandate: StoredMandate }
   | { type: "mandate_revoked"; mandateId: string }
   | {

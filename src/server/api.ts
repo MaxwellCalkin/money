@@ -1,7 +1,7 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import type { Context, Next } from "hono";
-import { streamSSE } from "hono/streaming";
+import { createHash, randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createMockX402Server } from "../bridge/mock-x402.ts";
 import { buildXPayment, canonicalHostOf, requirementToMicros, type PaymentRequirements } from "../bridge/x402.ts";
@@ -20,6 +20,7 @@ const CLOCK_SKEW_MS = 30_000;
 /** Signed routes hash the body before the signature is known-good — cap what
  *  an unauthenticated caller can make us buffer. */
 const MAX_SIGNED_BODY_BYTES = 256 * 1024;
+const OWNER_SESSION_TTL_MS = 8 * 60 * 60_000;
 
 type ApiEnv = { Variables: { agentId: string; userId: string; providerId: string } };
 
@@ -57,7 +58,18 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
 
   // Core throws are bugs or unknown-account errors — return structured JSON,
   // never a bare stack trace.
-  app.onError((err, c) => c.json({ error: "internal_error", message: err.message }, 500));
+  app.onError((err, c) => {
+    console.error("money API internal error", err);
+    return c.json({ error: "internal_error", message: "The request could not be completed." }, 500);
+  });
+  const noStore = async (c: Context<ApiEnv>, next: Next) => {
+    await next();
+    c.header("cache-control", "no-store");
+  };
+  app.use("/owner/*", noStore);
+  app.use("/agent/*", noStore);
+  app.use("/provider/state", noStore);
+  app.use("/dashboard/state", noStore);
 
   // Demo provider that owns the paid endpoints on this server. Reused across
   // restarts — a durable network must not mint a new provider every boot.
@@ -67,6 +79,11 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
 
   /** nonce → signed ts, remembered for the auth window to block replays. */
   const seenNonces = new Map<string, number>();
+  /** Browser control-plane sessions are short-lived, memory-only, and stored
+   * only as SHA-256 token hashes. A restart logs browsers out; it never writes
+   * a bearer credential into the money event log. */
+  const ownerSessions = new Map<string, { userId: string; createdAt: number; expiresAt: number }>();
+  const tokenHash = (token: string) => createHash("sha256").update(token, "utf8").digest("hex");
 
   /**
    * Signed-request authentication: an Ed25519 signature over
@@ -124,6 +141,32 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
   const requireOwnerSig = requireSignedAccount("user");
   const requireProviderSig = requireSignedAccount("provider");
 
+  const ownerFromBearer = (c: Context<ApiEnv>): string | undefined => {
+    const match = /^Bearer ([A-Za-z0-9_-]{32,256})$/.exec(c.req.header("authorization") ?? "");
+    if (!match) return undefined;
+    const hash = tokenHash(match[1]!);
+    const session = ownerSessions.get(hash);
+    if (!session) return undefined;
+    if (Date.now() >= session.expiresAt) {
+      ownerSessions.delete(hash);
+      return undefined;
+    }
+    return session.userId;
+  };
+
+  /** Owner control-plane routes accept either a fresh owner signature (CLI)
+   * or a short-lived bearer session minted by such a signature (browser). */
+  const requireOwnerAccess = async (c: Context<ApiEnv>, next: Next) => {
+    if (c.req.header("authorization")) {
+      const userId = ownerFromBearer(c);
+      if (!userId) return c.json({ error: "unauthorized", reason: "owner session is missing, invalid, or expired" }, 401);
+      c.set("userId", userId);
+      await next();
+      return;
+    }
+    return requireOwnerSig(c, next);
+  };
+
   const readBody = async <T>(c: Context): Promise<T | null> =>
     c.req.json<T>().catch(() => null);
 
@@ -132,7 +175,7 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
 
   /** Client keys must not squat the namespaces the network reserves internally. */
   const validClientKey = (key: unknown): key is string =>
-    typeof key === "string" && key.length > 0 && !key.startsWith("chl_") && !key.startsWith("rev_");
+    typeof key === "string" && key.length > 0 && key.length <= 128 && !key.startsWith("chl_") && !key.startsWith("rev_");
 
   /** x402-shaped payment gate. */
   const paid = (price: Micros, resource: string) => async (c: Context, next: Next) => {
@@ -189,6 +232,32 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
       return c.json({ error: "handle_taken", reason: `@${body.handle} is already registered` }, 409);
     }
     return c.json(network.createUser(body.name, body.publicKey, body.handle));
+  });
+
+  app.post("/owner/sessions", requireOwnerSig, (c) => {
+    const userId = c.get("userId");
+    const now = Date.now();
+    for (const [hash, session] of ownerSessions) {
+      if (now >= session.expiresAt) ownerSessions.delete(hash);
+    }
+    const existing = [...ownerSessions.entries()]
+      .filter(([, session]) => session.userId === userId)
+      .sort((a, b) => a[1].createdAt - b[1].createdAt);
+    while (existing.length >= 10) ownerSessions.delete(existing.shift()![0]);
+    const token = randomBytes(32).toString("base64url");
+    const expiresAt = now + OWNER_SESSION_TTL_MS;
+    ownerSessions.set(tokenHash(token), { userId, createdAt: now, expiresAt });
+    return c.json({
+      token,
+      expiresAt,
+      dashboardPath: `/dashboard#token=${encodeURIComponent(token)}`,
+    });
+  });
+
+  app.delete("/owner/sessions/current", requireOwnerAccess, (c) => {
+    const match = /^Bearer ([A-Za-z0-9_-]{32,256})$/.exec(c.req.header("authorization") ?? "");
+    if (match) ownerSessions.delete(tokenHash(match[1]!));
+    return c.json({ ok: true });
   });
 
   app.post("/agents", requireOwnerSig, async (c) => {
@@ -464,13 +533,26 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
   app.post("/pay", requireAgentSig, async (c) => {
     const from = c.get("agentId");
     const body = await readBody<{ to: string; amountMicros: number; memo?: string; idempotencyKey: string }>(c);
-    if (!body || typeof body.to !== "string" || !isPositiveMicros(body.amountMicros) || !validClientKey(body.idempotencyKey)) {
-      return c.json({ error: "invalid_request", reason: "need to, positive integer amountMicros, and idempotencyKey (not starting with chl_/rev_)" }, 400);
+    if (
+      !body ||
+      typeof body.to !== "string" ||
+      body.to.length > 128 ||
+      !isPositiveMicros(body.amountMicros) ||
+      (body.memo !== undefined && (typeof body.memo !== "string" || body.memo.length > 500)) ||
+      !validClientKey(body.idempotencyKey)
+    ) {
+      return c.json({ error: "invalid_request", reason: "need to, positive integer amountMicros, memo up to 500 characters, and idempotencyKey up to 128 characters" }, 400);
     }
     const payee = network.resolveAccount(body.to);
     if (!payee) return c.json({ error: "payee_not_found", reason: `unknown account or handle ${body.to}` }, 404);
-    const result = network.pay({ from, to: payee.id, amount: body.amountMicros, memo: body.memo ?? "", idempotencyKey: body.idempotencyKey });
-    return c.json(result, payStatus(result));
+    const result = network.requestPayment({
+      from,
+      to: payee.id,
+      amount: body.amountMicros,
+      memo: body.memo ?? "",
+      idempotencyKey: body.idempotencyKey,
+    });
+    return result.status === "approval_required" ? c.json(result, 202) : c.json(result, payStatus(result));
   });
 
   app.post("/pay-challenge", requireAgentSig, async (c) => {
@@ -480,7 +562,7 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
       return c.json({ error: "invalid_request", reason: "need challengeId" }, 400);
     }
     const result = network.payChallenge(from, body.challengeId);
-    return c.json(result, payStatus(result));
+    return result.status === "approval_required" ? c.json(result, 202) : c.json(result, payStatus(result));
   });
 
   // ── External x402 bridge ──────────────────────────────────────────────────
@@ -549,76 +631,110 @@ export function createApi(network: MoneyNetwork, wallet: ExternalWallet = new Mo
     return c.json({ ok: true, state: result.payment.state, settledTx: result.payment.settledTx });
   });
 
-  app.get("/balance/:id", (c) => {
-    const requested = c.req.param("id");
-    const account = network.resolveAccount(requested);
-    if (!account) return c.json({ error: `unknown account or handle ${requested}` }, 404);
-    const micros = network.balanceOf(account.id);
-    return c.json({ accountId: account.id, handle: account.handle, balanceMicros: micros, balanceDisplay: fmt(micros) });
-  });
-
-  app.get("/feed", (c) => {
-    const limit = Number(c.req.query("limit") ?? 20);
-    return c.json(network.feed(limit));
-  });
-
   app.get("/verify", (c) => c.json(network.verifyReceipts()));
 
-  // ── Dashboard (read-only owner view: balances, mandates, live receipts) ──
+  // ── Tenant-scoped control plane ─────────────────────────────────────────
 
-  const snapshot = () => ({
+  const safeAccount = (account: ReturnType<MoneyNetwork["account"]>) => {
+    if (!account) return undefined;
+    const { publicKey: _publicKey, ...safe } = account;
+    return safe;
+  };
+  const receiptView = (receipt: ReturnType<MoneyNetwork["feed"]>[number]) => ({
+    ...receipt,
+    fromAccount: safeAccount(network.account(receipt.from)),
+    toAccount: safeAccount(network.account(receipt.to)),
+  });
+  const accountFeed = (ids: Set<string>, limit = 25) =>
+    network.receipts.list().filter((receipt) => ids.has(receipt.from) || ids.has(receipt.to)).slice(-limit).map(receiptView);
+  const approvalView = (approval: ReturnType<MoneyNetwork["listApprovals"]>[number]) => {
+    const challenge = approval.idempotencyKey.startsWith("chl_")
+      ? network.challenge(approval.idempotencyKey.slice(4))
+      : undefined;
+    return {
+      ...approval,
+      ...(challenge ? { challenge: { id: challenge.id, redeemed: challenge.redeemed } } : {}),
+    };
+  };
+
+  const ownerSnapshot = (userId: string) => {
+    const accounts = network.listAccounts().filter((account) => account.id === userId || account.ownerId === userId);
+    const ids = new Set(accounts.map((account) => account.id));
+    const providerIds = new Set(accounts.filter((account) => account.kind === "provider").map((account) => account.id));
+    const agentIds = new Set(accounts.filter((account) => account.kind === "agent").map((account) => account.id));
+    return {
+      now: Date.now(),
+      zeroSum: network.ledger.zeroSum(),
+      receiptsOk: network.verifyReceipts().ok,
+      accounts: accounts.map((account) => ({ ...safeAccount(account)!, balanceMicros: network.balanceOf(account.id) })),
+      services: network.listServices().filter((service) => providerIds.has(service.providerId)).map(publicService),
+      mandates: network.listMandates().filter((mandate) => mandate.userId === userId).map(serializeMandate),
+      approvals: network.listApprovals(userId).slice(-100).map(approvalView),
+      feed: accountFeed(ids),
+      external: network.listExternalPayments()
+        .filter((payment) => agentIds.has(payment.agentId))
+        .slice(-20)
+        .map(({ paymentHeader: _header, ...payment }) => payment),
+    };
+  };
+
+  const agentSnapshot = (agentId: string, limit = 25) => {
+    const account = network.account(agentId)!;
+    const mandate = network.policy.activeMandateFor(agentId);
+    return {
+      now: Date.now(),
+      account: { ...safeAccount(account)!, balanceMicros: network.balanceOf(agentId) },
+      mandate: mandate ? serializeMandate(mandate) : undefined,
+      approvals: network.listAgentApprovals(agentId).slice(-100).map(approvalView),
+      feed: accountFeed(new Set([agentId]), limit),
+    };
+  };
+
+  const providerSnapshot = (providerId: string) => ({
     now: Date.now(),
-    zeroSum: network.ledger.zeroSum(),
-    receiptsOk: network.verifyReceipts().ok,
-    receiptCount: network.receipts.length,
-    accounts: network.listAccounts().map((a) => ({ ...a, balanceMicros: network.balanceOf(a.id) })),
-    services: network.listServices().map(publicService),
-    mandates: network.listMandates().map(serializeMandate),
-    feed: network.feed(25),
-    // Bridge payments, credential omitted — the dashboard is a read surface
-    // and must never re-expose a spendable X-PAYMENT header.
-    external: network.listExternalPayments().slice(-20).map(({ paymentHeader: _header, ...p }) => p),
+    account: { ...safeAccount(network.account(providerId))!, balanceMicros: network.balanceOf(providerId) },
+    services: network.listServices().filter((service) => service.providerId === providerId).map(publicService),
+    feed: accountFeed(new Set([providerId])),
   });
 
-  app.get("/dashboard", (c) => c.html(dashboardHtml));
-  app.get("/dashboard/state", (c) => c.json(snapshot()));
+  app.get("/agent/state", requireAgentSig, (c) => {
+    const requested = Number(c.req.query("limit") ?? 25);
+    const limit = Number.isSafeInteger(requested) ? Math.max(1, Math.min(100, requested)) : 25;
+    return c.json(agentSnapshot(c.get("agentId"), limit));
+  });
+  app.get("/agent/approvals/:id", requireAgentSig, (c) => {
+    const approval = network.approval(c.req.param("id") ?? "");
+    if (!approval) return c.json({ error: "approval_not_found" }, 404);
+    if (approval.agentId !== c.get("agentId")) return c.json({ error: "forbidden" }, 403);
+    return c.json(approvalView(approval));
+  });
+  app.get("/provider/state", requireProviderSig, (c) => c.json(providerSnapshot(c.get("providerId"))));
+  app.get("/owner/state", requireOwnerAccess, (c) => c.json(ownerSnapshot(c.get("userId"))));
 
-  // SSE: push a fresh snapshot whenever money moves (coalesced to 250ms),
-  // plus a heartbeat every ~15s so proxies don't kill the idle stream.
-  app.get("/dashboard/events", (c) =>
-    streamSSE(c, async (stream) => {
-      let dirty = false;
-      let alive = true;
-      const unsubscribe = network.onEvent(() => {
-        dirty = true;
-      });
-      stream.onAbort(() => {
-        alive = false;
-        unsubscribe();
-      });
-      const push = async (event: string, data: string) => {
-        try {
-          await stream.writeSSE({ event, data });
-          return true;
-        } catch {
-          return false;
-        }
-      };
-      alive = (await push("state", JSON.stringify(snapshot()))) && alive;
-      let ticks = 0;
-      while (alive && !stream.aborted) {
-        await stream.sleep(250);
-        ticks++;
-        if (dirty) {
-          dirty = false;
-          if (!(await push("state", JSON.stringify(snapshot())))) break;
-        } else if (ticks % 60 === 0) {
-          if (!(await push("ping", String(Date.now())))) break;
-        }
-      }
-      unsubscribe();
-    })
-  );
+  app.post("/owner/approvals/:id/approve", requireOwnerAccess, (c) => {
+    const approval = network.approval(c.req.param("id") ?? "");
+    if (!approval) return c.json({ error: "approval_not_found" }, 404);
+    if (approval.userId !== c.get("userId")) return c.json({ error: "forbidden" }, 403);
+    const result = network.approvePayment(c.get("userId"), approval.id);
+    return c.json(result, result.approval.status === "approved" ? 200 : 409);
+  });
+
+  app.post("/owner/approvals/:id/reject", requireOwnerAccess, async (c) => {
+    const approval = network.approval(c.req.param("id") ?? "");
+    if (!approval) return c.json({ error: "approval_not_found" }, 404);
+    if (approval.userId !== c.get("userId")) return c.json({ error: "forbidden" }, 403);
+    const body = await readBody<{ reason?: string }>(c);
+    const reason = typeof body?.reason === "string" ? body.reason.slice(0, 500) : "rejected by owner";
+    return c.json(network.rejectApproval(c.get("userId"), approval.id, reason));
+  });
+
+  app.get("/dashboard", (c) => {
+    c.header("content-security-policy", "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+    c.header("referrer-policy", "no-referrer");
+    c.header("x-content-type-options", "nosniff");
+    return c.html(dashboardHtml);
+  });
+  app.get("/dashboard/state", requireOwnerAccess, (c) => c.json(ownerSnapshot(c.get("userId"))));
 
   // ── Demo paid endpoints (what an agent actually buys) ───────────────────
 
@@ -654,10 +770,13 @@ export function startServer(network?: MoneyNetwork, port = Number(process.env.PO
   const server = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" });
   // Unconfirmed external payments auto-reverse; unref so the sweeper never
   // keeps a closing process alive.
-  const sweeper = setInterval(() => network!.sweepExternal(), 30_000);
+  const sweeper = setInterval(() => {
+    network!.sweepExternal();
+    network!.sweepApprovals();
+  }, 30_000);
   sweeper.unref?.();
   console.log(`money network listening on http://127.0.0.1:${port} (demo provider: ${provider.id})`);
-  console.log(`live dashboard at http://127.0.0.1:${port}/dashboard`);
+  console.log(`private owner dashboard at http://127.0.0.1:${port}/dashboard (mint a session with npm run dashboard:login)`);
   // Local-dev affordance: MOCK_X402_PORT also serves a mock EXTERNAL x402
   // seller that verifies this server's wallet, so an MCP agent can exercise
   // the full bridge flow (money_fetch → 402 → bridge → X-PAYMENT → 200)

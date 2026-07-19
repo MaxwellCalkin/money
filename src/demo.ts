@@ -63,7 +63,7 @@ async function main() {
     network.allocate(max.id, writer.id, usd(5), "seed-alloc-writer");
     ok(`allocated ${fmt(usd(10))} to scout (${scout.id}), ${fmt(usd(5))} to writer (${writer.id})`);
 
-    const scoutMandate = network.grantMandate({
+    network.grantMandate({
       userId: max.id,
       agentId: scout.id,
       budget: usd(10),
@@ -182,24 +182,18 @@ async function main() {
     if (toe.status === "paid") ok(`${fmt(usd(0.05))} to the same payee allowed — blast radius is cents, not the envelope`);
 
     section("5 · Escalation: above the line, a human must sign");
-    const big = network.pay({
+    const big = network.requestPayment({
       from: scout.id,
       to: writer.id,
       amount: usd(3),
       memo: "bulk research purchase",
       idempotencyKey: "big-1",
     });
-    if (big.status === "escalate") {
-      no(`${fmt(usd(3))} → escalate: ${big.reason}`);
-      const approved = network.approveAndPay(scoutMandate.id, {
-        from: scout.id,
-        to: writer.id,
-        amount: usd(3),
-        memo: "bulk research purchase",
-        idempotencyKey: "big-1",
-      });
-      if (approved.status === "paid") {
-        ok(`human tapped approve (permit bound to exact payee+amount) → paid, receipt ${approved.receipt.id}`);
+    if (big.status === "approval_required") {
+      no(`${fmt(usd(3))} → durable approval request ${big.approval.id} (the exact terms are now immutable)`);
+      const approved = network.approvePayment(max.id, big.approval.id);
+      if (approved.payment?.status === "paid") {
+        ok(`human tapped approve → paid exactly once, receipt ${approved.payment.receipt.id}`);
       }
     }
 

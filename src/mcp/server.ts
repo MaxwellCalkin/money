@@ -55,21 +55,21 @@ function text(value: unknown) {
   return { content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };
 }
 
-const server = new McpServer({ name: "money", version: "0.1.0" });
+const server = new McpServer({ name: "money", version: "0.3.0" });
 
 server.tool(
   "money_balance",
   "Check this agent's spendable balance on the money network.",
   {},
   async () => {
-    const { body } = await api(`/balance/${AGENT_ID}`);
-    return text(body);
+    const { body } = await api("/agent/state");
+    return text({ account: body.account, mandate: body.mandate });
   }
 );
 
 server.tool(
   "money_pay",
-  "Pay another account on the money network (an agent, a provider, or a user). Spends from this agent's balance under its owner's mandate; may be denied or escalated by policy.",
+  "Pay another account on the money network (an agent, a provider, or a user). Spends under the owner's mandate; larger payments return a durable approval_required request for the owner inbox.",
   {
     to: z.string().describe("destination account id or public handle, e.g. agt_1a2b3c4d or @researcher"),
     amount_usd: z.number().positive().describe("amount in dollars, e.g. 0.25"),
@@ -101,6 +101,10 @@ server.tool(
  * with the existing receipt instead of paying a second time.
  */
 const pendingRedemptions = new Map<string, { challengeId: string; receiptId: string }>();
+/** High-value internal calls waiting for the owner's durable approval. The
+ * original challenge is retained so the next tool call recovers the approved
+ * receipt instead of generating a second challenge/request. */
+const pendingApprovals = new Map<string, WaitingApproval>();
 
 /**
  * External x402 purchases in flight, by URL (separate namespace from the
@@ -119,6 +123,81 @@ async function fetchWithReceipt(url: string, challengeId: string, receiptId: str
       "x-payment-receipt": receiptId,
     },
   });
+}
+
+async function deliverInternal(
+  url: string,
+  challengeId: string,
+  payment: any,
+  advertised: number
+) {
+  const paidMicros: number = payment.receipt.amount;
+  const receiptId: string = payment.receipt.id;
+  pendingRedemptions.set(url, { challengeId, receiptId });
+
+  let retry: Response;
+  try {
+    retry = await fetchWithReceipt(url, challengeId, receiptId);
+  } catch {
+    return text({
+      status: 0,
+      error: "paid, but the retry fetch failed — receipt retained; call money_fetch again with the same url to resume without paying twice",
+      paid: fmt(paidMicros),
+      receiptId,
+    });
+  }
+  const body = await retry.text();
+  if (retry.ok) pendingRedemptions.delete(url);
+  return text({
+    status: retry.status,
+    paid: fmt(paidMicros),
+    ...(advertised !== paidMicros ? { warning: `page advertised ${fmt(advertised)} but the network charged ${fmt(paidMicros)}` } : {}),
+    ...(retry.ok ? {} : { note: "paid but resource not served; receipt retained — call money_fetch again to resume" }),
+    receiptId,
+    body: safeJson(body),
+  });
+}
+
+type WaitingApproval = { challengeId: string; approvalId: string; advertised: number };
+
+async function resumeInternalApproval(url: string, waiting: WaitingApproval) {
+  const resumedPayment = await api("/pay-challenge", {
+    method: "POST",
+    body: JSON.stringify({ challengeId: waiting.challengeId }),
+  });
+  if (resumedPayment.body?.status === "approval_required") {
+    return text({
+      status: 202,
+      approval: resumedPayment.body.approval,
+      note: "payment is still waiting in the owner's approval inbox",
+    });
+  }
+  pendingApprovals.delete(url);
+  if (resumedPayment.body?.status === "paid") {
+    return deliverInternal(url, waiting.challengeId, resumedPayment.body, waiting.advertised);
+  }
+  return text({ status: resumedPayment.status, error: "owner approval did not produce a payment", decision: resumedPayment.body });
+}
+
+/** Rediscover a challenge approval after this MCP process restarted. */
+async function discoverApproval(url: string): Promise<WaitingApproval | undefined> {
+  const parsed = new URL(url);
+  const memos = new Set([`402:${parsed.toString()}`, `402:${parsed.pathname}${parsed.search}`]);
+  const state = await api("/agent/state?limit=1");
+  const approvals = Array.isArray(state.body?.approvals) ? state.body.approvals : [];
+  const approval = [...approvals].reverse().find((candidate: any) =>
+    (candidate.status === "pending" || candidate.status === "approved") &&
+    candidate.challenge?.redeemed === false &&
+    typeof candidate.idempotencyKey === "string" &&
+    candidate.idempotencyKey.startsWith("chl_") &&
+    memos.has(candidate.memo)
+  );
+  if (!approval) return undefined;
+  return {
+    challengeId: approval.challenge.id,
+    approvalId: approval.id,
+    advertised: approval.amount,
+  };
 }
 
 type PendingExternal = { idempotencyKey: string; externalId?: string; paymentHeader?: string; paidMicros?: number };
@@ -228,6 +307,12 @@ server.tool(
       }
     }
 
+    // Resume path (approval): retry the SAME challenge. While pending, the
+    // network returns the same approval; once approved it returns the original
+    // receipt and the resource retry continues without a second debit.
+    const waiting = pendingApprovals.get(url);
+    if (waiting) return resumeInternalApproval(url, waiting);
+
     const first = await fetch(url, { headers: { "x-agent-id": AGENT_ID! } });
     if (first.status !== 402) {
       const body = await first.text();
@@ -251,43 +336,39 @@ server.tool(
       return text({ status: 402, error: "server demanded payment but sent no supported payment challenge", body: challenge });
     }
 
+    // A fresh seller challenge may have been issued after this MCP process
+    // restarted. Prefer any older durable, unredeemed approval for the same
+    // resource and let the new unpaid challenge expire in memory.
+    const recovered = await discoverApproval(url).catch(() => undefined);
+    if (recovered) {
+      pendingApprovals.set(url, recovered);
+      return resumeInternalApproval(url, recovered);
+    }
+
     const payment = await api("/pay-challenge", {
       method: "POST",
       body: JSON.stringify({ challengeId: challenge.challengeId }),
     });
+    const advertised = challenge.amountMicros ?? 0;
+    if (payment.body?.status === "approval_required") {
+      const approvalKey: string = payment.body.approval.idempotencyKey;
+      pendingApprovals.set(url, {
+        challengeId: approvalKey.startsWith("chl_") ? approvalKey.slice(4) : challenge.challengeId,
+        approvalId: payment.body.approval.id,
+        advertised,
+      });
+      return text({
+        status: 202,
+        approval: payment.body.approval,
+        note: "payment is waiting in the owner's approval inbox; call money_fetch again after the owner decides",
+      });
+    }
     if (payment.body?.status !== "paid") {
       return text({ status: 402, error: "payment was not authorized by policy", decision: payment.body });
     }
 
-    // Amount comes from the receipt (authoritative), never from the 402 body
-    // (attacker-controlled: a malicious page could advertise a lower price).
-    const paidMicros: number = payment.body.receipt.amount;
-    const receiptId: string = payment.body.receipt.id;
-    const advertised = challenge.amountMicros ?? 0;
-    pendingRedemptions.set(url, { challengeId: challenge.challengeId, receiptId });
-
-    let retry: Response;
-    try {
-      retry = await fetchWithReceipt(url, challenge.challengeId, receiptId);
-    } catch {
-      return text({
-        status: 0,
-        error: "paid, but the retry fetch failed — receipt retained; call money_fetch again with the same url to resume without paying twice",
-        paid: fmt(paidMicros),
-        receiptId,
-      });
-    }
-
-    const body = await retry.text();
-    if (retry.ok) pendingRedemptions.delete(url);
-    return text({
-      status: retry.status,
-      paid: fmt(paidMicros),
-      ...(advertised !== paidMicros ? { warning: `page advertised ${fmt(advertised)} but the network charged ${fmt(paidMicros)}` } : {}),
-      ...(retry.ok ? {} : { note: "paid but resource not served; receipt retained — call money_fetch again to resume" }),
-      receiptId,
-      body: safeJson(body),
-    });
+    // Amount comes from the receipt (authoritative), never from the 402 body.
+    return deliverInternal(url, challenge.challengeId, payment.body, advertised);
   }
 );
 
@@ -298,8 +379,8 @@ server.tool(
     limit: z.number().int().min(1).max(100).default(10),
   },
   async ({ limit }) => {
-    const { body } = await api(`/feed?limit=${limit}`);
-    return text(body);
+    const { body } = await api(`/agent/state?limit=${limit}`);
+    return text(body.feed ?? body);
   }
 );
 
