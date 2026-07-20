@@ -42,7 +42,8 @@ export function createDatabaseOpsApi(
         select
           (select max(version) from money.schema_migrations) as version,
           to_regprocedure('money_private.request_agent_payment(text,text,text,text,bigint,text)') is not null
-          and to_regprocedure('money_private.treasury_health()') is not null as posting_ready
+          and to_regprocedure('money_private.treasury_health()') is not null
+          and to_regprocedure('money_private.compliance_subject_state(text)') is not null as posting_ready
       `);
       const row = result.rows[0];
       if (!row?.version || !row.posting_ready) {

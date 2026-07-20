@@ -5,6 +5,7 @@ import { generateAgentKeypair, signRequest, signedHeaders } from "../src/core/id
 import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/database.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { createPostgresApi } from "../src/server/postgres-api.ts";
+import { approveComplianceFixture } from "./helpers/compliance-fixture.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
   constructor(readonly pg: PGliteInterface) {}
@@ -85,7 +86,9 @@ describe("Postgres signed product API", () => {
       body: JSON.stringify({ name, handle, publicKey: keys.publicKey }),
     });
     expect(response.status).toBe(200);
-    return { user: await response.json() as { id: string; replayed: boolean }, keys };
+    const user = await response.json() as { id: string; replayed: boolean };
+    await approveComplianceFixture(db, user.id);
+    return { user, keys };
   }
 
   async function createAgent(

@@ -7,6 +7,7 @@ import { PostgresLedger } from "../src/db/ledger.ts";
 import { PostgresMarketplace } from "../src/db/marketplace.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { PostgresPolicy } from "../src/db/policy.ts";
+import { approveComplianceFixture } from "./helpers/compliance-fixture.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
   constructor(readonly pg: PGliteInterface) {}
@@ -81,6 +82,7 @@ describe("Postgres marketplace transactions", () => {
       actorId: owner.id, id: "prv_market01", kind: "provider", ownerId: owner.id,
       name: "Research Cloud", handle: "research-cloud", publicKey: key("provider"),
     });
+    await approveComplianceFixture(db, owner.id);
     await ledger.postTransfer({
       actorId: owner.id, operation: "fund", idempotencyKey: "market-fund",
       from: "external:funding", to: owner.id, amountMicros: 20_000_000n,

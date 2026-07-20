@@ -18,6 +18,7 @@ import { PostgresLedger } from "../src/db/ledger.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { PostgresPolicy } from "../src/db/policy.ts";
 import { PostgresTreasury } from "../src/db/treasury.ts";
+import { approveComplianceFixture, clearCounterpartyFixture } from "./helpers/compliance-fixture.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
   constructor(readonly pg: PGliteInterface) {}
@@ -101,6 +102,8 @@ describe("Postgres external settlement state machine", () => {
       actorId: otherOwner.id, id: "agt_external2", kind: "agent", ownerId: otherOwner.id,
       name: "Other agent", handle: "other-agent-ext", publicKey: key("other-agent"),
     });
+    await approveComplianceFixture(db, owner.id);
+    await clearCounterpartyFixture(db, POLICY_PAYEE);
     await ledger.postTransfer({
       actorId: owner.id, operation: "fund", idempotencyKey: "external-fund",
       from: "external:funding", to: owner.id, amountMicros: 2_000_000n,

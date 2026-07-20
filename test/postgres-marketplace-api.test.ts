@@ -7,6 +7,7 @@ import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/da
 import { runMigrations } from "../src/db/migrate.ts";
 import { createMoneySellerClient, moneyPaid } from "../src/seller/middleware.ts";
 import { createPostgresApi } from "../src/server/postgres-api.ts";
+import { approveComplianceFixture } from "./helpers/compliance-fixture.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
   constructor(readonly pg: PGliteInterface) {}
@@ -109,6 +110,7 @@ describe("Postgres marketplace HTTP API", () => {
       body: JSON.stringify({ name: "Max", handle: "max", publicKey: ownerKeys.publicKey }),
     });
     const owner = await signup.json() as { id: string };
+    await approveComplianceFixture(db, owner.id);
     const agentResponse = await signedPost(api.app, "/agents", {
       name: "Scout", handle: "scout", ownerId: owner.id, publicKey: agentKeys.publicKey,
     }, owner.id, ownerKeys.privateKey, "x-user-id");

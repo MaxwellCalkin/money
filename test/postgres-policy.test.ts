@@ -5,6 +5,7 @@ import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/da
 import { PostgresLedger } from "../src/db/ledger.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { PostgresPolicy } from "../src/db/policy.ts";
+import { approveComplianceFixture } from "./helpers/compliance-fixture.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
   constructor(readonly pg: PGliteInterface) {}
@@ -63,6 +64,8 @@ describe("Postgres mandate and approval policy", () => {
     const peer = await ledger.registerAccount({ id: "agt_peer00001", kind: "agent", name: "Owned peer", ownerId: owner.id, handle: "owned-peer" });
     const otherOwner = await ledger.registerAccount({ id: "usr_other0001", kind: "user", name: "Other owner", handle: "other-owner" });
     const stranger = await ledger.registerAccount({ id: "agt_stranger1", kind: "agent", name: "Stranger", ownerId: otherOwner.id, handle: "stranger" });
+    await approveComplianceFixture(db, owner.id);
+    await approveComplianceFixture(db, otherOwner.id);
     if (balance > 0n) {
       await ledger.postTransfer({ actorId: owner.id, operation: "fund", idempotencyKey: "fund", from: "external:funding", to: owner.id, amountMicros: balance });
       await ledger.postTransfer({ actorId: owner.id, operation: "allocate", idempotencyKey: "allocate", from: owner.id, to: agent.id, amountMicros: balance });

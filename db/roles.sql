@@ -31,6 +31,21 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'money_reconciler') then
     create role money_reconciler nologin;
   end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_compliance_admin') then
+    create role money_compliance_admin nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_compliance_worker') then
+    create role money_compliance_worker nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_compliance_ingress') then
+    create role money_compliance_ingress nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_risk_worker') then
+    create role money_risk_worker nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_compliance_ops') then
+    create role money_compliance_ops nologin;
+  end if;
 end $$;
 
 revoke all on schema public from public;
@@ -44,13 +59,19 @@ revoke all on all functions in schema money_private from public;
 -- in the current grant list.
 revoke all on schema money, money_private from
   money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
-  money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler;
+  money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
+  money_compliance_admin, money_compliance_worker, money_compliance_ingress,
+  money_risk_worker, money_compliance_ops;
 revoke all on all tables in schema money from
   money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
-  money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler;
+  money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
+  money_compliance_admin, money_compliance_worker, money_compliance_ingress,
+  money_risk_worker, money_compliance_ops;
 revoke all on all functions in schema money_private from
   money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
-  money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler;
+  money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
+  money_compliance_admin, money_compliance_worker, money_compliance_ingress,
+  money_risk_worker, money_compliance_ops;
 
 grant usage on schema money, money_private to money_app;
 grant select on money.schema_migrations, money.accounts, money.assets, money.services to money_app;
@@ -111,8 +132,56 @@ grant execute on function
   money_private.get_treasury_payout(text,uuid),
   money_private.list_treasury_fundings(text,integer),
   money_private.list_treasury_exposures(text,integer),
-  money_private.treasury_control_state()
+  money_private.treasury_control_state(),
+  money_private.begin_compliance_verification(text,text,text,bigint,bigint),
+  money_private.compliance_subject_state(text)
   to money_app;
+
+-- Product traffic can submit a non-PII onboarding profile and read only its
+-- own sanitized status. Approval, screening details, cases, and reasons are
+-- deliberately absent from money_app.
+
+grant usage on schema money_private to money_compliance_admin;
+grant execute on function
+  money_private.approve_compliance_subject(text,text,timestamptz,text,text),
+  money_private.open_compliance_case(text,uuid,bigint,text,text,text,text,timestamptz,text,text),
+  money_private.resolve_compliance_case(uuid,text,text,text,bytea),
+  money_private.restrict_compliance_subject(text,uuid,text,text),
+  money_private.release_compliance_restriction(text,text,text),
+  money_private.register_compliance_counterparty(text,text,text,text,text),
+  money_private.record_counterparty_screening(uuid,text,bytea,text,timestamptz,timestamptz),
+  money_private.link_treasury_destination_compliance(uuid,uuid,text),
+  money_private.configure_risk_limits(text,bigint,bigint,bigint,bigint,bigint,text,text),
+  money_private.compliance_subject_state(text)
+  to money_compliance_admin;
+
+-- Provider credentials can append authenticated evidence and counterparty
+-- screening decisions. They cannot approve a customer, release a hold, read
+-- cases, change limits, or move money.
+grant usage on schema money_private to money_compliance_worker;
+grant execute on function
+  money_private.record_compliance_evidence(text,text,text,text,text,bytea,text,timestamptz,timestamptz,jsonb),
+  money_private.claim_compliance_events(text,integer),
+  money_private.complete_compliance_event(text,bigint,uuid),
+  money_private.fail_compliance_event(text,bigint,text,integer,boolean),
+  money_private.register_compliance_counterparty(text,text,text,text,text),
+  money_private.record_counterparty_screening(uuid,text,bytea,text,timestamptz,timestamptz)
+  to money_compliance_worker;
+
+-- Public compliance webhook ingress can enqueue a signed reference and do
+-- nothing else: no result reads, customer state, cases, or account changes.
+grant usage on schema money_private to money_compliance_ingress;
+grant execute on function money_private.enqueue_compliance_event(text,text,text,text,bytea)
+  to money_compliance_ingress;
+
+-- Transaction monitoring may create a case and stop an account family but
+-- cannot clear evidence, release the restriction, or close the case.
+grant usage on schema money_private to money_risk_worker;
+grant execute on function
+  money_private.sweep_expired_compliance(integer),
+  money_private.open_compliance_case(text,uuid,bigint,text,text,text,text,timestamptz,text,text),
+  money_private.restrict_compliance_subject(text,uuid,text,text)
+  to money_risk_worker;
 
 -- Treasury administration registers provider-owned references and controls
 -- breakers. It has no provider-event settlement authority.
@@ -200,3 +269,16 @@ grant select on money.schema_migrations, money.accounts, money.assets,
   money.treasury_asset_snapshots, money.treasury_poll_cursors
   to money_ops;
 grant execute on function money_private.ledger_health(), money_private.treasury_health() to money_ops;
+
+-- Compliance case data is segregated from ordinary financial operations.
+-- In particular, product and general ops roles cannot infer regulatory-report
+-- status or disclose it to the subject.
+grant usage on schema money, money_private to money_compliance_ops;
+grant select on money.compliance_subjects, money.compliance_evidence,
+  money.compliance_event_inbox, money.compliance_counterparties, money.compliance_cases,
+  money.compliance_case_actions, money.compliance_restrictions,
+  money.compliance_subject_events, money.risk_limits, money.risk_limit_events,
+  money.risk_velocity_buckets, money.risk_decisions, money.risk_transfer_links
+  to money_compliance_ops;
+grant execute on function money_private.compliance_subject_state(text)
+  to money_compliance_ops;

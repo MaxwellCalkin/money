@@ -5,6 +5,7 @@ import { generateAgentKeypair, signedHeaders } from "../src/core/identity.ts";
 import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/database.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { createPostgresApi } from "../src/server/postgres-api.ts";
+import { approveComplianceFixture, linkTreasuryDestinationFixture } from "./helpers/compliance-fixture.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
   constructor(readonly pg: PGliteInterface) {}
@@ -71,7 +72,9 @@ describe("signed treasury product API", () => {
       body: JSON.stringify({ name, handle, publicKey: keys.publicKey }),
     });
     expect(response.status).toBe(200);
-    return { account: await response.json() as { id: string }, keys };
+    const account = await response.json() as { id: string };
+    await approveComplianceFixture(db, account.id);
+    return { account, keys };
   }
 
   async function fund(userId: string, privateKey: string, key: string) {
@@ -89,6 +92,7 @@ describe("signed treasury product API", () => {
     const destination = await api.treasury.registerDestination({
       accountId: owner.id, provider: "column", providerRef: "ctpy_api_owner", label: "Verified checking",
     });
+    await linkTreasuryDestinationFixture(db, destination.id, "column:ctpy_api_owner");
 
     const body = { destinationId: destination.id, amountMicros: 500_000, idempotencyKey: "owner-api-payout" };
     const first = await signed(api.app, "/owner/payouts", body, owner.id, keys.privateKey, "x-user-id");
@@ -137,6 +141,7 @@ describe("signed treasury product API", () => {
     const ownerDestination = await api.treasury.registerDestination({
       accountId: owner.id, provider: "column", providerRef: "ctpy_owner_not_provider", label: "Owner only",
     });
+    await linkTreasuryDestinationFixture(db, ownerDestination.id, "column:ctpy_owner_not_provider");
     const scoped = await signed(api.app, "/provider/payouts", {
       destinationId: ownerDestination.id, amountMicros: 100_000, idempotencyKey: "provider-cross-scope",
     }, provider.id, providerKeys.privateKey, "x-provider-id");

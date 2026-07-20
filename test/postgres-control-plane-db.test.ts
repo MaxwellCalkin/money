@@ -7,6 +7,7 @@ import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/da
 import { PostgresLedger } from "../src/db/ledger.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { PostgresPolicy } from "../src/db/policy.ts";
+import { approveComplianceFixture } from "./helpers/compliance-fixture.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
   constructor(readonly pg: PGliteInterface) {}
@@ -72,6 +73,7 @@ describe("Postgres durable control plane", () => {
       actorId: owner.id, id: "agt_control01", kind: "agent", ownerId: owner.id,
       name: "Scout", handle: "scout", publicKey: key("agent"),
     });
+    await approveComplianceFixture(db, owner.id);
     return { owner, agent };
   }
 
@@ -173,6 +175,7 @@ describe("Postgres durable control plane", () => {
     const stranger = await control.registerIdentity({
       id: "usr_control03", kind: "user", name: "Stranger", handle: "stranger", publicKey: key("stranger"),
     });
+    await approveComplianceFixture(db, recipientOwner.id);
     await ledger.postTransfer({ actorId: owner.id, operation: "fund", idempotencyKey: "fund", from: "external:funding", to: owner.id, amountMicros: 10n });
     await ledger.postTransfer({ actorId: owner.id, operation: "allocate", idempotencyKey: "allocate", from: owner.id, to: agent.id, amountMicros: 10n });
     await policy.grantMandate({

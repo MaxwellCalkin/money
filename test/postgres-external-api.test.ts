@@ -13,6 +13,7 @@ import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/da
 import { runMigrations } from "../src/db/migrate.ts";
 import { PostgresTreasury } from "../src/db/treasury.ts";
 import { createPostgresApi } from "../src/server/postgres-api.ts";
+import { approveComplianceFixture, clearCounterpartyFixture } from "./helpers/compliance-fixture.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
   constructor(readonly pg: PGliteInterface) {}
@@ -148,7 +149,9 @@ describe("Postgres signed external-payment API", () => {
       body: JSON.stringify({ name, handle, publicKey: keys.publicKey }),
     });
     expect(response.status).toBe(200);
-    return { user: await response.json() as { id: string }, keys };
+    const user = await response.json() as { id: string };
+    await approveComplianceFixture(db, user.id);
+    return { user, keys };
   }
 
   async function createAgent(user: { id: string }, ownerPrivateKey: string, name: string, handle: string) {
@@ -162,6 +165,7 @@ describe("Postgres signed external-payment API", () => {
 
   async function world(escalateAboveMicros = 1_000_000) {
     const { user, keys: ownerKeys } = await signup("Max", `max-${escalateAboveMicros}`);
+    await clearCounterpartyFixture(db, `x402:data.example.com:${PAY_TO}`);
     const { agent, keys: agentKeys } = await createAgent(user, ownerKeys.privateKey, "Scout", `scout-${escalateAboveMicros}`);
     const { agent: otherAgent, keys: otherAgentKeys } = await createAgent(user, ownerKeys.privateKey, "Writer", `writer-${escalateAboveMicros}`);
     expect((await signedRequest(api.app, "/fund", "POST", {

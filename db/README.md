@@ -87,6 +87,20 @@ action and never happens as a side effect of resolving a payout.
 Fresh bank and six-decimal stablecoin observations are reconciled against
 external-boundary journal balances and uncertain in-flight outflows.
 
+Migration `0008_compliance_risk.sql` adds the customer and counterparty risk
+perimeter. Every user account receives a compliance subject; provider results
+are append-only hashes plus bounded normalized non-PII facts. Approval requires
+current identity/business and sanctions evidence (plus beneficial-owner
+evidence for businesses). Restricted subjects freeze their whole active
+user/agent/provider family, while evidence-bound refunds and reversals can
+still restore money without silently unfreezing it. Funding, cross-owner pay,
+x402 debit, and payout reserve evaluate compliance and velocity inside the
+same transaction as posting. An allow decision is bound to the exact request
+hash and linked one-to-one to the resulting transfer; stale callers cannot
+bypass the wrapper because a journal trigger checks the transaction-local
+decision. Daily buckets lock in deterministic order, and event/review workers
+claim bounded batches with `FOR UPDATE SKIP LOCKED`.
+
 `money_private.post_transfer_kernel(...)` is the generalized posting kernel
 under the current schema. It is not granted to the application role. The old
 `post_transfer(...)` signature remains a compatibility wrapper; application
@@ -96,11 +110,14 @@ traffic receives only narrow marketplace commands such as
 Run `db/roles.sql` separately as an administrator. Production login roles
 should inherit exactly one narrow role: `money_app`, `money_treasury`,
 `money_treasury_worker`, `money_treasury_ingress`, `money_payout_worker`, `money_reconciler`,
-`money_worker`, `money_key_rotation`, or `money_ops`. They should never own the schema or receive
+`money_worker`, `money_key_rotation`, `money_ops`, `money_compliance_admin`,
+`money_compliance_worker`, `money_compliance_ingress`, `money_risk_worker`, or
+`money_compliance_ops`. They should never own the schema or receive
 direct journal/balance write privileges; the application role cannot directly
 read tenant financial tables either. Tenant-scoped mandate and approval reads
 also go through reviewed functions, so the role can power owner and agent
 views without receiving unrestricted table access.
 
-See `docs/TREASURY.md` for process isolation, provider evidence, deployment,
-reconciliation, incident handling, and non-code launch requirements.
+See `docs/TREASURY.md` and `docs/COMPLIANCE.md` for process isolation,
+provider evidence, deployment, reconciliation, incident handling, and
+non-code launch requirements.

@@ -7,6 +7,7 @@ import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/da
 import { PostgresLedger } from "../src/db/ledger.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { PostgresTreasury } from "../src/db/treasury.ts";
+import { approveComplianceFixture, linkTreasuryDestinationFixture } from "./helpers/compliance-fixture.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
   constructor(readonly pg: PGliteInterface) {}
@@ -68,6 +69,7 @@ describe("Postgres treasury", () => {
       actorId: owner.id, id: "prv_treasury1", kind: "provider", ownerId: owner.id,
       name: "Treasury Provider", handle: "treasury-provider", publicKey: publicKey("provider"),
     });
+    await approveComplianceFixture(db, owner.id);
     const route = await treasury.registerDepositRoute({
       userId: owner.id, provider: "column", providerRouteRef: "acno_treasury_owner", label: "Primary USD",
     });
@@ -164,6 +166,7 @@ describe("Postgres treasury", () => {
     const destination = await treasury.registerDestination({
       accountId: owner.id, provider: "column", providerRef: "ctpy_owner_verified", label: "Owner checking",
     });
+    await linkTreasuryDestinationFixture(db, destination.id, "column:ctpy_owner_verified");
     const requested = await treasury.requestPayout({
       sourceAccountId: owner.id, idempotencyKey: "payout-one", destinationId: destination.id,
       asset: "USD", amountMicros: 500_000n,
@@ -203,6 +206,7 @@ describe("Postgres treasury", () => {
     const destination = await treasury.registerDestination({
       accountId: owner.id, provider: "column", providerRef: "ctpy_payout_replay", label: "Replay checking",
     });
+    await linkTreasuryDestinationFixture(db, destination.id, "column:ctpy_payout_replay");
     const request = {
       sourceAccountId: owner.id, idempotencyKey: "payout-breaker-replay",
       destinationId: destination.id, asset: "USD", amountMicros: 200_000n,
@@ -240,6 +244,7 @@ describe("Postgres treasury", () => {
     const destination = await treasury.registerDestination({
       accountId: owner.id, provider: "column", providerRef: "ctpy_rejection_test", label: "Verified checking",
     });
+    await linkTreasuryDestinationFixture(db, destination.id, "column:ctpy_rejection_test");
     const first = await treasury.requestPayout({
       sourceAccountId: owner.id, idempotencyKey: "payout-rejected", destinationId: destination.id, asset: "USD", amountMicros: 200_000n,
     });
@@ -297,6 +302,7 @@ describe("Postgres treasury", () => {
     const destination = await treasury.registerDestination({
       accountId: owner.id, provider: "column", providerRef: "ctpy_provider_review", label: "Review checking",
     });
+    await linkTreasuryDestinationFixture(db, destination.id, "column:ctpy_provider_review");
     const first = await treasury.requestPayout({
       sourceAccountId: owner.id, idempotencyKey: "payout-review-response",
       destinationId: destination.id, asset: "USD", amountMicros: 200_000n,

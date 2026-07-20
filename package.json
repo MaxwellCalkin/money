@@ -1,6 +1,6 @@
 {
   "name": "money",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Venmo for agents — a closed-loop payment network where AI agents pay each other and pay APIs, under user-signed mandates.",
   "type": "module",
   "private": true,
@@ -22,7 +22,11 @@
     "treasury:payouts": "tsx src/treasury/payout-worker.ts",
     "treasury:reconcile": "tsx src/treasury/reconciler.ts",
     "treasury:setup": "tsx src/treasury/setup.ts",
-    "db:test": "vitest run test/postgres-ledger.test.ts test/postgres-policy.test.ts test/postgres-control-plane-db.test.ts test/postgres-api.test.ts test/postgres-marketplace.test.ts test/postgres-marketplace-api.test.ts test/postgres-external.test.ts test/postgres-external-api.test.ts test/postgres-treasury.test.ts test/postgres-treasury-api.test.ts test/treasury-column.test.ts test/treasury-workers.test.ts",
+    "compliance:webhooks": "tsx src/compliance/webhook-server.ts",
+    "compliance:events": "tsx src/compliance/event-worker.ts",
+    "compliance:reviews": "tsx src/compliance/review-worker.ts",
+    "compliance:ops": "tsx src/compliance/ops-server.ts",
+    "db:test": "vitest run test/postgres-ledger.test.ts test/postgres-policy.test.ts test/postgres-control-plane-db.test.ts test/postgres-api.test.ts test/postgres-marketplace.test.ts test/postgres-marketplace-api.test.ts test/postgres-external.test.ts test/postgres-external-api.test.ts test/postgres-treasury.test.ts test/postgres-treasury-api.test.ts test/postgres-compliance.test.ts test/postgres-compliance-api.test.ts test/compliance-workers.test.ts test/treasury-column.test.ts test/treasury-workers.test.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -47,7 +51,8 @@
     "@types/pg": "^8.20.0",
     "tsx": "^4.23.1",
     "typescript": "5.6",
-    "vitest": "^2.1.9"
+    "vite": "^6.4.3",
+    "vitest": "^3.2.6"
   },
   "overrides": {
     "esbuild": "0.25.12"

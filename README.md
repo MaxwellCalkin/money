@@ -13,7 +13,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 3. **Prefunding buys the speed.** Authorization is a local policy + balance check — no external round-trip on the hot path.
 4. **Exactly-once by construction.** Idempotency keys on every transfer; 402 challenges pay-once/redeem-once. Agents retry by default — the network must shrug.
 
-## What's here (v0.10)
+## What's here (v0.11)
 
 | Piece | File | What it does |
 |---|---|---|
@@ -32,6 +32,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | Database operations | `src/server/database-ops.ts` | Liveness, schema readiness, and token-gated ledger reconciliation on **:4022**; deliberately no ungoverned payment route |
 | x402 boundary | `src/bridge/`, `src/db/external.ts` | Official x402 v2 exact/EVM signing, HTTPS HSM adapter, pinned Base USDC, rotatable AES-256-GCM custody, exact external approvals, independent calldata/log verification, restart recovery, and automatic journal reversal |
 | Treasury boundary | `db/migrations/0007_treasury.sql`, `src/treasury/` | Real Column ACH funding and payouts, raw-body webhook HMAC, authenticated event re-fetch, out-of-order recovery, exact returns, exposure freezes, reserve-first payout workers, bank/stablecoin reconciliation, and global circuit breakers |
+| Compliance and risk perimeter | `db/migrations/0008_compliance_risk.sql`, `src/compliance/`, `src/db/compliance.ts` | KYC/KYB and sanctions evidence, customer/counterparty lifecycle, whole-family restrictions, case evidence, atomic transfer decisions, exact velocity limits, isolated webhook/workers, expiry sweeps, and a segregated operations service |
 | MCP server | `src/mcp/server.ts` | `money_balance`, `money_pay`, `money_fetch` (auto-pays internal 402s AND external x402 sellers within mandate), `money_feed` |
 | Demo | `src/demo.ts` | The full story end-to-end (10 sections), including a separately authenticated seller joining and earning through the network |
 
@@ -61,6 +62,10 @@ npm run treasury:webhooks
 npm run treasury:events
 npm run treasury:payouts
 npm run treasury:reconcile
+npm run compliance:webhooks
+npm run compliance:events
+npm run compliance:reviews
+npm run compliance:ops
 ```
 
 Application traffic should use PgBouncer on port `6432`; migrations and
@@ -85,7 +90,14 @@ external-asset coverage, stale or divergent snapshots, dead provider events,
 and manual-review payouts; it fails readiness with `503` when intervention is
 required.
 
-Treasury controls install disabled in v0.10. Register bank/wallet sources,
+Compliance operations run as a separate process and database role. Set
+`MONEY_COMPLIANCE_OPS_DATABASE_URL` and `MONEY_COMPLIANCE_OPS_TOKEN`, run
+`npm run compliance:ops`, and query `GET /ops/compliance` on port `4025`.
+It returns `503` for dead evidence events, open cases/restrictions, or evidence
+expiring within seven days. General operations credentials cannot read those
+tables or infer regulatory-report status.
+
+Treasury controls install disabled in v0.11. Register bank/wallet sources,
 obtain a clean reconciliation, and use the reviewed admin restore command in
 `docs/TREASURY.md`; internal agent-to-agent payments remain available while
 the external perimeter is stopped.
@@ -97,8 +109,17 @@ durable replay-safe authentication, owner sessions, allocation, mandates,
 agent payments, exact owner approvals, key rotation, provider service
 publishing, public discovery, registry-priced 402 challenges, single-use
 redemption, cumulative-capped refunds, durable external x402 settlement,
-scoped balances/activity, and the private dashboard. The ops service
+sanitized owner compliance status, scoped balances/activity, and the private dashboard. The ops service
 intentionally exposes no payment endpoint.
+
+Migration `0008` fails closed for real funding, cross-owner payment, external
+x402 debit, and payout reservation unless the required customer subjects and
+counterparties have current reviewed evidence. Every regulated transfer gets
+an append-only risk decision linked one-to-one with the journal transfer;
+same-owner internal movement remains local, while refunds and externally
+verified reversals can restore funds into a frozen account without unfreezing
+it. See `docs/COMPLIANCE.md` for the provider contract, role separation,
+review procedures, risk limits, and launch gates.
 
 The production treasury path is documented in `docs/TREASURY.md`. Incoming
 funding is credited only after an HMAC-authenticated webhook has been queued by
@@ -244,8 +265,8 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 - Identity is an Ed25519 keypair per account: agents sign spends and owners sign admin mutations over method+path+body+timestamp+nonce. The Postgres API records accepted nonces durably, rejects replay across replicas, makes public-key onboarding retry-safe, and revokes browser sessions when an owner rotates keys (→ RFC 9421 HTTP Message Signatures + `@authority` binding on the wire; keys chained to a KYC'd owner; signup rate-limiting and owner-key delivery off stdout).
 - Browser access uses an eight-hour bearer session minted by an owner-signed request. Only SHA-256 token hashes are stored; sessions survive restart, cap at ten per owner, expire, revoke individually, and die on owner-key rotation (→ passkeys for the production owner ceremony).
 - The JSONL product path is single-node and remains a showcase. The Postgres path is multi-instance-safe for ledger, mandate, approval, signed identity, nonce, session, tenant-scoped control-plane, marketplace, challenge, redemption, refunds, and the pending/confirmed/cancelled/reversed external state machine.
-- The real-rail software boundary is implemented but not activated with customer funds. Column ACH funding/payouts, provider-event recovery, returns, freezes, and continuous bank/stablecoin reconciliation are present; x402 has remote-HSM signing and independent chain verification. A launch still needs an executed sponsor-bank/FBO program, production Column/RPC/HSM credentials and redundancy, funded reserves, verified customer/counterparty enrollment, and the compliance/risk controls in `docs/TREASURY.md`.
-- The ledger can settle between accounts owned by different users, but this is still a development sandbox. Turning that path on for real customer funds requires the sponsor-bank/FBO, KYC/KYB, sanctions, fraud, safeguarding, and licensing program around it; code alone does not cross the money-transmission line.
+- The real-rail software boundary is implemented but not activated with customer funds. Column ACH funding/payouts, provider-event recovery, returns, freezes, and continuous bank/stablecoin reconciliation are present; x402 has remote-HSM signing and independent chain verification. A launch still needs an executed sponsor-bank/FBO program, production Column/RPC/HSM credentials and redundancy, funded reserves, verified customer/counterparty enrollment, and the legal and operating program in `docs/COMPLIANCE.md`.
+- The ledger can settle between accounts owned by different users and now enforces reviewed KYC/KYB, sanctions, counterparty, and velocity decisions in the database. It is still a development sandbox: real customer funds require the sponsor-bank/FBO, licensing analysis, BSA/AML and OFAC programs, trained reviewers, SAR governance, safeguarding, independent testing, and production provider contracts. Code alone does not cross the money-transmission line.
 - No subscriptions, delegated sub-agent mandates, complete dispute/chargeback case workflows, tax reporting, credit, or insurance yet. Provider payouts now exist; the remaining programmable-commerce and risk layers come next.
 
 ## The bigger picture

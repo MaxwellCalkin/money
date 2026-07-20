@@ -40,6 +40,7 @@ import { isValidHandle, isValidServiceSlug, normalizeServiceSlug } from "../core
 import type { DatabaseAccount } from "../db/ledger.ts";
 import { PostgresLedger, type DatabaseTransferResult } from "../db/ledger.ts";
 import { PostgresControlPlane, type AccountBalance, type DatabaseService, type PaymentEvidence } from "../db/control-plane.ts";
+import { PostgresCompliance, type ComplianceSubject } from "../db/compliance.ts";
 import type { TransactionalDatabase } from "../db/database.ts";
 import {
   PostgresExternal,
@@ -296,6 +297,21 @@ function treasuryControlView(item: TreasuryControls) {
   };
 }
 
+function complianceView(item: ComplianceSubject) {
+  return {
+    accountId: item.accountId,
+    subjectType: item.subjectType,
+    state: item.state,
+    riskTier: item.riskTier,
+    ...(item.countryCode ? { countryCode: item.countryCode } : {}),
+    screeningState: item.screeningState,
+    ...(item.identityExpiresAt ? { identityExpiresAt: item.identityExpiresAt.getTime() } : {}),
+    ...(item.screeningExpiresAt ? { screeningExpiresAt: item.screeningExpiresAt.getTime() } : {}),
+    ...(item.nextReviewAt ? { nextReviewAt: item.nextReviewAt.getTime() } : {}),
+    updatedAt: item.updatedAt.getTime(),
+  };
+}
+
 function externalBinding(payment: DatabaseExternalPaymentSecret): ExternalAuthorizationBinding {
   if (!payment.authorizationExpiresAt || !payment.reverseAfter) {
     throw new Error("unsigned external intent has no authorization binding");
@@ -409,6 +425,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   const marketplace = new PostgresMarketplace(db);
   const external = new PostgresExternal(db);
   const treasury = new PostgresTreasury(db);
+  const compliance = new PostgresCompliance(db);
   const clock = options.now ?? Date.now;
   const externalHeaderKey = options.externalHeaderKey ? Buffer.from(options.externalHeaderKey) : undefined;
   if (externalHeaderKey && externalHeaderKey.length !== 32) {
@@ -906,7 +923,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   };
 
   const ownerSnapshot = async (userId: string) => {
-    const [accounts, mandates, approvals, feed, services, externalPayments, treasuryState] = await Promise.all([
+    const [accounts, mandates, approvals, feed, services, externalPayments, treasuryState, complianceState] = await Promise.all([
       control.accountState(userId),
       policy.listMandates(userId, 100),
       policy.listApprovals(userId, undefined, 100),
@@ -914,6 +931,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       servicesView(userId),
       external.list(userId, 100),
       treasurySnapshot(userId, true),
+      compliance.state(userId),
     ]);
     const renderedApprovals = await approvalViews(userId, approvals.reverse());
     return {
@@ -929,11 +947,12 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       feed,
       external: externalPayments.map(externalView),
       treasury: treasuryState,
+      ...(complianceState ? { compliance: complianceView(complianceState) } : {}),
     };
   };
 
   const childSnapshot = async (accountId: string, limit = 25) => {
-    const [accounts, mandates, approvals, feed, services, externalPayments, treasuryState] = await Promise.all([
+    const [accounts, mandates, approvals, feed, services, externalPayments, treasuryState, complianceState] = await Promise.all([
       control.accountState(accountId),
       policy.listMandates(accountId, 100),
       policy.listApprovals(accountId, undefined, 100),
@@ -941,6 +960,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       servicesView(accountId),
       external.list(accountId, Math.min(limit, 100)),
       treasurySnapshot(accountId, false),
+      compliance.state(accountId),
     ]);
     const activeMandate = mandates.find((mandate) => !mandate.revokedAt && mandate.expiresAt.getTime() > Date.now());
     const renderedApprovals = await approvalViews(accountId, approvals.reverse());
@@ -953,6 +973,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       services,
       external: externalPayments.map(externalView),
       treasury: treasuryState,
+      ...(complianceState ? { compliance: complianceView(complianceState) } : {}),
     };
   };
 
@@ -970,7 +991,9 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
           and to_regprocedure('money_private.get_unresolved_external_payment_by_resource(text,text)') is not null
           and to_regprocedure('money_private.confirm_external_payment(text,uuid,text)') is not null
           and to_regprocedure('money_private.request_treasury_payout(text,text,uuid,text,bigint)') is not null
-          and to_regprocedure('money_private.treasury_control_state()') is not null as ready
+          and to_regprocedure('money_private.treasury_control_state()') is not null
+          and to_regprocedure('money_private.compliance_subject_state(text)') is not null
+          and to_regprocedure('money_private.evaluate_transfer_risk(text,text,text,bytea,text,text,text,bigint,jsonb)') is not null as ready
       `);
       return result.rows[0]?.ready
         ? c.json({ ok: true, schemaVersion: result.rows[0].version })
@@ -1646,6 +1669,47 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   app.post("/owner/payouts", requireOwnerAccess, (c) => requestTreasuryPayout(c, c.get("userId")));
   app.post("/owner/payouts/:id/cancel", requireOwnerAccess, (c) => cancelTreasuryPayout(c, c.get("userId")));
 
+  app.get("/owner/compliance", requireOwnerAccess, async (c) => {
+    try {
+      const state = await compliance.state(c.get("userId"));
+      return state ? c.json(complianceView(state)) : c.json({ error: "compliance_not_found" }, 404);
+    } catch (error) {
+      return databaseFailure(c, error, "compliance_state_failed");
+    }
+  });
+
+  app.post("/owner/compliance", requireOwnerAccess, async (c) => {
+    const body = await readBody<{
+      subjectType: "individual" | "business";
+      countryCode: string;
+      expectedSingleMicros: string | number;
+      expectedMonthlyMicros: string | number;
+    }>(c);
+    const expectedSingleMicros = nonnegativeMicros(body?.expectedSingleMicros);
+    const expectedMonthlyMicros = nonnegativeMicros(body?.expectedMonthlyMicros);
+    if (!body || !["individual", "business"].includes(body.subjectType)
+      || !/^[A-Z]{2}$/.test(body.countryCode ?? "")
+      || expectedSingleMicros === undefined || expectedMonthlyMicros === undefined
+      || expectedMonthlyMicros < expectedSingleMicros) {
+      return c.json({
+        error: "invalid_request",
+        reason: "need subjectType, two-letter countryCode, and non-negative expected activity",
+      }, 400);
+    }
+    try {
+      const state = await compliance.beginVerification({
+        userId: c.get("userId"), subjectType: body.subjectType,
+        countryCode: body.countryCode, expectedSingleMicros, expectedMonthlyMicros,
+      });
+      return c.json({
+        ...complianceView(state),
+        next: "Complete the identity-verification inquiry supplied by the configured compliance provider.",
+      }, 202);
+    } catch (error) {
+      return databaseFailure(c, error, "compliance_onboarding_failed");
+    }
+  });
+
   app.get("/provider/treasury", requireProviderSig, async (c) => {
     try {
       return c.json(await treasurySnapshot(c.get("providerId"), false));
@@ -1731,7 +1795,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   });
   app.get("/dashboard/state", requireOwnerAccess, async (c) => c.json(await ownerSnapshot(c.get("userId"))));
 
-  return { app, control, ledger, policy, marketplace, external, treasury };
+  return { app, control, ledger, policy, marketplace, external, treasury, compliance };
 }
 
 export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) {
