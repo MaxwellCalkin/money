@@ -101,6 +101,18 @@ bypass the wrapper because a journal trigger checks the transaction-local
 decision. Daily buckets lock in deterministic order, and event/review workers
 claim bounded batches with `FOR UPDATE SKIP LOCKED`.
 
+Migration `0009_compliance_operations.sql` adds durable hosted-verification
+sessions and the named review control plane. Product traffic can request and
+read only its owner's session; a dedicated onboarding role claims a bounded
+non-PII profile, performs provider I/O after commit, and stores an inquiry
+reference plus hash-verified AES-GCM ciphertext. The operator console has no
+table grants: Ed25519 login mints a short hashed session and every read/action
+passes that session to a narrow function. Emergency restrictions execute
+immediately against an open case. Subject approval, restriction release,
+terminal case resolution, and risk-limit changes enter a maker/checker queue
+that forbids self-approval and executes the checked action atomically with its
+append-only audit event.
+
 `money_private.post_transfer_kernel(...)` is the generalized posting kernel
 under the current schema. It is not granted to the application role. The old
 `post_transfer(...)` signature remains a compatibility wrapper; application
@@ -111,8 +123,9 @@ Run `db/roles.sql` separately as an administrator. Production login roles
 should inherit exactly one narrow role: `money_app`, `money_treasury`,
 `money_treasury_worker`, `money_treasury_ingress`, `money_payout_worker`, `money_reconciler`,
 `money_worker`, `money_key_rotation`, `money_ops`, `money_compliance_admin`,
-`money_compliance_worker`, `money_compliance_ingress`, `money_risk_worker`, or
-`money_compliance_ops`. They should never own the schema or receive
+`money_compliance_worker`, `money_compliance_onboarding`,
+`money_compliance_ingress`, `money_risk_worker`, `money_compliance_console`,
+or `money_compliance_ops`. They should never own the schema or receive
 direct journal/balance write privileges; the application role cannot directly
 read tenant financial tables either. Tenant-scoped mandate and approval reads
 also go through reviewed functions, so the role can power owner and agent

@@ -36,6 +36,11 @@ import { HttpEvmSigner, LocalEvmSigner } from "../bridge/evm-wallet.ts";
 import { EvmRpcSettlementVerifier, parseEvmRpcNetworks } from "../bridge/evm-settlement.ts";
 import { MockWallet, type ExternalWallet } from "../bridge/wallet.ts";
 import { isValidPublicKey, verifyRequest } from "../core/identity.ts";
+import {
+  decryptHostedVerificationUrl,
+  parseComplianceSessionKeyring,
+  type ComplianceSessionKeyring,
+} from "../compliance/session-cipher.ts";
 import { isValidHandle, isValidServiceSlug, normalizeServiceSlug } from "../core/network.ts";
 import type { DatabaseAccount } from "../db/ledger.ts";
 import { PostgresLedger, type DatabaseTransferResult } from "../db/ledger.ts";
@@ -80,6 +85,9 @@ export interface PostgresApiOptions {
   /** Production x402 v2 signer, normally backed by a remote HSM service. */
   externalPaymentSigner?: X402PaymentSigner;
   verifyExternalSettlement?: ExternalSettlementVerifier;
+  /** Product-side decryption only; provider credentials remain in the worker. */
+  complianceSessionKeyring?: ComplianceSessionKeyring;
+  complianceProviderName?: string;
   now?: () => number;
 }
 
@@ -436,6 +444,9 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   const externalBridgeReady = Boolean(
     (options.externalWallet || options.externalPaymentSigner)
       && externalHeaderKeyring && options.verifyExternalSettlement
+  );
+  const complianceOnboardingReady = Boolean(
+    options.complianceSessionKeyring && options.complianceProviderName
   );
   const app = new Hono<ApiEnv>();
 
@@ -993,6 +1004,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
           and to_regprocedure('money_private.request_treasury_payout(text,text,uuid,text,bigint)') is not null
           and to_regprocedure('money_private.treasury_control_state()') is not null
           and to_regprocedure('money_private.compliance_subject_state(text)') is not null
+          and to_regprocedure('money_private.request_compliance_verification_session(text,text,text)') is not null
           and to_regprocedure('money_private.evaluate_transfer_risk(text,text,text,bytea,text,text,text,bigint,jsonb)') is not null as ready
       `);
       return result.rows[0]?.ready
@@ -1710,6 +1722,77 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     }
   });
 
+  const verificationSessionView = async (userId: string, sessionId: string) => {
+    const session = await compliance.verificationSession(userId, sessionId);
+    if (!session) return undefined;
+    const base = {
+      id: session.id,
+      state: session.state,
+      expiresAt: session.expiresAt.getTime(),
+      updatedAt: session.updatedAt.getTime(),
+    };
+    if (session.state !== "ready") return base;
+    if (!options.complianceSessionKeyring || !session.hostedUrlCiphertext
+      || !session.hostedUrlHash || !session.encryptionKeyId) {
+      throw new Error("ready verification session is missing encrypted URL evidence");
+    }
+    const decrypted = decryptHostedVerificationUrl(
+      session.hostedUrlCiphertext,
+      options.complianceSessionKeyring,
+      {
+        sessionId: session.id,
+        subjectAccountId: session.subjectAccountId,
+        provider: session.provider,
+        expiresAt: session.expiresAt,
+      },
+      session.encryptionKeyId,
+    ).plaintext;
+    const hash = createHash("sha256").update(decrypted, "utf8").digest();
+    if (!hash.equals(session.hostedUrlHash)) {
+      throw new Error("hosted verification URL hash does not match durable evidence");
+    }
+    return { ...base, hostedUrl: decrypted };
+  };
+
+  app.post("/owner/compliance/inquiries", requireOwnerAccess, async (c) => {
+    if (!complianceOnboardingReady) {
+      return c.json({
+        error: "compliance_provider_unavailable",
+        reason: "Hosted identity verification is not configured.",
+      }, 503);
+    }
+    const body = await readBody<{ idempotencyKey: string }>(c);
+    if (!body || !/^[A-Za-z0-9._:-]{8,200}$/.test(body.idempotencyKey ?? "")) {
+      return c.json({ error: "invalid_request", reason: "a safe idempotencyKey is required" }, 400);
+    }
+    try {
+      const requested = await compliance.requestVerificationSession({
+        userId: c.get("userId"),
+        provider: options.complianceProviderName!,
+        idempotencyKey: body.idempotencyKey,
+      });
+      const view = await verificationSessionView(c.get("userId"), requested.id);
+      if (!view) throw new Error("requested verification session could not be read back");
+      return c.json({ ...view, replayed: requested.replayed ?? false }, view.state === "ready" ? 200 : 202);
+    } catch (error) {
+      return databaseFailure(c, error, "compliance_inquiry_failed");
+    }
+  });
+
+  app.get("/owner/compliance/inquiries/:id", requireOwnerAccess, async (c) => {
+    if (!complianceOnboardingReady) {
+      return c.json({ error: "compliance_provider_unavailable" }, 503);
+    }
+    const sessionId = c.req.param("id") ?? "";
+    if (!validUuid(sessionId)) return c.json({ error: "verification_session_not_found" }, 404);
+    try {
+      const view = await verificationSessionView(c.get("userId"), sessionId);
+      return view ? c.json(view) : c.json({ error: "verification_session_not_found" }, 404);
+    } catch (error) {
+      return databaseFailure(c, error, "compliance_inquiry_state_failed");
+    }
+  });
+
   app.get("/provider/treasury", requireProviderSig, async (c) => {
     try {
       return c.json(await treasurySnapshot(c.get("providerId"), false));
@@ -1817,6 +1900,16 @@ export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) 
     : process.env.MONEY_EXTERNAL_HEADER_KEY
       ? singleExternalHeaderKeyring(parseExternalHeaderKey(process.env.MONEY_EXTERNAL_HEADER_KEY))
       : undefined;
+  if (Boolean(process.env.MONEY_COMPLIANCE_SESSION_KEYS)
+    !== Boolean(process.env.MONEY_COMPLIANCE_SESSION_ACTIVE_KEY_ID)) {
+    throw new Error("both MONEY_COMPLIANCE_SESSION_KEYS and MONEY_COMPLIANCE_SESSION_ACTIVE_KEY_ID are required together");
+  }
+  const complianceSessionKeyring = process.env.MONEY_COMPLIANCE_SESSION_KEYS
+    ? parseComplianceSessionKeyring(
+      process.env.MONEY_COMPLIANCE_SESSION_KEYS,
+      process.env.MONEY_COMPLIANCE_SESSION_ACTIVE_KEY_ID!,
+    )
+    : undefined;
   if (mockExternal && !configuredKeyring) throw new Error("an external header keyring is required when MONEY_EXTERNAL_MOCK=true");
   const mockWallet = mockExternal ? new MockWallet() : undefined;
   if (mockExternal && (process.env.MONEY_EVM_SIGNER_URL || process.env.MONEY_EVM_PRIVATE_KEY)) {
@@ -1845,6 +1938,12 @@ export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) 
   const { app } = createPostgresApi(db, {
     allowDevelopmentFunding: process.env.MONEY_ALLOW_DEV_FUNDING === "true",
     ...(configuredKeyring ? { externalHeaderKeyring: configuredKeyring } : {}),
+    ...(complianceSessionKeyring && process.env.MONEY_COMPLIANCE_PROVIDER
+      ? {
+        complianceSessionKeyring,
+        complianceProviderName: process.env.MONEY_COMPLIANCE_PROVIDER,
+      }
+      : {}),
     ...(v2PaymentSigner ? { externalPaymentSigner: v2PaymentSigner } : {}),
     ...(rpcVerifier ? {
       verifyExternalSettlement: ({ authorization, settlement }: ExternalSettlementVerificationInput) => {

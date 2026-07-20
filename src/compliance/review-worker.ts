@@ -21,7 +21,11 @@ export async function runComplianceReviewSweep(
   compliance: PostgresCompliance,
   limit = 100
 ) {
-  return compliance.sweepExpired(limit);
+  const [risk, expiredVerificationSessions] = await Promise.all([
+    compliance.sweepExpired(limit),
+    compliance.expireVerificationSessions(Math.min(limit, 1_000)),
+  ]);
+  return { ...risk, expiredVerificationSessions };
 }
 
 export async function startComplianceReviewWorker() {
@@ -54,7 +58,8 @@ export async function startComplianceReviewWorker() {
   try {
     while (!stopping) {
       const result = await runComplianceReviewSweep(compliance, limit);
-      if (result.restrictedSubjects > 0 || result.expiredCounterparties > 0) {
+      if (result.restrictedSubjects > 0 || result.expiredCounterparties > 0
+        || result.expiredVerificationSessions > 0) {
         console.log(JSON.stringify({ event: "compliance_expiry_sweep", ...result }));
       }
       await new Promise((resolve) => setTimeout(resolve, intervalMs));

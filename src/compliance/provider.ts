@@ -9,6 +9,20 @@ export interface ComplianceProviderClientOptions {
   fetch?: typeof fetch;
   timeoutMs?: number;
   allowInsecureLocalhost?: boolean;
+  hostedOrigins?: readonly string[];
+}
+
+export interface ComplianceInquiryRequest {
+  sessionId: string;
+  subjectAccountId: string;
+  subjectType: "individual" | "business";
+  countryCode: string;
+}
+
+export interface ComplianceInquiry {
+  id: string;
+  hostedUrl: string;
+  expiresAt: Date;
 }
 
 export interface ComplianceProviderResult {
@@ -137,6 +151,7 @@ export class ComplianceProviderClient {
   private readonly fetcher: typeof fetch;
   private readonly authorization: string;
   private readonly timeoutMs: number;
+  private readonly hostedOrigins: ReadonlySet<string>;
 
   constructor(options: ComplianceProviderClientOptions) {
     if (!/^[a-z][a-z0-9_-]{1,31}$/.test(options.provider)) throw new Error("compliance provider name is invalid");
@@ -156,6 +171,88 @@ export class ComplianceProviderClient {
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 100 || this.timeoutMs > 60_000) {
       throw new Error("compliance provider timeout must be an integer from 100 to 60000 milliseconds");
     }
+    const origins = options.hostedOrigins?.length ? options.hostedOrigins : [this.baseUrl.origin];
+    this.hostedOrigins = new Set(origins.map((origin) => {
+      const parsed = new URL(origin);
+      const localOrigin = ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname);
+      if (parsed.protocol !== "https:" && !(options.allowInsecureLocalhost && localOrigin)) {
+        throw new Error("compliance hosted origins must use HTTPS");
+      }
+      if (parsed.origin !== origin.replace(/\/$/, "") || parsed.username || parsed.password
+        || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+        throw new Error("compliance hosted origins must be bare origins");
+      }
+      return parsed.origin;
+    }));
+  }
+
+  async createInquiry(input: ComplianceInquiryRequest): Promise<ComplianceInquiry> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.sessionId)) {
+      throw new Error("compliance inquiry session id is invalid");
+    }
+    if (!/^usr_[A-Za-z0-9_-]{8,128}$/.test(input.subjectAccountId)) {
+      throw new Error("compliance inquiry subject id is invalid");
+    }
+    if (!["individual", "business"].includes(input.subjectType)
+      || !/^[A-Z]{2}$/.test(input.countryCode)) {
+      throw new Error("compliance inquiry profile is invalid");
+    }
+    const url = new URL("/v1/inquiries", this.baseUrl);
+    const requestBody = JSON.stringify({
+      idempotencyKey: input.sessionId,
+      subjectAccountId: input.subjectAccountId,
+      subjectType: input.subjectType,
+      countryCode: input.countryCode,
+    });
+    let response: Response;
+    try {
+      response = await this.fetcher(url, {
+        method: "POST",
+        headers: {
+          authorization: this.authorization,
+          accept: "application/json",
+          "content-type": "application/json",
+          "idempotency-key": input.sessionId,
+        },
+        body: requestBody,
+        redirect: "error",
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (error) {
+      throw new ComplianceProviderError(
+        `compliance provider inquiry failed: ${error instanceof Error ? error.message : "network error"}`,
+        0,
+        true,
+      );
+    }
+    const body = await limitedBody(response, 64 * 1024);
+    if (!response.ok) {
+      throw new ComplianceProviderError(
+        `compliance provider inquiry returned HTTP ${response.status}`,
+        response.status,
+        response.status === 408 || response.status === 409 || response.status === 425
+          || response.status === 429 || response.status >= 500,
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = body ? JSON.parse(body) as unknown : {};
+    } catch {
+      throw new ComplianceProviderError("compliance provider inquiry returned invalid JSON", response.status, false);
+    }
+    const row = record(parsed, "compliance provider inquiry");
+    const id = text(row.id, "inquiry.id");
+    const hostedUrl = new URL(text(row.hostedUrl, "inquiry.hostedUrl", 8_192));
+    if (!this.hostedOrigins.has(hostedUrl.origin)
+      || hostedUrl.username || hostedUrl.password || hostedUrl.hash) {
+      throw new Error("compliance provider returned an untrusted hosted URL");
+    }
+    const expiresAt = instant(row.expiresAt, "inquiry.expiresAt");
+    const now = Date.now();
+    if (expiresAt.getTime() <= now + 60_000 || expiresAt.getTime() > now + 7 * 86_400_000) {
+      throw new Error("compliance provider inquiry expiry is outside the accepted window");
+    }
+    return { id, hostedUrl: hostedUrl.href, expiresAt };
   }
 
   async getResult(resultRef: string): Promise<ComplianceProviderResult> {

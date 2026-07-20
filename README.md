@@ -13,7 +13,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 3. **Prefunding buys the speed.** Authorization is a local policy + balance check — no external round-trip on the hot path.
 4. **Exactly-once by construction.** Idempotency keys on every transfer; 402 challenges pay-once/redeem-once. Agents retry by default — the network must shrug.
 
-## What's here (v0.11)
+## What's here (v0.12)
 
 | Piece | File | What it does |
 |---|---|---|
@@ -33,6 +33,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | x402 boundary | `src/bridge/`, `src/db/external.ts` | Official x402 v2 exact/EVM signing, HTTPS HSM adapter, pinned Base USDC, rotatable AES-256-GCM custody, exact external approvals, independent calldata/log verification, restart recovery, and automatic journal reversal |
 | Treasury boundary | `db/migrations/0007_treasury.sql`, `src/treasury/` | Real Column ACH funding and payouts, raw-body webhook HMAC, authenticated event re-fetch, out-of-order recovery, exact returns, exposure freezes, reserve-first payout workers, bank/stablecoin reconciliation, and global circuit breakers |
 | Compliance and risk perimeter | `db/migrations/0008_compliance_risk.sql`, `src/compliance/`, `src/db/compliance.ts` | KYC/KYB and sanctions evidence, customer/counterparty lifecycle, whole-family restrictions, case evidence, atomic transfer decisions, exact velocity limits, isolated webhook/workers, expiry sweeps, and a segregated operations service |
+| Hosted verification and review desk | `db/migrations/0009_compliance_operations.sql`, `src/compliance/onboarding-worker.ts`, `src/compliance/console-server.ts` | Replay-safe hosted inquiries, encrypted redirect custody, named Ed25519 reviewers, a private case console, append-only operator evidence, and database-enforced maker/checker approval |
 | MCP server | `src/mcp/server.ts` | `money_balance`, `money_pay`, `money_fetch` (auto-pays internal 402s AND external x402 sellers within mandate), `money_feed` |
 | Demo | `src/demo.ts` | The full story end-to-end (10 sections), including a separately authenticated seller joining and earning through the network |
 
@@ -64,8 +65,10 @@ npm run treasury:payouts
 npm run treasury:reconcile
 npm run compliance:webhooks
 npm run compliance:events
+npm run compliance:onboarding
 npm run compliance:reviews
 npm run compliance:ops
+npm run compliance:console
 ```
 
 Application traffic should use PgBouncer on port `6432`; migrations and
@@ -93,11 +96,14 @@ required.
 Compliance operations run as a separate process and database role. Set
 `MONEY_COMPLIANCE_OPS_DATABASE_URL` and `MONEY_COMPLIANCE_OPS_TOKEN`, run
 `npm run compliance:ops`, and query `GET /ops/compliance` on port `4025`.
-It returns `503` for dead evidence events, open cases/restrictions, or evidence
-expiring within seven days. General operations credentials cannot read those
-tables or infer regulatory-report status.
+It returns `503` for dead evidence events, failed hosted inquiries, pending
+checker decisions, open cases/restrictions, or evidence expiring within seven
+days. General operations credentials cannot read those tables or infer
+regulatory-report status. The separate compliance desk runs on `:4026`; use
+`npm run compliance:operator-setup` once per named reviewer and
+`npm run compliance:login` to mint a 30-minute browser session.
 
-Treasury controls install disabled in v0.11. Register bank/wallet sources,
+Treasury controls install disabled by default. Register bank/wallet sources,
 obtain a clean reconciliation, and use the reviewed admin restore command in
 `docs/TREASURY.md`; internal agent-to-agent payments remain available while
 the external perimeter is stopped.
@@ -109,7 +115,8 @@ durable replay-safe authentication, owner sessions, allocation, mandates,
 agent payments, exact owner approvals, key rotation, provider service
 publishing, public discovery, registry-priced 402 challenges, single-use
 redemption, cumulative-capped refunds, durable external x402 settlement,
-sanitized owner compliance status, scoped balances/activity, and the private dashboard. The ops service
+sanitized owner compliance status, replay-safe hosted verification sessions,
+scoped balances/activity, and the private dashboard. The ops service
 intentionally exposes no payment endpoint.
 
 Migration `0008` fails closed for real funding, cross-owner payment, external
@@ -120,6 +127,16 @@ same-owner internal movement remains local, while refunds and externally
 verified reversals can restore funds into a frozen account without unfreezing
 it. See `docs/COMPLIANCE.md` for the provider contract, role separation,
 review procedures, risk limits, and launch gates.
+
+Migration `0009` makes the perimeter operable. Owners queue one active hosted
+identity inquiry; a dedicated worker calls the provider outside the database
+transaction and stores only an authenticated provider reference, URL hash, and
+rotatable AES-256-GCM ciphertext. The product API decrypts a live URL only for
+its authenticated owner. Named reviewers sign into a same-origin compliance
+desk without putting their long-lived key in the browser. Emergency freezes
+remain immediate, while subject activation, restriction release, terminal case
+resolution, and risk-limit changes require a different supervisor checker.
+The prior administrator bypasses for those actions are removed.
 
 The production treasury path is documented in `docs/TREASURY.md`. Incoming
 funding is credited only after an HMAC-authenticated webhook has been queued by

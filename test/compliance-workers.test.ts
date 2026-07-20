@@ -237,6 +237,7 @@ describe("compliance provider boundary and workers", () => {
       amountMicros: 1n,
     })).toEqual(expect.objectContaining({ status: "denied", code: "compliance_required" }));
     const ops = createComplianceOpsApi(db, "compliance-ops", compliance);
+    expect((await ops.request("/health/ready")).status).toBe(200);
     expect((await ops.request("/ops/compliance")).status).toBe(404);
     const health = await ops.request("/ops/compliance", {
       headers: { authorization: "Bearer compliance-ops" },
@@ -248,6 +249,10 @@ describe("compliance provider boundary and workers", () => {
       openCases: 0,
       openRestrictions: 0,
       deniedLastHour: 1,
+      pendingVerifications: 0,
+      failedVerifications: 0,
+      pendingCheckerActions: 0,
+      activeOperators: 0,
       recentNonAllowDecisions: [expect.objectContaining({ amountMicros: "1" })],
     }));
   });

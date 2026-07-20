@@ -74,7 +74,7 @@ export function signedHeaders(
   accountId: string,
   privateKeyB64: string,
   parts: Omit<SignedRequestParts, "ts" | "nonce">,
-  idHeader: "x-agent-id" | "x-user-id" | "x-provider-id" = "x-agent-id"
+  idHeader: "x-agent-id" | "x-user-id" | "x-provider-id" | "x-operator-id" = "x-agent-id"
 ): Record<string, string> {
   const ts = Date.now();
   const nonce = randomUUID();

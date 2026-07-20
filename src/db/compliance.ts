@@ -19,7 +19,37 @@ interface SubjectRow extends Record<string, unknown> {
   identity_expires_at: Timestamp | null;
   screening_expires_at: Timestamp | null;
   next_review_at: Timestamp | null;
+  identity_verified_at?: Timestamp | null;
+  beneficial_owners_verified?: boolean;
+  expected_single_micros?: Micros;
+  expected_monthly_micros?: Micros;
+  created_at?: Timestamp;
   updated_at: Timestamp;
+}
+
+type VerificationSessionState =
+  | "requested" | "creating" | "ready" | "failed" | "expired" | "completed" | "cancelled";
+
+interface VerificationSessionRow extends Record<string, unknown> {
+  id: string;
+  subject_account_id: string;
+  provider: string;
+  state: VerificationSessionState;
+  replayed?: boolean;
+  hosted_url_ciphertext?: Uint8Array | null;
+  hosted_url_hash?: Uint8Array | null;
+  encryption_key_id?: string | null;
+  expires_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+interface VerificationClaimRow extends Record<string, unknown> {
+  id: string;
+  subject_account_id: string;
+  subject_type: "individual" | "business";
+  country_code: string;
+  provider: string;
+  attempts: number;
 }
 
 interface EvidenceResultRow extends Record<string, unknown> {
@@ -100,6 +130,48 @@ interface EventClaimRow extends Record<string, unknown> {
   attempts: number;
 }
 
+interface OperatorRow extends Record<string, unknown> {
+  id: string;
+  name: string;
+  handle: string;
+  public_key?: string;
+  role: "analyst" | "supervisor" | "administrator";
+  status?: "active" | "suspended" | "closed";
+  created_at?: Timestamp;
+  updated_at?: Timestamp;
+}
+
+interface CaseActionRow extends Record<string, unknown> {
+  id: Micros;
+  case_id: string;
+  action: string;
+  reason: string;
+  evidence_hash: Uint8Array | null;
+  review_reference: string;
+  database_actor: string;
+  created_at: Timestamp;
+}
+
+interface ActionRequestRow extends Record<string, unknown> {
+  id: string;
+  action_type: "subject_approval" | "restriction_release" | "case_resolution" | "risk_limit_change";
+  target_id: string;
+  payload: Record<string, unknown>;
+  state: "pending" | "executed" | "rejected" | "expired" | "cancelled";
+  requested_by: string;
+  approved_by: string | null;
+  idempotency_key: string;
+  review_reference: string;
+  reason: string;
+  checker_reference: string | null;
+  checker_reason: string | null;
+  requested_at: Timestamp;
+  expires_at: Timestamp;
+  decided_at: Timestamp | null;
+  executed_at: Timestamp | null;
+  updated_at: Timestamp;
+}
+
 export interface ComplianceSubject {
   accountId: string;
   subjectType: "individual" | "business";
@@ -110,7 +182,34 @@ export interface ComplianceSubject {
   identityExpiresAt?: Date;
   screeningExpiresAt?: Date;
   nextReviewAt?: Date;
+  identityVerifiedAt?: Date;
+  beneficialOwnersVerified?: boolean;
+  expectedSingleMicros?: bigint;
+  expectedMonthlyMicros?: bigint;
+  createdAt?: Date;
   updatedAt: Date;
+}
+
+export interface ComplianceVerificationSession {
+  id: string;
+  subjectAccountId: string;
+  provider: string;
+  state: VerificationSessionState;
+  replayed?: boolean;
+  hostedUrlCiphertext?: Buffer;
+  hostedUrlHash?: Buffer;
+  encryptionKeyId?: string;
+  expiresAt: Date;
+  updatedAt: Date;
+}
+
+export interface ComplianceVerificationClaim {
+  id: string;
+  subjectAccountId: string;
+  subjectType: "individual" | "business";
+  countryCode: string;
+  provider: string;
+  attempts: number;
 }
 
 export interface ComplianceCounterparty {
@@ -178,6 +277,48 @@ export interface ComplianceEventClaim {
   attempts: number;
 }
 
+export interface ComplianceOperator {
+  id: string;
+  name: string;
+  handle: string;
+  role: OperatorRow["role"];
+  publicKey?: string;
+  status?: NonNullable<OperatorRow["status"]>;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface ComplianceCaseAction {
+  id: bigint;
+  caseId: string;
+  action: string;
+  reason: string;
+  evidenceHash?: Buffer;
+  reviewReference: string;
+  databaseActor: string;
+  createdAt: Date;
+}
+
+export interface ComplianceActionRequest {
+  id: string;
+  actionType: ActionRequestRow["action_type"];
+  targetId: string;
+  payload: Record<string, unknown>;
+  state: ActionRequestRow["state"];
+  requestedBy: string;
+  approvedBy?: string;
+  idempotencyKey: string;
+  reviewReference: string;
+  reason: string;
+  checkerReference?: string;
+  checkerReason?: string;
+  requestedAt: Date;
+  expiresAt: Date;
+  decidedAt?: Date;
+  executedAt?: Date;
+  updatedAt: Date;
+}
+
 export interface RiskLimits {
   riskTier: Exclude<RiskTier, "prohibited">;
   perTransferMicros: bigint;
@@ -207,6 +348,31 @@ function subject(row: SubjectRow): ComplianceSubject {
     ...(optionalDate(row.identity_expires_at) ? { identityExpiresAt: optionalDate(row.identity_expires_at)! } : {}),
     ...(optionalDate(row.screening_expires_at) ? { screeningExpiresAt: optionalDate(row.screening_expires_at)! } : {}),
     ...(optionalDate(row.next_review_at) ? { nextReviewAt: optionalDate(row.next_review_at)! } : {}),
+    ...(row.identity_verified_at && optionalDate(row.identity_verified_at)
+      ? { identityVerifiedAt: optionalDate(row.identity_verified_at)! } : {}),
+    ...(row.beneficial_owners_verified !== undefined
+      ? { beneficialOwnersVerified: row.beneficial_owners_verified } : {}),
+    ...(row.expected_single_micros !== undefined
+      ? { expectedSingleMicros: BigInt(row.expected_single_micros) } : {}),
+    ...(row.expected_monthly_micros !== undefined
+      ? { expectedMonthlyMicros: BigInt(row.expected_monthly_micros) } : {}),
+    ...(row.created_at ? { createdAt: date(row.created_at) } : {}),
+    updatedAt: date(row.updated_at),
+  };
+}
+
+function verificationSession(row: VerificationSessionRow): ComplianceVerificationSession {
+  return {
+    id: row.id,
+    subjectAccountId: row.subject_account_id,
+    provider: row.provider,
+    state: row.state,
+    ...(row.replayed !== undefined ? { replayed: row.replayed } : {}),
+    ...(row.hosted_url_ciphertext
+      ? { hostedUrlCiphertext: Buffer.from(row.hosted_url_ciphertext) } : {}),
+    ...(row.hosted_url_hash ? { hostedUrlHash: Buffer.from(row.hosted_url_hash) } : {}),
+    ...(row.encryption_key_id ? { encryptionKeyId: row.encryption_key_id } : {}),
+    expiresAt: date(row.expires_at),
     updatedAt: date(row.updated_at),
   };
 }
@@ -276,6 +442,54 @@ function riskDecision(row: RiskDecisionRow): RiskDecision {
   };
 }
 
+function operator(row: OperatorRow): ComplianceOperator {
+  return {
+    id: row.id,
+    name: row.name,
+    handle: row.handle,
+    role: row.role,
+    ...(row.public_key ? { publicKey: row.public_key } : {}),
+    ...(row.status ? { status: row.status } : {}),
+    ...(row.created_at ? { createdAt: date(row.created_at) } : {}),
+    ...(row.updated_at ? { updatedAt: date(row.updated_at) } : {}),
+  };
+}
+
+function caseAction(row: CaseActionRow): ComplianceCaseAction {
+  return {
+    id: BigInt(row.id),
+    caseId: row.case_id,
+    action: row.action,
+    reason: row.reason,
+    ...(row.evidence_hash ? { evidenceHash: Buffer.from(row.evidence_hash) } : {}),
+    reviewReference: row.review_reference,
+    databaseActor: row.database_actor,
+    createdAt: date(row.created_at),
+  };
+}
+
+function actionRequest(row: ActionRequestRow): ComplianceActionRequest {
+  return {
+    id: row.id,
+    actionType: row.action_type,
+    targetId: row.target_id,
+    payload: row.payload,
+    state: row.state,
+    requestedBy: row.requested_by,
+    ...(row.approved_by ? { approvedBy: row.approved_by } : {}),
+    idempotencyKey: row.idempotency_key,
+    reviewReference: row.review_reference,
+    reason: row.reason,
+    ...(row.checker_reference ? { checkerReference: row.checker_reference } : {}),
+    ...(row.checker_reason ? { checkerReason: row.checker_reason } : {}),
+    requestedAt: date(row.requested_at),
+    expiresAt: date(row.expires_at),
+    ...(optionalDate(row.decided_at) ? { decidedAt: optionalDate(row.decided_at)! } : {}),
+    ...(optionalDate(row.executed_at) ? { executedAt: optionalDate(row.executed_at)! } : {}),
+    updatedAt: date(row.updated_at),
+  };
+}
+
 export class PostgresCompliance {
   constructor(private readonly db: SqlExecutor) {}
 
@@ -300,6 +514,89 @@ export class PostgresCompliance {
     );
     if (!result.rows[0]) throw new Error("compliance onboarding returned no subject");
     return subject(result.rows[0]);
+  }
+
+  async requestVerificationSession(input: {
+    userId: string;
+    provider: string;
+    idempotencyKey: string;
+  }): Promise<ComplianceVerificationSession> {
+    const result = await this.db.query<VerificationSessionRow>(
+      "select * from money_private.request_compliance_verification_session($1,$2,$3)",
+      [input.userId, input.provider, input.idempotencyKey]
+    );
+    if (!result.rows[0]) throw new Error("compliance verification request returned no session");
+    return verificationSession(result.rows[0]);
+  }
+
+  async verificationSession(
+    userId: string,
+    sessionId: string,
+  ): Promise<ComplianceVerificationSession | undefined> {
+    const result = await this.db.query<VerificationSessionRow>(
+      "select * from money_private.compliance_verification_session_state($1,$2)",
+      [userId, sessionId]
+    );
+    return result.rows[0] ? verificationSession(result.rows[0]) : undefined;
+  }
+
+  async claimVerificationSessions(
+    workerId: string,
+    limit = 25,
+  ): Promise<ComplianceVerificationClaim[]> {
+    const result = await this.db.query<VerificationClaimRow>(
+      "select * from money_private.claim_compliance_verification_sessions($1,$2)",
+      [workerId, limit]
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      subjectAccountId: row.subject_account_id,
+      subjectType: row.subject_type,
+      countryCode: row.country_code,
+      provider: row.provider,
+      attempts: row.attempts,
+    }));
+  }
+
+  async completeVerificationSession(input: {
+    workerId: string;
+    sessionId: string;
+    providerInquiryRef: string;
+    hostedUrlCiphertext: Buffer;
+    hostedUrlHash: Buffer;
+    encryptionKeyId: string;
+    expiresAt: Date;
+  }): Promise<ComplianceVerificationSession> {
+    const result = await this.db.query<VerificationSessionRow>(
+      "select * from money_private.complete_compliance_verification_session($1,$2,$3,$4,$5,$6,$7)",
+      [input.workerId, input.sessionId, input.providerInquiryRef,
+        input.hostedUrlCiphertext, input.hostedUrlHash, input.encryptionKeyId, input.expiresAt]
+    );
+    if (!result.rows[0]) throw new Error("compliance verification completion returned no session");
+    return verificationSession(result.rows[0]);
+  }
+
+  async failVerificationSession(input: {
+    workerId: string;
+    sessionId: string;
+    error: string;
+    retrySeconds: number;
+    dead: boolean;
+  }): Promise<string> {
+    const result = await this.db.query<{ fail_compliance_verification_session: string }>(
+      "select money_private.fail_compliance_verification_session($1,$2,$3,$4,$5) as fail_compliance_verification_session",
+      [input.workerId, input.sessionId, input.error, input.retrySeconds, input.dead]
+    );
+    if (!result.rows[0]) throw new Error("compliance verification failure returned no state");
+    return result.rows[0].fail_compliance_verification_session;
+  }
+
+  async expireVerificationSessions(limit = 100): Promise<number> {
+    const result = await this.db.query<{ expire_compliance_verification_sessions: number }>(
+      "select money_private.expire_compliance_verification_sessions($1) as expire_compliance_verification_sessions",
+      [limit]
+    );
+    return Number(result.rows[0]?.expire_compliance_verification_sessions ?? 0);
   }
 
   async recordEvidence(input: {
@@ -572,5 +869,217 @@ export class PostgresCompliance {
       "select * from money.risk_decisions order by created_at desc, id desc limit $1", [limit]
     );
     return result.rows.map(riskDecision);
+  }
+
+  async registerOperator(input: {
+    id: string;
+    name: string;
+    handle: string;
+    publicKey: string;
+    role: ComplianceOperator["role"];
+    reviewReference: string;
+    reason: string;
+  }): Promise<ComplianceOperator> {
+    const result = await this.db.query<OperatorRow>(
+      "select * from money_private.register_compliance_operator($1,$2,$3,$4,$5,$6,$7)",
+      [input.id, input.name, input.handle, input.publicKey, input.role,
+        input.reviewReference, input.reason]
+    );
+    if (!result.rows[0]) throw new Error("operator registration returned no operator");
+    return operator(result.rows[0]);
+  }
+
+  async setOperatorStatus(input: {
+    operatorId: string;
+    status: "active" | "suspended" | "closed";
+    reviewReference: string;
+    reason: string;
+  }): Promise<ComplianceOperator> {
+    const result = await this.db.query<OperatorRow>(
+      "select * from money_private.set_compliance_operator_status($1,$2,$3,$4)",
+      [input.operatorId, input.status, input.reviewReference, input.reason]
+    );
+    if (!result.rows[0]) throw new Error("operator status update returned no operator");
+    return operator(result.rows[0]);
+  }
+
+  async operatorIdentity(operatorId: string): Promise<ComplianceOperator | undefined> {
+    const result = await this.db.query<OperatorRow>(
+      "select * from money_private.compliance_operator_identity($1)", [operatorId]
+    );
+    return result.rows[0] ? operator(result.rows[0]) : undefined;
+  }
+
+  async consumeOperatorRequest(input: {
+    operatorId: string;
+    expectedPublicKey: string;
+    nonce: string;
+    signedAtMs: number;
+    requestHash: Buffer;
+  }): Promise<void> {
+    await this.db.query(
+      "select money_private.consume_compliance_operator_request($1,$2,$3,$4,$5)",
+      [input.operatorId, input.expectedPublicKey, input.nonce,
+        String(input.signedAtMs), input.requestHash]
+    );
+  }
+
+  async createOperatorSession(operatorId: string, tokenHash: Buffer): Promise<Date> {
+    const result = await this.db.query<{ expires_at: Timestamp }>(
+      "select * from money_private.create_compliance_operator_session($1,$2)",
+      [operatorId, tokenHash]
+    );
+    if (!result.rows[0]) throw new Error("operator session creation returned no expiry");
+    return date(result.rows[0].expires_at);
+  }
+
+  async resolveOperatorSession(tokenHash: Buffer): Promise<ComplianceOperator | undefined> {
+    const result = await this.db.query<OperatorRow>(
+      "select * from money_private.resolve_compliance_operator_session($1)", [tokenHash]
+    );
+    return result.rows[0] ? operator(result.rows[0]) : undefined;
+  }
+
+  async revokeOperatorSession(tokenHash: Buffer): Promise<boolean> {
+    const result = await this.db.query<{ revoked: boolean }>(
+      "select money_private.revoke_compliance_operator_session($1) as revoked", [tokenHash]
+    );
+    return result.rows[0]?.revoked ?? false;
+  }
+
+  async listOperatorCases(tokenHash: Buffer, limit = 100): Promise<ComplianceCase[]> {
+    const result = await this.db.query<CaseRow>(
+      "select * from money_private.list_compliance_cases_for_operator($1,$2)", [tokenHash, limit]
+    );
+    return result.rows.map(complianceCase);
+  }
+
+  async listOperatorSubjects(tokenHash: Buffer, limit = 100): Promise<ComplianceSubject[]> {
+    const result = await this.db.query<SubjectRow>(
+      "select * from money_private.list_compliance_subjects_for_operator($1,$2)", [tokenHash, limit]
+    );
+    return result.rows.map(subject);
+  }
+
+  async listOperatorRestrictions(tokenHash: Buffer, limit = 100): Promise<ComplianceRestriction[]> {
+    const result = await this.db.query<RestrictionRow>(
+      "select * from money_private.list_compliance_restrictions_for_operator($1,$2)", [tokenHash, limit]
+    );
+    return result.rows.map(restriction);
+  }
+
+  async listOperatorActionRequests(tokenHash: Buffer, limit = 100): Promise<ComplianceActionRequest[]> {
+    const result = await this.db.query<ActionRequestRow>(
+      "select * from money_private.list_compliance_action_requests_for_operator($1,$2)", [tokenHash, limit]
+    );
+    return result.rows.map(actionRequest);
+  }
+
+  async listOperatorCaseActions(
+    tokenHash: Buffer,
+    caseId: string,
+    limit = 100,
+  ): Promise<ComplianceCaseAction[]> {
+    const result = await this.db.query<CaseActionRow>(
+      "select * from money_private.list_compliance_case_actions_for_operator($1,$2,$3)",
+      [tokenHash, caseId, limit]
+    );
+    return result.rows.map(caseAction);
+  }
+
+  async claimCaseAsOperator(input: {
+    tokenHash: Buffer;
+    caseId: string;
+    idempotencyKey: string;
+    reviewReference: string;
+    reason: string;
+  }): Promise<ComplianceCase> {
+    const result = await this.db.query<CaseRow>(
+      "select * from money_private.claim_compliance_case_as_operator($1,$2,$3,$4,$5)",
+      [input.tokenHash, input.caseId, input.idempotencyKey, input.reviewReference, input.reason]
+    );
+    if (!result.rows[0]) throw new Error("operator case claim returned no case");
+    return complianceCase(result.rows[0]);
+  }
+
+  async addCaseNoteAsOperator(input: {
+    tokenHash: Buffer;
+    caseId: string;
+    idempotencyKey: string;
+    reviewReference: string;
+    reason: string;
+    evidenceHash?: Buffer;
+  }): Promise<ComplianceCaseAction> {
+    const result = await this.db.query<CaseActionRow>(
+      "select * from money_private.add_compliance_case_note_as_operator($1,$2,$3,$4,$5,$6)",
+      [input.tokenHash, input.caseId, input.idempotencyKey, input.reviewReference,
+        input.reason, input.evidenceHash ?? null]
+    );
+    if (!result.rows[0]) throw new Error("operator case note returned no action");
+    return caseAction(result.rows[0]);
+  }
+
+  async restrictSubjectAsOperator(input: {
+    tokenHash: Buffer;
+    subjectAccountId: string;
+    caseId: string;
+    reasonCode: string;
+    idempotencyKey: string;
+    reviewReference: string;
+    reason: string;
+  }): Promise<ComplianceRestriction> {
+    const result = await this.db.query<RestrictionRow>(
+      "select * from money_private.restrict_compliance_subject_as_operator($1,$2,$3,$4,$5,$6,$7)",
+      [input.tokenHash, input.subjectAccountId, input.caseId, input.reasonCode,
+        input.idempotencyKey, input.reviewReference, input.reason]
+    );
+    if (!result.rows[0]) throw new Error("operator restriction returned no restriction");
+    return restriction(result.rows[0]);
+  }
+
+  async requestActionAsOperator(input: {
+    tokenHash: Buffer;
+    actionType: ComplianceActionRequest["actionType"];
+    targetId: string;
+    payload: Record<string, unknown>;
+    idempotencyKey: string;
+    reviewReference: string;
+    reason: string;
+  }): Promise<ComplianceActionRequest> {
+    const result = await this.db.query<ActionRequestRow>(
+      "select * from money_private.request_compliance_action_as_operator($1,$2,$3,$4,$5,$6,$7)",
+      [input.tokenHash, input.actionType, input.targetId, input.payload,
+        input.idempotencyKey, input.reviewReference, input.reason]
+    );
+    if (!result.rows[0]) throw new Error("reviewed action request returned no row");
+    return actionRequest(result.rows[0]);
+  }
+
+  async approveActionAsOperator(input: {
+    tokenHash: Buffer;
+    requestId: string;
+    reviewReference: string;
+    reason: string;
+  }): Promise<ComplianceActionRequest> {
+    const result = await this.db.query<ActionRequestRow>(
+      "select * from money_private.approve_compliance_action_as_operator($1,$2,$3,$4)",
+      [input.tokenHash, input.requestId, input.reviewReference, input.reason]
+    );
+    if (!result.rows[0]) throw new Error("reviewed action approval returned no row");
+    return actionRequest(result.rows[0]);
+  }
+
+  async rejectActionAsOperator(input: {
+    tokenHash: Buffer;
+    requestId: string;
+    reviewReference: string;
+    reason: string;
+  }): Promise<ComplianceActionRequest> {
+    const result = await this.db.query<ActionRequestRow>(
+      "select * from money_private.reject_compliance_action_as_operator($1,$2,$3,$4)",
+      [input.tokenHash, input.requestId, input.reviewReference, input.reason]
+    );
+    if (!result.rows[0]) throw new Error("reviewed action rejection returned no row");
+    return actionRequest(result.rows[0]);
   }
 }

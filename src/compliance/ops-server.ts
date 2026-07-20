@@ -37,7 +37,9 @@ export function createComplianceOpsApi(
       const result = await db.query<{ ready: boolean }>(`
         select to_regprocedure('money_private.compliance_subject_state(text)') is not null
           and to_regclass('money.compliance_subjects') is not null
-          and to_regclass('money.risk_decisions') is not null as ready
+          and to_regclass('money.risk_decisions') is not null
+          and to_regclass('money.compliance_action_requests') is not null
+          and to_regclass('money.compliance_verification_sessions') is not null as ready
       `);
       return result.rows[0]?.ready
         ? c.json({ ok: true })
@@ -62,6 +64,10 @@ export function createComplianceOpsApi(
         open_cases: string | number;
         dead_events: string | number;
         denied_last_hour: string | number;
+        pending_verifications: string | number;
+        failed_verifications: string | number;
+        pending_checker_actions: string | number;
+        active_operators: string | number;
       }>(`
         select
           (select count(*) from money.compliance_subjects
@@ -75,7 +81,15 @@ export function createComplianceOpsApi(
            where status in ('open','in_review','escalated','restricted')) as open_cases,
           (select count(*) from money.compliance_event_inbox where state = 'dead') as dead_events,
           (select count(*) from money.risk_decisions
-           where outcome <> 'allow' and created_at >= clock_timestamp() - interval '1 hour') as denied_last_hour
+           where outcome <> 'allow' and created_at >= clock_timestamp() - interval '1 hour') as denied_last_hour,
+          (select count(*) from money.compliance_verification_sessions
+           where state in ('requested','creating')) as pending_verifications,
+          (select count(*) from money.compliance_verification_sessions
+           where state = 'failed') as failed_verifications,
+          (select count(*) from money.compliance_action_requests
+           where state = 'pending' and expires_at > clock_timestamp()) as pending_checker_actions,
+          (select count(*) from money.compliance_operators
+           where status = 'active') as active_operators
       `),
       db.query<{
         risk_tier: string; per_transfer_micros: string | number | bigint;
@@ -93,8 +107,11 @@ export function createComplianceOpsApi(
     const openCases = Number(stats?.open_cases ?? 0);
     const expiringEvidence = Number(stats?.expiring_evidence ?? 0);
     const deadEvents = Number(stats?.dead_events ?? 0);
+    const failedVerifications = Number(stats?.failed_verifications ?? 0);
+    const pendingCheckerActions = Number(stats?.pending_checker_actions ?? 0);
     const ok = openRestrictions === 0 && openCases === 0
-      && expiringEvidence === 0 && deadEvents === 0;
+      && expiringEvidence === 0 && deadEvents === 0
+      && failedVerifications === 0 && pendingCheckerActions === 0;
     c.header("cache-control", "no-store");
     return c.json({
       ok,
@@ -104,6 +121,10 @@ export function createComplianceOpsApi(
       openCases,
       deadEvents,
       deniedLastHour: Number(stats?.denied_last_hour ?? 0),
+      pendingVerifications: Number(stats?.pending_verifications ?? 0),
+      failedVerifications,
+      pendingCheckerActions,
+      activeOperators: Number(stats?.active_operators ?? 0),
       limits: limits.rows.map((row) => ({
         riskTier: row.risk_tier,
         perTransferMicros: String(row.per_transfer_micros),

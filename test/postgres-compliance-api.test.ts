@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import { PGlite, type PGliteInterface, type Transaction } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { runComplianceOnboardingBatch } from "../src/compliance/onboarding-worker.ts";
+import { ComplianceProviderClient } from "../src/compliance/provider.ts";
+import { createComplianceSessionKeyring } from "../src/compliance/session-cipher.ts";
 import { generateAgentKeypair, signedHeaders } from "../src/core/identity.ts";
 import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/database.ts";
 import { runMigrations } from "../src/db/migrate.ts";
@@ -33,11 +36,17 @@ class EmbeddedPostgres implements TransactionalDatabase {
 describe("signed compliance product API", () => {
   let db: EmbeddedPostgres;
   let api: ReturnType<typeof createPostgresApi>;
+  const sessionKeyring = createComplianceSessionKeyring("test-key", {
+    "test-key": Buffer.alloc(32, 11),
+  });
 
   beforeEach(async () => {
     db = new EmbeddedPostgres(new PGlite({ extensions: { pgcrypto } }));
     await runMigrations(db);
-    api = createPostgresApi(db);
+    api = createPostgresApi(db, {
+      complianceSessionKeyring: sessionKeyring,
+      complianceProviderName: "fixture",
+    });
   }, 30_000);
   afterEach(async () => { await db.close(); });
 
@@ -121,5 +130,54 @@ describe("signed compliance product API", () => {
     expect(approvedJson).not.toHaveProperty("providerSubjectRef");
     expect(approvedJson).not.toHaveProperty("evidenceHash");
     expect(approvedJson).not.toHaveProperty("reason");
+  });
+
+  it("returns a hosted inquiry only to its authenticated owner after the isolated worker is ready", async () => {
+    const keys = generateAgentKeypair();
+    const signup = await api.app.request("/users", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Inquiry Owner", handle: "inquiry-owner", publicKey: keys.publicKey }),
+    });
+    const owner = await signup.json() as { id: string };
+    expect((await request("/owner/compliance", owner.id, keys.privateKey, "POST", {
+      subjectType: "individual", countryCode: "US",
+      expectedSingleMicros: 2_000_000, expectedMonthlyMicros: 20_000_000,
+    })).status).toBe(202);
+    const requested = await request(
+      "/owner/compliance/inquiries", owner.id, keys.privateKey, "POST",
+      { idempotencyKey: "owner-inquiry-0001" },
+    );
+    expect(requested.status).toBe(202);
+    const requestedJson = await requested.json() as { id: string; state: string; replayed: boolean };
+    expect(requestedJson).toEqual(expect.objectContaining({ state: "requested", replayed: false }));
+
+    const hostedUrl = `https://verify.example/start/${requestedJson.id}?token=only-owner`;
+    const provider = new ComplianceProviderClient({
+      provider: "fixture", apiKey: "provider-key",
+      baseUrl: "https://provider.example", hostedOrigins: ["https://verify.example"],
+      fetch: (async () => new Response(JSON.stringify({
+        id: "inq_product_001", hostedUrl,
+        expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+      }), { status: 201 })) as typeof fetch,
+    });
+    expect(await runComplianceOnboardingBatch(
+      api.compliance, provider, sessionKeyring, "product-test-worker", 1,
+    )).toEqual({ claimed: 1, completed: 1, failed: 0, expired: 0 });
+
+    const readyPath = `/owner/compliance/inquiries/${requestedJson.id}`;
+    const ready = await request(readyPath, owner.id, keys.privateKey, "GET");
+    expect(ready.status).toBe(200);
+    expect(await ready.json()).toEqual(expect.objectContaining({
+      id: requestedJson.id, state: "ready", hostedUrl,
+    }));
+
+    const otherKeys = generateAgentKeypair();
+    const otherSignup = await api.app.request("/users", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Other", handle: "inquiry-other", publicKey: otherKeys.publicKey }),
+    });
+    const other = await otherSignup.json() as { id: string };
+    expect((await request(readyPath, other.id, otherKeys.privateKey, "GET")).status).toBe(404);
+    expect((await api.app.request(readyPath)).status).toBe(401);
   });
 });

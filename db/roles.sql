@@ -46,6 +46,12 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'money_compliance_ops') then
     create role money_compliance_ops nologin;
   end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_compliance_onboarding') then
+    create role money_compliance_onboarding nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_compliance_console') then
+    create role money_compliance_console nologin;
+  end if;
 end $$;
 
 revoke all on schema public from public;
@@ -61,17 +67,20 @@ revoke all on schema money, money_private from
   money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
   money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
   money_compliance_admin, money_compliance_worker, money_compliance_ingress,
-  money_risk_worker, money_compliance_ops;
+  money_risk_worker, money_compliance_ops, money_compliance_onboarding,
+  money_compliance_console;
 revoke all on all tables in schema money from
   money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
   money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
   money_compliance_admin, money_compliance_worker, money_compliance_ingress,
-  money_risk_worker, money_compliance_ops;
+  money_risk_worker, money_compliance_ops, money_compliance_onboarding,
+  money_compliance_console;
 revoke all on all functions in schema money_private from
   money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
   money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
   money_compliance_admin, money_compliance_worker, money_compliance_ingress,
-  money_risk_worker, money_compliance_ops;
+  money_risk_worker, money_compliance_ops, money_compliance_onboarding,
+  money_compliance_console;
 
 grant usage on schema money, money_private to money_app;
 grant select on money.schema_migrations, money.accounts, money.assets, money.services to money_app;
@@ -134,7 +143,9 @@ grant execute on function
   money_private.list_treasury_exposures(text,integer),
   money_private.treasury_control_state(),
   money_private.begin_compliance_verification(text,text,text,bigint,bigint),
-  money_private.compliance_subject_state(text)
+  money_private.compliance_subject_state(text),
+  money_private.request_compliance_verification_session(text,text,text),
+  money_private.compliance_verification_session_state(text,uuid)
   to money_app;
 
 -- Product traffic can submit a non-PII onboarding profile and read only its
@@ -143,15 +154,13 @@ grant execute on function
 
 grant usage on schema money_private to money_compliance_admin;
 grant execute on function
-  money_private.approve_compliance_subject(text,text,timestamptz,text,text),
   money_private.open_compliance_case(text,uuid,bigint,text,text,text,text,timestamptz,text,text),
-  money_private.resolve_compliance_case(uuid,text,text,text,bytea),
   money_private.restrict_compliance_subject(text,uuid,text,text),
-  money_private.release_compliance_restriction(text,text,text),
   money_private.register_compliance_counterparty(text,text,text,text,text),
   money_private.record_counterparty_screening(uuid,text,bytea,text,timestamptz,timestamptz),
   money_private.link_treasury_destination_compliance(uuid,uuid,text),
-  money_private.configure_risk_limits(text,bigint,bigint,bigint,bigint,bigint,text,text),
+  money_private.register_compliance_operator(text,text,text,text,text,text,text),
+  money_private.set_compliance_operator_status(text,text,text,text),
   money_private.compliance_subject_state(text)
   to money_compliance_admin;
 
@@ -174,11 +183,46 @@ grant usage on schema money_private to money_compliance_ingress;
 grant execute on function money_private.enqueue_compliance_event(text,text,text,text,bytea)
   to money_compliance_ingress;
 
+-- Hosted-onboarding provider credentials can claim a non-PII profile and
+-- persist only an authenticated provider reference plus encrypted redirect.
+-- They cannot read the redirect back, approve a customer, or inspect a case.
+grant usage on schema money_private to money_compliance_onboarding;
+grant execute on function
+  money_private.claim_compliance_verification_sessions(text,integer),
+  money_private.complete_compliance_verification_session(text,uuid,text,bytea,bytea,text,timestamptz),
+  money_private.fail_compliance_verification_session(text,uuid,text,integer,boolean),
+  money_private.expire_compliance_verification_sessions(integer)
+  to money_compliance_onboarding;
+
+-- The console login has no table grants. Every read and mutation must present
+-- a live hashed operator session to a SECURITY DEFINER command. High-impact
+-- commands enforce role and maker/checker separation inside the database.
+grant usage on schema money_private to money_compliance_console;
+grant execute on function
+  money_private.compliance_operator_identity(text),
+  money_private.consume_compliance_operator_request(text,text,text,bigint,bytea),
+  money_private.create_compliance_operator_session(text,bytea),
+  money_private.resolve_compliance_operator_session(bytea),
+  money_private.revoke_compliance_operator_session(bytea),
+  money_private.list_compliance_cases_for_operator(bytea,integer),
+  money_private.list_compliance_subjects_for_operator(bytea,integer),
+  money_private.list_compliance_restrictions_for_operator(bytea,integer),
+  money_private.list_compliance_action_requests_for_operator(bytea,integer),
+  money_private.list_compliance_case_actions_for_operator(bytea,uuid,integer),
+  money_private.claim_compliance_case_as_operator(bytea,uuid,text,text,text),
+  money_private.add_compliance_case_note_as_operator(bytea,uuid,text,text,text,bytea),
+  money_private.restrict_compliance_subject_as_operator(bytea,text,uuid,text,text,text,text),
+  money_private.request_compliance_action_as_operator(bytea,text,text,jsonb,text,text,text),
+  money_private.approve_compliance_action_as_operator(bytea,uuid,text,text),
+  money_private.reject_compliance_action_as_operator(bytea,uuid,text,text)
+  to money_compliance_console;
+
 -- Transaction monitoring may create a case and stop an account family but
 -- cannot clear evidence, release the restriction, or close the case.
 grant usage on schema money_private to money_risk_worker;
 grant execute on function
   money_private.sweep_expired_compliance(integer),
+  money_private.expire_compliance_verification_sessions(integer),
   money_private.open_compliance_case(text,uuid,bigint,text,text,text,text,timestamptz,text,text),
   money_private.restrict_compliance_subject(text,uuid,text,text)
   to money_risk_worker;
@@ -280,5 +324,9 @@ grant select on money.compliance_subjects, money.compliance_evidence,
   money.compliance_subject_events, money.risk_limits, money.risk_limit_events,
   money.risk_velocity_buckets, money.risk_decisions, money.risk_transfer_links
   to money_compliance_ops;
+grant select (id, subject_account_id, provider, state, attempts, requested_at,
+  expires_at, updated_at) on money.compliance_verification_sessions to money_compliance_ops;
+grant select on money.compliance_operators, money.compliance_operator_events,
+  money.compliance_action_requests to money_compliance_ops;
 grant execute on function money_private.compliance_subject_state(text)
   to money_compliance_ops;
