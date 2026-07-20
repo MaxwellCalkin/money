@@ -17,6 +17,7 @@ import { PostgresExternal } from "../src/db/external.ts";
 import { PostgresLedger } from "../src/db/ledger.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { PostgresPolicy } from "../src/db/policy.ts";
+import { PostgresTreasury } from "../src/db/treasury.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
   constructor(readonly pg: PGliteInterface) {}
@@ -73,6 +74,12 @@ describe("Postgres external settlement state machine", () => {
     ledger = new PostgresLedger(db);
     policy = new PostgresPolicy(db);
     external = new PostgresExternal(db);
+    await new PostgresTreasury(db).configureControls({
+      fundingEnabled: true, payoutsEnabled: true, externalSpendEnabled: true,
+      maxPayoutMicros: 100_000_000_000n, maxPendingPayoutMicros: 1_000_000_000_000n,
+      maxOpenExposureMicros: 100_000_000_000n, maxReconciliationVarianceMicros: 1_000_000n,
+      reason: "test fixture enables treasury controls",
+    });
   }, 30_000);
 
   afterEach(async () => {
@@ -204,6 +211,22 @@ describe("Postgres external settlement state machine", () => {
     await expect(external.confirm(agent.id, second.externalId!, "0xmocktx1")).rejects.toMatchObject({ code: "23505" });
     expect((await external.secret(agent.id, second.externalId!))?.state).toBe("pending");
     expect(await control.ledgerHealth()).toEqual({ zeroSum: true, receiptsOk: true });
+  });
+
+  it("keeps a prepared x402 intent unsigned and undebited when the treasury breaker opens", async () => {
+    const { agent } = await world();
+    const treasury = new PostgresTreasury(db);
+    await treasury.configureControls({
+      fundingEnabled: false, payoutsEnabled: false, externalSpendEnabled: false,
+      maxPayoutMicros: 100_000_000_000n, maxPendingPayoutMicros: 1_000_000_000_000n,
+      maxOpenExposureMicros: 100_000_000_000n, maxReconciliationVarianceMicros: 1_000_000n,
+      reason: "reconciliation incident",
+    });
+    await expect(external.request(requestInput(agent.id, "external-breaker")))
+      .rejects.toThrow(/external-spend circuit breaker is open/i);
+    expect(await ledger.balance(agent.id)).toBe(1_000_000n);
+    expect(await external.secretByKey(agent.id, "external-breaker"))
+      .toEqual(expect.objectContaining({ state: "prepared" }));
   });
 
   it("operationally re-encrypts live authorizations through the narrow rotation boundary", async () => {

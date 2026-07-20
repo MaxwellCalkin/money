@@ -11,6 +11,7 @@ import { MockWallet, type ExternalWallet, type SigningDomain } from "../src/brid
 import { generateAgentKeypair, signedHeaders } from "../src/core/identity.ts";
 import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/database.ts";
 import { runMigrations } from "../src/db/migrate.ts";
+import { PostgresTreasury } from "../src/db/treasury.ts";
 import { createPostgresApi } from "../src/server/postgres-api.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
@@ -101,6 +102,12 @@ describe("Postgres signed external-payment API", () => {
   beforeEach(async () => {
     db = new EmbeddedPostgres(new PGlite({ extensions: { pgcrypto } }));
     await runMigrations(db);
+    await new PostgresTreasury(db).configureControls({
+      fundingEnabled: true, payoutsEnabled: true, externalSpendEnabled: true,
+      maxPayoutMicros: 100_000_000_000n, maxPendingPayoutMicros: 1_000_000_000_000n,
+      maxOpenExposureMicros: 100_000_000_000n, maxReconciliationVarianceMicros: 1_000_000n,
+      reason: "test fixture enables treasury controls",
+    });
     signer = new MockWallet();
     signatures = 0;
     wallet = {

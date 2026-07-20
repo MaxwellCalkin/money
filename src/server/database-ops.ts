@@ -6,6 +6,7 @@ import type { TransactionalDatabase } from "../db/database.ts";
 import { PostgresLedger } from "../db/ledger.ts";
 import { runMigrations } from "../db/migrate.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
+import { PostgresTreasury } from "../db/treasury.ts";
 
 function sameToken(expected: string, authorization?: string): boolean {
   const presented = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
@@ -20,7 +21,8 @@ function sameToken(expected: string, authorization?: string): boolean {
 export function createDatabaseOpsApi(
   db: TransactionalDatabase,
   ledger = new PostgresLedger(db),
-  opsToken = process.env.MONEY_OPS_TOKEN ?? ""
+  opsToken = process.env.MONEY_OPS_TOKEN ?? "",
+  treasury = new PostgresTreasury(db)
 ) {
   const app = new Hono();
   app.onError((error, c) => {
@@ -39,7 +41,8 @@ export function createDatabaseOpsApi(
       }>(`
         select
           (select max(version) from money.schema_migrations) as version,
-          to_regprocedure('money_private.request_agent_payment(text,text,text,text,bigint,text)') is not null as posting_ready
+          to_regprocedure('money_private.request_agent_payment(text,text,text,text,bigint,text)') is not null
+          and to_regprocedure('money_private.treasury_health()') is not null as posting_ready
       `);
       const row = result.rows[0];
       if (!row?.version || !row.posting_ready) {
@@ -73,6 +76,115 @@ export function createDatabaseOpsApi(
         journalMicros: row.journalMicros.toString(),
       })),
     }, mismatches.length === 0 ? 200 : 503);
+  });
+
+  app.get("/ops/treasury", async (c) => {
+    if (!opsToken || !sameToken(opsToken, c.req.header("authorization"))) {
+      return c.json({ error: "not_found" }, 404);
+    }
+    const [health, controls, lifecycle, controlEvents, eventReviews, payoutReviews] = await Promise.all([
+      treasury.health(),
+      treasury.controlState(),
+      db.query<{ dead_events: string | number; manual_payouts: string | number; blocked_payouts: string | number }>(`
+        select
+          (select count(*) from money.treasury_event_inbox where state = 'dead') as dead_events,
+          (select count(*) from money.treasury_payouts where state = 'manual_review') as manual_payouts,
+          (select count(*) from money.treasury_payouts p
+             join money.treasury_destinations d on d.id = p.destination_id
+           where p.state = 'queued' and d.status <> 'verified') as blocked_payouts
+      `),
+      db.query<{
+        id: string | number; action: string; funding_enabled: boolean; payouts_enabled: boolean;
+        external_spend_enabled: boolean; reason: string; database_actor: string;
+        created_at: Date | string;
+      }>(`
+        select id, action, funding_enabled, payouts_enabled, external_spend_enabled,
+          reason, database_actor, created_at
+        from money.treasury_control_events
+        order by id desc limit 20
+      `),
+      db.query<{
+        id: string; inbox_id: string | number; resolution: string; prior_error: string | null;
+        review_reference: string; reason: string; database_actor: string; created_at: Date | string;
+      }>(`
+        select id, inbox_id, resolution, prior_error, review_reference, reason,
+          database_actor, created_at
+        from money.treasury_event_reviews
+        order by created_at desc, id desc limit 20
+      `),
+      db.query<{
+        id: string; payout_id: string; resolved_state: string; provider_transfer_id: string | null;
+        review_reference: string; reason: string; created_at: Date | string;
+      }>(`
+        select id, payout_id, resolved_state, provider_transfer_id,
+          review_reference, reason, created_at
+        from money.treasury_payout_reviews
+        order by created_at desc, id desc limit 20
+      `),
+    ]);
+    const deadEvents = Number(lifecycle.rows[0]?.dead_events ?? 0);
+    const manualPayouts = Number(lifecycle.rows[0]?.manual_payouts ?? 0);
+    const blockedPayouts = Number(lifecycle.rows[0]?.blocked_payouts ?? 0);
+    const configured = health.some((row) => row.activeAssetAccounts > 0);
+    const ok = configured && health.every((row) => row.withinTolerance)
+      && controls.fundingEnabled && controls.payoutsEnabled && controls.externalSpendEnabled
+      && deadEvents === 0 && manualPayouts === 0 && blockedPayouts === 0;
+    c.header("cache-control", "no-store");
+    return c.json({
+      ok,
+      configured,
+      deadEvents,
+      manualPayouts,
+      blockedPayouts,
+      controls: {
+        fundingEnabled: controls.fundingEnabled,
+        payoutsEnabled: controls.payoutsEnabled,
+        externalSpendEnabled: controls.externalSpendEnabled,
+        maxPayoutMicros: controls.maxPayoutMicros.toString(),
+        maxPendingPayoutMicros: controls.maxPendingPayoutMicros.toString(),
+        ...(controls.maxOpenExposureMicros !== undefined
+          ? { maxOpenExposureMicros: controls.maxOpenExposureMicros.toString() } : {}),
+        ...(controls.maxReconciliationVarianceMicros !== undefined
+          ? { maxReconciliationVarianceMicros: controls.maxReconciliationVarianceMicros.toString() } : {}),
+        ...(controls.breakerReason ? { breakerReason: controls.breakerReason } : {}),
+        updatedAt: controls.updatedAt.toISOString(),
+      },
+      recentControlEvents: controlEvents.rows.map((event) => ({
+        id: String(event.id), action: event.action,
+        fundingEnabled: event.funding_enabled,
+        payoutsEnabled: event.payouts_enabled,
+        externalSpendEnabled: event.external_spend_enabled,
+        reason: event.reason, databaseActor: event.database_actor,
+        createdAt: new Date(event.created_at).toISOString(),
+      })),
+      recentEventReviews: eventReviews.rows.map((review) => ({
+        id: review.id, inboxId: String(review.inbox_id), resolution: review.resolution,
+        ...(review.prior_error ? { priorError: review.prior_error } : {}),
+        reviewReference: review.review_reference, reason: review.reason,
+        databaseActor: review.database_actor,
+        createdAt: new Date(review.created_at).toISOString(),
+      })),
+      recentPayoutReviews: payoutReviews.rows.map((review) => ({
+        id: review.id, payoutId: review.payout_id, resolvedState: review.resolved_state,
+        ...(review.provider_transfer_id ? { providerTransferId: review.provider_transfer_id } : {}),
+        reviewReference: review.review_reference, reason: review.reason,
+        createdAt: new Date(review.created_at).toISOString(),
+      })),
+      assets: health.map((row) => ({
+        asset: row.asset,
+        expectedAssetMicros: row.expectedAssetMicros.toString(),
+        observedAssetMicros: row.observedAssetMicros.toString(),
+        uncertainOutflowMicros: row.uncertainOutflowMicros.toString(),
+        shortfallMicros: row.shortfallMicros.toString(),
+        excessMicros: row.excessMicros.toString(),
+        openExposureMicros: row.openExposureMicros.toString(),
+        activeAssetAccounts: row.activeAssetAccounts,
+        observedAssetAccounts: row.observedAssetAccounts,
+        snapshotComplete: row.snapshotComplete,
+        withinTolerance: row.withinTolerance,
+        ...(row.oldestObservedAt ? { oldestObservedAt: row.oldestObservedAt.toISOString() } : {}),
+      })),
+    }, ok ? 200 : 503);
   });
 
   return app;

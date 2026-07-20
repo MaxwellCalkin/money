@@ -20,7 +20,8 @@ either posts autonomously, creates a durable owner approval, or records a
 stable denial. The decision, budget and daily counters, seen-payee state,
 authorization evidence, journal entries, receipt, and outbox events commit in
 one transaction. `resolve_approval(...)` settles only the exact stored tuple
-the owner reviewed. Confirmed funding belongs to a separate treasury role.
+the owner reviewed. Confirmed funding belongs to the isolated
+`money_treasury_worker` role.
 
 The primitive beneath those policy commands reserves actor-scoped
 idempotency, verifies operation authority, checks available funds, writes both
@@ -70,6 +71,22 @@ and confirmed authorization ciphertext can be enumerated and replaced only
 through narrow key-rotation functions; the plaintext hash and economic tuple
 cannot change.
 
+Migration `0007_treasury.sql` adds the external asset perimeter. A webhook
+identity can enqueue only a signed provider event envelope. A separate
+treasury worker re-fetches Column's event and ACH object before applying a
+settled funding credit, exact funding return, or payout transition. Returns
+may overdraw a user only through this evidence-bound command; the exact
+exposure is tracked and the owner's active user/agent/provider family is
+frozen until recovery plus explicit review. Payout requests atomically reserve
+funds at `external:payout`; workers claim with `FOR UPDATE SKIP LOCKED`, commit,
+then call the provider. Definitive rejection reverses once, while ambiguous
+outcomes retain the reserve, enter manual review, and open all spend breakers.
+Reviewed resolutions and every breaker/configuration transition are retained
+as append-only operational evidence; restoring controls is a separate admin
+action and never happens as a side effect of resolving a payout.
+Fresh bank and six-decimal stablecoin observations are reconciled against
+external-boundary journal balances and uncertain in-flight outflows.
+
 `money_private.post_transfer_kernel(...)` is the generalized posting kernel
 under the current schema. It is not granted to the application role. The old
 `post_transfer(...)` signature remains a compatibility wrapper; application
@@ -78,8 +95,12 @@ traffic receives only narrow marketplace commands such as
 
 Run `db/roles.sql` separately as an administrator. Production login roles
 should inherit exactly one narrow role: `money_app`, `money_treasury`,
+`money_treasury_worker`, `money_treasury_ingress`, `money_payout_worker`, `money_reconciler`,
 `money_worker`, `money_key_rotation`, or `money_ops`. They should never own the schema or receive
 direct journal/balance write privileges; the application role cannot directly
 read tenant financial tables either. Tenant-scoped mandate and approval reads
 also go through reviewed functions, so the role can power owner and agent
 views without receiving unrestricted table access.
+
+See `docs/TREASURY.md` for process isolation, provider evidence, deployment,
+reconciliation, incident handling, and non-code launch requirements.

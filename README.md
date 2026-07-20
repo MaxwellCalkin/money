@@ -9,11 +9,11 @@ When both sides of a transaction are on the same ledger, a payment is a database
 ## Core design principles
 
 1. **The envelope is the security boundary, not the model's judgment.** Spending limits live in a deterministic policy engine outside any model context. Injected text can ask; nothing in an agent's context can sign or widen a mandate.
-2. **Hold authorization, not money** (production posture: FBO account at a sponsor bank; this prototype simulates the boundary as the `external:funding` account).
+2. **Hold authorization, not money.** Customer assets belong in a sponsor-bank FBO program; the internal ledger records beneficial balances and external boundary accounts. The repository now implements the Column-facing software boundary, but a live program still requires bank and regulatory approval.
 3. **Prefunding buys the speed.** Authorization is a local policy + balance check — no external round-trip on the hot path.
 4. **Exactly-once by construction.** Idempotency keys on every transfer; 402 challenges pay-once/redeem-once. Agents retry by default — the network must shrug.
 
-## What's here (v0.9)
+## What's here (v0.10)
 
 | Piece | File | What it does |
 |---|---|---|
@@ -31,6 +31,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | Owner control plane | `src/server/dashboard.ts` | Private, session-gated balances, activity, services, mandates, and an exact-payment approval inbox |
 | Database operations | `src/server/database-ops.ts` | Liveness, schema readiness, and token-gated ledger reconciliation on **:4022**; deliberately no ungoverned payment route |
 | x402 boundary | `src/bridge/`, `src/db/external.ts` | Official x402 v2 exact/EVM signing, HTTPS HSM adapter, pinned Base USDC, rotatable AES-256-GCM custody, exact external approvals, independent calldata/log verification, restart recovery, and automatic journal reversal |
+| Treasury boundary | `db/migrations/0007_treasury.sql`, `src/treasury/` | Real Column ACH funding and payouts, raw-body webhook HMAC, authenticated event re-fetch, out-of-order recovery, exact returns, exposure freezes, reserve-first payout workers, bank/stablecoin reconciliation, and global circuit breakers |
 | MCP server | `src/mcp/server.ts` | `money_balance`, `money_pay`, `money_fetch` (auto-pays internal 402s AND external x402 sellers within mandate), `money_feed` |
 | Demo | `src/demo.ts` | The full story end-to-end (10 sections), including a separately authenticated seller joining and earning through the network |
 
@@ -56,6 +57,10 @@ npm run db:reconcile
 npm run db:test
 npm run api:db
 npm run external:worker
+npm run treasury:webhooks
+npm run treasury:events
+npm run treasury:payouts
+npm run treasury:reconcile
 ```
 
 Application traffic should use PgBouncer on port `6432`; migrations and
@@ -75,7 +80,15 @@ treasury funding.
 
 For operations health, set `MONEY_OPS_TOKEN` and run `npm run ops:db`.
 `GET /health/live` and `GET /health/ready` are safe for probes;
-`GET /ops/reconcile` requires that bearer token.
+`GET /ops/reconcile` requires that bearer token. `GET /ops/treasury` reports
+external-asset coverage, stale or divergent snapshots, dead provider events,
+and manual-review payouts; it fails readiness with `503` when intervention is
+required.
+
+Treasury controls install disabled in v0.10. Register bank/wallet sources,
+obtain a clean reconciliation, and use the reviewed admin restore command in
+`docs/TREASURY.md`; internal agent-to-agent payments remain available while
+the external perimeter is stopped.
 
 The policy, marketplace, and external-settlement Postgres gateways are
 `src/db/policy.ts`, `src/db/marketplace.ts`, and `src/db/external.ts`; the signed product API is
@@ -86,6 +99,15 @@ publishing, public discovery, registry-priced 402 challenges, single-use
 redemption, cumulative-capped refunds, durable external x402 settlement,
 scoped balances/activity, and the private dashboard. The ops service
 intentionally exposes no payment endpoint.
+
+The production treasury path is documented in `docs/TREASURY.md`. Incoming
+funding is credited only after an HMAC-authenticated webhook has been queued by
+a no-money-movement role and independently re-fetched with Column API
+credentials. Owner and provider payouts reserve ledger funds before provider
+I/O and use deterministic Column idempotency. Funding returns can create an
+exact tracked negative balance, freeze the owner's whole account family, and
+require explicit operator release after recovery. New x402 activation, funding,
+and payouts share reconciliation and incident circuit breakers.
 
 External routes fail closed unless a signer, a versioned header-encryption
 keyring, and an independent settlement verifier are all configured. `POST
@@ -222,9 +244,9 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 - Identity is an Ed25519 keypair per account: agents sign spends and owners sign admin mutations over method+path+body+timestamp+nonce. The Postgres API records accepted nonces durably, rejects replay across replicas, makes public-key onboarding retry-safe, and revokes browser sessions when an owner rotates keys (→ RFC 9421 HTTP Message Signatures + `@authority` binding on the wire; keys chained to a KYC'd owner; signup rate-limiting and owner-key delivery off stdout).
 - Browser access uses an eight-hour bearer session minted by an owner-signed request. Only SHA-256 token hashes are stored; sessions survive restart, cap at ten per owner, expire, revoke individually, and die on owner-key rotation (→ passkeys for the production owner ceremony).
 - The JSONL product path is single-node and remains a showcase. The Postgres path is multi-instance-safe for ledger, mandate, approval, signed identity, nonce, session, tenant-scoped control-plane, marketplace, challenge, redemption, refunds, and the pending/confirmed/cancelled/reversed external state machine.
-- External top-up is simulated. The repository now ships an official x402 v2 exact/EVM client, remote HSM signing boundary, Base Sepolia/mainnet USDC allowlist, and independent receipt/calldata/log verification. It has not been connected to customer funds. A launch still needs a funded and continuously reconciled treasury wallet, RPC/HSM redundancy, card/ACH top-up and payout through a sponsor-bank FBO program, and the compliance/risk controls described below.
+- The real-rail software boundary is implemented but not activated with customer funds. Column ACH funding/payouts, provider-event recovery, returns, freezes, and continuous bank/stablecoin reconciliation are present; x402 has remote-HSM signing and independent chain verification. A launch still needs an executed sponsor-bank/FBO program, production Column/RPC/HSM credentials and redundancy, funded reserves, verified customer/counterparty enrollment, and the compliance/risk controls in `docs/TREASURY.md`.
 - The ledger can settle between accounts owned by different users, but this is still a development sandbox. Turning that path on for real customer funds requires the sponsor-bank/FBO, KYC/KYB, sanctions, fraud, safeguarding, and licensing program around it; code alone does not cross the money-transmission line.
-- No subscriptions, sub-agent delegation, seller payouts, disputes, or insurance yet. Those are later programmable-commerce and risk layers after the internal marketplace and external settlement rail.
+- No subscriptions, delegated sub-agent mandates, complete dispute/chargeback case workflows, tax reporting, credit, or insurance yet. Provider payouts now exist; the remaining programmable-commerce and risk layers come next.
 
 ## The bigger picture
 

@@ -51,6 +51,15 @@ import { PostgresMarketplace, type DatabaseChallenge } from "../db/marketplace.t
 import { runMigrations } from "../db/migrate.ts";
 import { PostgresPolicy, type DatabaseApproval, type DatabaseMandate, type PolicyPaymentResult } from "../db/policy.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
+import {
+  PostgresTreasury,
+  type TreasuryControls,
+  type TreasuryDestination,
+  type TreasuryExposure,
+  type TreasuryFunding,
+  type TreasuryPayout,
+  type TreasuryRoute,
+} from "../db/treasury.ts";
 import { dashboardHtml } from "./dashboard.ts";
 
 const AUTH_WINDOW_MS = 2 * 60_000;
@@ -227,6 +236,66 @@ function externalView(payment: DatabaseExternalPayment) {
   };
 }
 
+function treasuryPayoutView(item: TreasuryPayout) {
+  return {
+    id: item.id,
+    destinationId: item.destinationId,
+    provider: item.provider,
+    asset: item.asset,
+    amountMicros: jsonInteger(item.amountMicros),
+    amountDisplay: formatMicros(item.amountMicros),
+    state: item.state,
+    attempts: item.attempts,
+    ...(item.providerTransferId ? { providerTransferId: item.providerTransferId } : {}),
+    ...(item.lastError ? { lastError: item.lastError } : {}),
+    requestedAt: item.requestedAt.getTime(),
+    ...(item.submittedAt ? { submittedAt: item.submittedAt.getTime() } : {}),
+    ...(item.settledAt ? { settledAt: item.settledAt.getTime() } : {}),
+    ...(item.terminalAt ? { terminalAt: item.terminalAt.getTime() } : {}),
+  };
+}
+
+function treasuryFundingView(item: TreasuryFunding) {
+  return {
+    id: item.id, provider: item.provider, asset: item.asset,
+    amountMicros: jsonInteger(item.amountMicros), amountDisplay: formatMicros(item.amountMicros),
+    state: item.state, settledAt: item.settledAt.getTime(),
+    ...(item.returnedAt ? { returnedAt: item.returnedAt.getTime() } : {}),
+    createdAt: item.createdAt.getTime(),
+  };
+}
+
+function treasuryExposureView(item: TreasuryExposure) {
+  return {
+    id: item.id, fundingId: item.fundingId,
+    amountMicros: jsonInteger(item.amountMicros), recoveredMicros: jsonInteger(item.recoveredMicros),
+    state: item.state, reason: item.reason, createdAt: item.createdAt.getTime(),
+    ...(item.resolvedAt ? { resolvedAt: item.resolvedAt.getTime() } : {}),
+  };
+}
+
+function treasuryRouteView(item: TreasuryRoute) {
+  return { id: item.id, provider: item.provider, label: item.label, status: item.status, createdAt: item.createdAt.getTime() };
+}
+
+function treasuryDestinationView(item: TreasuryDestination) {
+  return {
+    id: item.id, provider: item.provider, label: item.label, status: item.status,
+    verifiedAt: item.verifiedAt.getTime(), createdAt: item.createdAt.getTime(),
+  };
+}
+
+function treasuryControlView(item: TreasuryControls) {
+  return {
+    fundingEnabled: item.fundingEnabled, payoutsEnabled: item.payoutsEnabled,
+    externalSpendEnabled: item.externalSpendEnabled,
+    maxPayoutMicros: jsonInteger(item.maxPayoutMicros),
+    maxPendingPayoutMicros: jsonInteger(item.maxPendingPayoutMicros),
+    ...(item.breakerReason ? { breakerReason: "External money movement is paused for treasury review." } : {}),
+    updatedAt: item.updatedAt.getTime(),
+  };
+}
+
 function externalBinding(payment: DatabaseExternalPaymentSecret): ExternalAuthorizationBinding {
   if (!payment.authorizationExpiresAt || !payment.reverseAfter) {
     throw new Error("unsigned external intent has no authorization binding");
@@ -339,6 +408,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   const policy = new PostgresPolicy(db);
   const marketplace = new PostgresMarketplace(db);
   const external = new PostgresExternal(db);
+  const treasury = new PostgresTreasury(db);
   const clock = options.now ?? Date.now;
   const externalHeaderKey = options.externalHeaderKey ? Buffer.from(options.externalHeaderKey) : undefined;
   if (externalHeaderKey && externalHeaderKey.length !== 32) {
@@ -377,6 +447,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     if (code === "42501") return c.json({ error: "forbidden", reason }, 403);
     if (code === "P0002") return c.json({ error: "not_found", reason }, 404);
     if (code === "22023" || code === "23503") return c.json({ error: "invalid_request", reason }, 400);
+    if (code === "55000") return c.json({ error: "treasury_unavailable", reason }, 503);
     console.error(fallback, error);
     return c.json({ error: fallback, reason: "The request could not be completed." }, 500);
   };
@@ -712,6 +783,11 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     const payment = await external.secret(agentId, externalId);
     if (!payment) throw new Error("prepared external payment is not visible to its agent");
     if (payment.state !== "prepared") return requestExistingExternal(payment);
+    if (!(await treasury.controlState()).externalSpendEnabled) {
+      const error = new Error("treasury external-spend circuit breaker is open") as Error & { code: string };
+      error.code = "55000";
+      throw error;
+    }
     const authorization = await signExternalIntent(payment);
     return external.activate({
       agentId,
@@ -810,14 +886,34 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     return services.map((service) => serviceView(service, providers.get(service.providerId)));
   };
 
+  const treasurySnapshot = async (requesterId: string, includeFunding: boolean) => {
+    const [destinations, routes, payouts, fundings, exposures, controls] = await Promise.all([
+      treasury.destinations(requesterId),
+      includeFunding ? treasury.routes(requesterId) : Promise.resolve([]),
+      treasury.payouts(requesterId, 100),
+      includeFunding ? treasury.fundings(requesterId, 100) : Promise.resolve([]),
+      includeFunding ? treasury.exposures(requesterId, 100) : Promise.resolve([]),
+      treasury.controlState(),
+    ]);
+    return {
+      controls: treasuryControlView(controls),
+      depositRoutes: routes.map(treasuryRouteView),
+      destinations: destinations.map(treasuryDestinationView),
+      payouts: payouts.map(treasuryPayoutView),
+      fundings: fundings.map(treasuryFundingView),
+      exposures: exposures.map(treasuryExposureView),
+    };
+  };
+
   const ownerSnapshot = async (userId: string) => {
-    const [accounts, mandates, approvals, feed, services, externalPayments] = await Promise.all([
+    const [accounts, mandates, approvals, feed, services, externalPayments, treasuryState] = await Promise.all([
       control.accountState(userId),
       policy.listMandates(userId, 100),
       policy.listApprovals(userId, undefined, 100),
       stateFeed(userId, 25),
       servicesView(userId),
       external.list(userId, 100),
+      treasurySnapshot(userId, true),
     ]);
     const renderedApprovals = await approvalViews(userId, approvals.reverse());
     return {
@@ -832,17 +928,19 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       approvals: renderedApprovals,
       feed,
       external: externalPayments.map(externalView),
+      treasury: treasuryState,
     };
   };
 
   const childSnapshot = async (accountId: string, limit = 25) => {
-    const [accounts, mandates, approvals, feed, services, externalPayments] = await Promise.all([
+    const [accounts, mandates, approvals, feed, services, externalPayments, treasuryState] = await Promise.all([
       control.accountState(accountId),
       policy.listMandates(accountId, 100),
       policy.listApprovals(accountId, undefined, 100),
       stateFeed(accountId, limit),
       servicesView(accountId),
       external.list(accountId, Math.min(limit, 100)),
+      treasurySnapshot(accountId, false),
     ]);
     const activeMandate = mandates.find((mandate) => !mandate.revokedAt && mandate.expiresAt.getTime() > Date.now());
     const renderedApprovals = await approvalViews(accountId, approvals.reverse());
@@ -854,6 +952,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       feed,
       services,
       external: externalPayments.map(externalView),
+      treasury: treasuryState,
     };
   };
 
@@ -869,7 +968,9 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
           and to_regprocedure('money_private.activate_external_payment(text,uuid,bytea,bytea,text,timestamptz,timestamptz)') is not null
           and to_regprocedure('money_private.resolve_external_approval_v2(text,uuid,text,text,bytea,bytea,text,timestamptz,timestamptz)') is not null
           and to_regprocedure('money_private.get_unresolved_external_payment_by_resource(text,text)') is not null
-          and to_regprocedure('money_private.confirm_external_payment(text,uuid,text)') is not null as ready
+          and to_regprocedure('money_private.confirm_external_payment(text,uuid,text)') is not null
+          and to_regprocedure('money_private.request_treasury_payout(text,text,uuid,text,bigint)') is not null
+          and to_regprocedure('money_private.treasury_control_state()') is not null as ready
       `);
       return result.rows[0]?.ready
         ? c.json({ ok: true, schemaVersion: result.rows[0].version })
@@ -1318,6 +1419,13 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
         return c.json(view, view.code === "idempotency_conflict" || view.state === "reversed" ? 409 : 402);
       }
 
+      if (!(await treasury.controlState()).externalSpendEnabled) {
+        return c.json({
+          error: "treasury_unavailable",
+          reason: "treasury external-spend circuit breaker is open",
+        }, 503);
+      }
+
       const externalId = randomUUID();
       let result = await external.prepare({
         externalId,
@@ -1481,6 +1589,73 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     return approval ? c.json(approvalView(approval)) : c.json({ error: "approval_not_found" }, 404);
   });
 
+  const requestTreasuryPayout = async (c: Context<ApiEnv>, sourceAccountId: string) => {
+    const body = await readBody<{
+      destinationId: string;
+      amountMicros: number | string;
+      idempotencyKey: string;
+    }>(c);
+    const amount = body ? positiveMicros(body.amountMicros) : undefined;
+    if (!body || !validUuid(body.destinationId) || amount === undefined || amount % 10_000n !== 0n
+      || !validClientKey(body.idempotencyKey)) {
+      return c.json({
+        error: "invalid_request",
+        reason: "need a verified destinationId, positive whole-cent amountMicros, and idempotencyKey",
+      }, 400);
+    }
+    try {
+      const result = await treasury.requestPayout({
+        sourceAccountId, idempotencyKey: body.idempotencyKey,
+        destinationId: body.destinationId, asset: "USD", amountMicros: amount,
+      });
+      if (result.status === "denied") {
+        return c.json({ status: "denied", code: result.code, reason: result.reason, replayed: result.replayed },
+          result.code === "idempotency_conflict" ? 409 : result.code === "insufficient_funds" ? 402 : 422);
+      }
+      const item = result.payoutId ? await treasury.payout(sourceAccountId, result.payoutId) : undefined;
+      if (!item) throw new Error("treasury payout lifecycle row could not be read back");
+      return c.json({ payout: treasuryPayoutView(item), replayed: result.replayed }, 202);
+    } catch (error) {
+      return databaseFailure(c, error, "payout_request_failed");
+    }
+  };
+
+  const cancelTreasuryPayout = async (c: Context<ApiEnv>, sourceAccountId: string) => {
+    const payoutId = c.req.param("id") ?? "";
+    if (!validUuid(payoutId)) return c.json({ error: "payout_not_found" }, 404);
+    try {
+      const result = await treasury.cancelPayout(sourceAccountId, payoutId);
+      if (result.status === "denied") {
+        return c.json({ status: "denied", code: result.code, reason: result.reason, replayed: result.replayed }, 409);
+      }
+      const item = await treasury.payout(sourceAccountId, payoutId);
+      if (!item) throw new Error("cancelled payout lifecycle row could not be read back");
+      return c.json({ payout: treasuryPayoutView(item), replayed: result.replayed });
+    } catch (error) {
+      return databaseFailure(c, error, "payout_cancellation_failed");
+    }
+  };
+
+  app.get("/owner/treasury", requireOwnerAccess, async (c) => {
+    try {
+      return c.json(await treasurySnapshot(c.get("userId"), true));
+    } catch (error) {
+      return databaseFailure(c, error, "treasury_state_failed");
+    }
+  });
+  app.post("/owner/payouts", requireOwnerAccess, (c) => requestTreasuryPayout(c, c.get("userId")));
+  app.post("/owner/payouts/:id/cancel", requireOwnerAccess, (c) => cancelTreasuryPayout(c, c.get("userId")));
+
+  app.get("/provider/treasury", requireProviderSig, async (c) => {
+    try {
+      return c.json(await treasurySnapshot(c.get("providerId"), false));
+    } catch (error) {
+      return databaseFailure(c, error, "treasury_state_failed");
+    }
+  });
+  app.post("/provider/payouts", requireProviderSig, (c) => requestTreasuryPayout(c, c.get("providerId")));
+  app.post("/provider/payouts/:id/cancel", requireProviderSig, (c) => cancelTreasuryPayout(c, c.get("providerId")));
+
   app.get("/provider/state", requireProviderSig, async (c) => c.json(await childSnapshot(c.get("providerId"))));
   app.get("/owner/state", requireOwnerAccess, async (c) => c.json(await ownerSnapshot(c.get("userId"))));
 
@@ -1556,7 +1731,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   });
   app.get("/dashboard/state", requireOwnerAccess, async (c) => c.json(await ownerSnapshot(c.get("userId"))));
 
-  return { app, control, ledger, policy, marketplace, external };
+  return { app, control, ledger, policy, marketplace, external, treasury };
 }
 
 export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) {

@@ -73,6 +73,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0004", applied: false }),
       expect.objectContaining({ version: "0005", applied: false }),
       expect.objectContaining({ version: "0006", applied: false }),
+      expect.objectContaining({ version: "0007", applied: false }),
     ]);
     const rows = await db.query<{ version: string; checksum: string }>("select version, checksum from money.schema_migrations");
     expect(rows.rows).toEqual([
@@ -82,6 +83,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0004", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0005", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0006", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
+      expect.objectContaining({ version: "0007", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
     ]);
     await db.query("update money.schema_migrations set checksum = repeat('0', 64) where version = '0001'");
     await expect(runMigrations(db)).rejects.toThrow(/checksum changed/);
@@ -225,11 +227,24 @@ describe("Postgres ledger kernel", () => {
     expect((await app.request("/health/live")).status).toBe(200);
     const ready = await app.request("/health/ready");
     expect(ready.status).toBe(200);
-    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0006" }));
+    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0007" }));
     expect((await app.request("/ops/reconcile")).status).toBe(404);
+    expect((await app.request("/ops/treasury")).status).toBe(404);
     const reconciled = await app.request("/ops/reconcile", { headers: { authorization: "Bearer ops-secret" } });
     expect(reconciled.status).toBe(200);
-    expect(await reconciled.json()).toEqual({ ok: true, checked: 5, mismatches: [] });
+    expect(await reconciled.json()).toEqual({ ok: true, checked: 6, mismatches: [] });
+    const treasuryHealth = await app.request("/ops/treasury", { headers: { authorization: "Bearer ops-secret" } });
+    expect(treasuryHealth.status).toBe(503);
+    expect(await treasuryHealth.json()).toEqual(expect.objectContaining({
+      ok: false, configured: false, deadEvents: 0, manualPayouts: 0, blockedPayouts: 0,
+      controls: expect.objectContaining({
+        fundingEnabled: false, payoutsEnabled: false, externalSpendEnabled: false,
+        breakerReason: "initial treasury reconciliation and review required",
+      }),
+      recentControlEvents: [],
+      recentEventReviews: [],
+      recentPayoutReviews: [],
+    }));
   });
 
   it("keeps application, treasury, worker, and operations privileges separate", async () => {
@@ -267,6 +282,34 @@ describe("Postgres ledger kernel", () => {
       app_nonces: boolean;
       app_sessions: boolean;
       treasury_fund: boolean;
+      treasury_register: boolean;
+      treasury_controls: boolean;
+      treasury_resolve_review: boolean;
+      treasury_resolve_event: boolean;
+      treasury_restore: boolean;
+      app_treasury_payout: boolean;
+      app_treasury_get: boolean;
+      app_treasury_settle: boolean;
+      app_treasury_table: boolean;
+      treasury_settle: boolean;
+      treasury_payout_claim: boolean;
+      treasury_worker_settle: boolean;
+      treasury_worker_register: boolean;
+      treasury_worker_controls: boolean;
+      treasury_worker_trip: boolean;
+      treasury_worker_resolve_review: boolean;
+      treasury_worker_resolve_event: boolean;
+      treasury_worker_restore: boolean;
+      treasury_worker_table: boolean;
+      ingress_enqueue: boolean;
+      ingress_settle: boolean;
+      ingress_table: boolean;
+      payout_claim: boolean;
+      payout_funding: boolean;
+      payout_table: boolean;
+      reconciler_snapshot: boolean;
+      reconciler_payout: boolean;
+      reconciler_table: boolean;
       worker_outbox: boolean;
       worker_external_sweep: boolean;
       worker_external_table: boolean;
@@ -277,6 +320,11 @@ describe("Postgres ledger kernel", () => {
       ops_ledger: boolean;
       ops_global_health: boolean;
       ops_challenges: boolean;
+      ops_treasury_health: boolean;
+      ops_treasury_table: boolean;
+      ops_treasury_reviews: boolean;
+      ops_control_events: boolean;
+      ops_event_reviews: boolean;
     }>(`
       select
         has_function_privilege('money_app', 'money_private.post_agent_payment(text,text,text,text,bigint,text,jsonb)', 'EXECUTE') as app_pay,
@@ -311,6 +359,34 @@ describe("Postgres ledger kernel", () => {
         has_table_privilege('money_app', 'money.signed_request_nonces', 'SELECT') as app_nonces,
         has_table_privilege('money_app', 'money.owner_sessions', 'SELECT') as app_sessions,
         has_function_privilege('money_treasury', 'money_private.post_confirmed_funding(text,text,text,bigint,jsonb)', 'EXECUTE') as treasury_fund,
+        has_function_privilege('money_treasury', 'money_private.register_treasury_deposit_route(text,text,text,text)', 'EXECUTE') as treasury_register,
+        has_function_privilege('money_treasury', 'money_private.configure_treasury_controls(boolean,boolean,boolean,bigint,bigint,bigint,bigint,text)', 'EXECUTE') as treasury_controls,
+        has_function_privilege('money_treasury', 'money_private.resolve_treasury_payout_review(uuid,text,text,text,text)', 'EXECUTE') as treasury_resolve_review,
+        has_function_privilege('money_treasury', 'money_private.resolve_treasury_event_review(bigint,text,text,text)', 'EXECUTE') as treasury_resolve_event,
+        has_function_privilege('money_treasury', 'money_private.restore_treasury_controls(text)', 'EXECUTE') as treasury_restore,
+        has_function_privilege('money_app', 'money_private.request_treasury_payout(text,text,uuid,text,bigint)', 'EXECUTE') as app_treasury_payout,
+        has_function_privilege('money_app', 'money_private.get_treasury_payout(text,uuid)', 'EXECUTE') as app_treasury_get,
+        has_function_privilege('money_app', 'money_private.settle_treasury_funding(text,text,text,text,text,text,bigint,timestamptz,bytea,jsonb)', 'EXECUTE') as app_treasury_settle,
+        has_table_privilege('money_app', 'money.treasury_payouts', 'SELECT') as app_treasury_table,
+        has_function_privilege('money_treasury', 'money_private.settle_treasury_funding(text,text,text,text,text,text,bigint,timestamptz,bytea,jsonb)', 'EXECUTE') as treasury_settle,
+        has_function_privilege('money_treasury', 'money_private.claim_treasury_payouts(text,integer)', 'EXECUTE') as treasury_payout_claim,
+        has_function_privilege('money_treasury_worker', 'money_private.settle_treasury_funding(text,text,text,text,text,text,bigint,timestamptz,bytea,jsonb)', 'EXECUTE') as treasury_worker_settle,
+        has_function_privilege('money_treasury_worker', 'money_private.register_treasury_deposit_route(text,text,text,text)', 'EXECUTE') as treasury_worker_register,
+        has_function_privilege('money_treasury_worker', 'money_private.configure_treasury_controls(boolean,boolean,boolean,bigint,bigint,bigint,bigint,text)', 'EXECUTE') as treasury_worker_controls,
+        has_function_privilege('money_treasury_worker', 'money_private.trip_treasury_breaker(text)', 'EXECUTE') as treasury_worker_trip,
+        has_function_privilege('money_treasury_worker', 'money_private.resolve_treasury_payout_review(uuid,text,text,text,text)', 'EXECUTE') as treasury_worker_resolve_review,
+        has_function_privilege('money_treasury_worker', 'money_private.resolve_treasury_event_review(bigint,text,text,text)', 'EXECUTE') as treasury_worker_resolve_event,
+        has_function_privilege('money_treasury_worker', 'money_private.restore_treasury_controls(text)', 'EXECUTE') as treasury_worker_restore,
+        has_table_privilege('money_treasury_worker', 'money.treasury_event_inbox', 'SELECT') as treasury_worker_table,
+        has_function_privilege('money_treasury_ingress', 'money_private.enqueue_treasury_provider_event(text,text,text,bytea)', 'EXECUTE') as ingress_enqueue,
+        has_function_privilege('money_treasury_ingress', 'money_private.settle_treasury_funding(text,text,text,text,text,text,bigint,timestamptz,bytea,jsonb)', 'EXECUTE') as ingress_settle,
+        has_table_privilege('money_treasury_ingress', 'money.treasury_event_inbox', 'SELECT') as ingress_table,
+        has_function_privilege('money_payout_worker', 'money_private.claim_treasury_payouts(text,integer)', 'EXECUTE') as payout_claim,
+        has_function_privilege('money_payout_worker', 'money_private.settle_treasury_funding(text,text,text,text,text,text,bigint,timestamptz,bytea,jsonb)', 'EXECUTE') as payout_funding,
+        has_table_privilege('money_payout_worker', 'money.treasury_payouts', 'SELECT') as payout_table,
+        has_function_privilege('money_reconciler', 'money_private.record_treasury_asset_snapshot(text,text,text,bigint,bigint,bigint,bigint,bigint,text,timestamptz)', 'EXECUTE') as reconciler_snapshot,
+        has_function_privilege('money_reconciler', 'money_private.request_treasury_payout(text,text,uuid,text,bigint)', 'EXECUTE') as reconciler_payout,
+        has_table_privilege('money_reconciler', 'money.treasury_asset_snapshots', 'SELECT') as reconciler_table,
         has_table_privilege('money_worker', 'money.outbox_events', 'UPDATE') as worker_outbox,
         has_function_privilege('money_worker', 'money_private.sweep_external_payments(integer)', 'EXECUTE') as worker_external_sweep,
         has_table_privilege('money_worker', 'money.external_payments', 'SELECT') as worker_external_table,
@@ -320,7 +396,12 @@ describe("Postgres ledger kernel", () => {
         has_table_privilege('money_key_rotation', 'money.external_payments', 'SELECT') as key_rotation_table,
         has_table_privilege('money_ops', 'money.ledger_entries', 'SELECT') as ops_ledger,
         has_function_privilege('money_ops', 'money_private.ledger_health()', 'EXECUTE') as ops_global_health,
-        has_table_privilege('money_ops', 'money.challenges', 'SELECT') as ops_challenges
+        has_table_privilege('money_ops', 'money.challenges', 'SELECT') as ops_challenges,
+        has_function_privilege('money_ops', 'money_private.treasury_health()', 'EXECUTE') as ops_treasury_health,
+        has_table_privilege('money_ops', 'money.treasury_payouts', 'SELECT') as ops_treasury_table,
+        has_table_privilege('money_ops', 'money.treasury_payout_reviews', 'SELECT') as ops_treasury_reviews,
+        has_table_privilege('money_ops', 'money.treasury_control_events', 'SELECT') as ops_control_events,
+        has_table_privilege('money_ops', 'money.treasury_event_reviews', 'SELECT') as ops_event_reviews
     `);
     expect(privileges.rows[0]).toEqual({
       app_pay: false,
@@ -354,7 +435,35 @@ describe("Postgres ledger kernel", () => {
       app_mandates: false,
       app_nonces: false,
       app_sessions: false,
-      treasury_fund: true,
+      treasury_fund: false,
+      treasury_register: true,
+      treasury_controls: true,
+      treasury_resolve_review: true,
+      treasury_resolve_event: true,
+      treasury_restore: true,
+      app_treasury_payout: true,
+      app_treasury_get: true,
+      app_treasury_settle: false,
+      app_treasury_table: false,
+      treasury_settle: false,
+      treasury_payout_claim: false,
+      treasury_worker_settle: true,
+      treasury_worker_register: false,
+      treasury_worker_controls: false,
+      treasury_worker_trip: true,
+      treasury_worker_resolve_review: false,
+      treasury_worker_resolve_event: false,
+      treasury_worker_restore: false,
+      treasury_worker_table: false,
+      ingress_enqueue: true,
+      ingress_settle: false,
+      ingress_table: false,
+      payout_claim: true,
+      payout_funding: false,
+      payout_table: false,
+      reconciler_snapshot: true,
+      reconciler_payout: false,
+      reconciler_table: false,
       worker_outbox: true,
       worker_external_sweep: true,
       worker_external_table: false,
@@ -365,6 +474,11 @@ describe("Postgres ledger kernel", () => {
       ops_ledger: true,
       ops_global_health: true,
       ops_challenges: true,
+      ops_treasury_health: true,
+      ops_treasury_table: true,
+      ops_treasury_reviews: true,
+      ops_control_events: true,
+      ops_event_reviews: true,
     });
   });
 
@@ -383,7 +497,7 @@ describe("Postgres ledger kernel", () => {
       );
       expect((await db.query("select * from money_private.account_state('usr_role0001', 'USD')")).rows).toHaveLength(1);
       expect((await db.query("select * from money_private.list_public_services(10, null, null)")).rows).toEqual([]);
-      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0006" });
+      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0007" });
       await expect(db.query(
         "select * from money_private.register_account('usr_bypass01', 'user', 'Bypass', null, null, $1)",
         [`bypass-public-key-${"x".repeat(40)}`]

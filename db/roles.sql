@@ -13,11 +13,23 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'money_treasury') then
     create role money_treasury nologin;
   end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_treasury_worker') then
+    create role money_treasury_worker nologin;
+  end if;
   if not exists (select 1 from pg_roles where rolname = 'money_ops') then
     create role money_ops nologin;
   end if;
   if not exists (select 1 from pg_roles where rolname = 'money_key_rotation') then
     create role money_key_rotation nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_treasury_ingress') then
+    create role money_treasury_ingress nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_payout_worker') then
+    create role money_payout_worker nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_reconciler') then
+    create role money_reconciler nologin;
   end if;
 end $$;
 
@@ -26,6 +38,19 @@ revoke all on schema money from public;
 revoke all on schema money_private from public;
 revoke all on all tables in schema money from public;
 revoke all on all functions in schema money_private from public;
+
+-- Converge privileges when this file is reapplied. Without these revokes, a
+-- role split can leave an old login holding authority that no longer appears
+-- in the current grant list.
+revoke all on schema money, money_private from
+  money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
+  money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler;
+revoke all on all tables in schema money from
+  money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
+  money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler;
+revoke all on all functions in schema money_private from
+  money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
+  money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler;
 
 grant usage on schema money, money_private to money_app;
 grant select on money.schema_migrations, money.accounts, money.assets, money.services to money_app;
@@ -77,11 +102,76 @@ grant execute on function money_private.get_mandate(text, uuid),
   money_private.list_approvals(text, text, integer),
   money_private.list_mandates(text, integer)
   to money_app;
+grant execute on function
+  money_private.request_treasury_payout(text,text,uuid,text,bigint),
+  money_private.cancel_treasury_payout(text,uuid),
+  money_private.list_treasury_destinations(text),
+  money_private.list_treasury_deposit_routes(text),
+  money_private.list_treasury_payouts(text,integer),
+  money_private.get_treasury_payout(text,uuid),
+  money_private.list_treasury_fundings(text,integer),
+  money_private.list_treasury_exposures(text,integer),
+  money_private.treasury_control_state()
+  to money_app;
 
-grant usage on schema money, money_private to money_treasury;
-grant select on money.accounts, money.assets, money.balances to money_treasury;
-grant execute on function money_private.post_confirmed_funding(text, text, text, bigint, jsonb)
+-- Treasury administration registers provider-owned references and controls
+-- breakers. It has no provider-event settlement authority.
+grant usage on schema money_private to money_treasury;
+grant execute on function
+  money_private.register_treasury_deposit_route(text,text,text,text),
+  money_private.register_treasury_destination(text,text,text,text),
+  money_private.set_treasury_destination_status(text,uuid,text),
+  money_private.register_treasury_asset_account(text,text,text,text),
+  money_private.resolve_treasury_event_review(bigint,text,text,text),
+  money_private.resolve_treasury_payout_review(uuid,text,text,text,text),
+  money_private.configure_treasury_controls(boolean,boolean,boolean,bigint,bigint,bigint,bigint,text),
+  money_private.restore_treasury_controls(text),
+  money_private.release_treasury_freeze(text,text),
+  money_private.treasury_control_state(),
+  money_private.treasury_health()
   to money_treasury;
+
+-- Authenticated provider-event processing may settle exact evidence fetched
+-- from Column, but cannot register a route, release a freeze, or reopen a
+-- circuit breaker.
+grant usage on schema money_private to money_treasury_worker;
+grant execute on function
+  money_private.enqueue_treasury_provider_event(text,text,text,bytea),
+  money_private.claim_treasury_provider_events(text,integer),
+  money_private.complete_treasury_provider_event(text,bigint,text),
+  money_private.fail_treasury_provider_event(text,bigint,text,integer,boolean),
+  money_private.get_treasury_poll_cursor(text),
+  money_private.set_treasury_poll_cursor(text,timestamptz),
+  money_private.settle_treasury_funding(text,text,text,text,text,text,bigint,timestamptz,bytea,jsonb),
+  money_private.return_treasury_funding(text,text,text,text,text,bigint,text,timestamptz,bytea,jsonb),
+  money_private.transition_treasury_payout(text,text,text,text,text,text,bigint,timestamptz,bytea,jsonb),
+  money_private.trip_treasury_breaker(text)
+  to money_treasury_worker;
+
+-- Public webhook process: HMAC verification plus durable enqueue only. It
+-- cannot read a destination, balance, provider payload, or move one micro.
+grant usage on schema money_private to money_treasury_ingress;
+grant execute on function money_private.enqueue_treasury_provider_event(text,text,text,bytea)
+  to money_treasury_ingress;
+
+-- Outbound provider credential is isolated from webhook/funding authority.
+grant usage on schema money_private to money_payout_worker;
+grant execute on function
+  money_private.claim_treasury_payouts(text,integer),
+  money_private.release_treasury_payout_claim(text,uuid,text,integer),
+  money_private.fail_treasury_payout_submission(text,uuid,text),
+  money_private.mark_treasury_payout_manual_review(text,uuid,text,text),
+  money_private.record_treasury_payout_submission(text,uuid,text,text)
+  to money_payout_worker;
+
+-- Read-only provider balance polling can persist observations and trip, but
+-- never reopen, a circuit breaker.
+grant usage on schema money_private to money_reconciler;
+grant execute on function
+  money_private.record_treasury_asset_snapshot(text,text,text,bigint,bigint,bigint,bigint,bigint,text,timestamptz),
+  money_private.treasury_health(),
+  money_private.trip_treasury_breaker(text)
+  to money_reconciler;
 
 grant usage on schema money, money_private to money_worker;
 grant select, update on money.outbox_events to money_worker;
@@ -101,6 +191,12 @@ grant select on money.schema_migrations, money.accounts, money.assets,
   money.balances, money.transfers, money.ledger_entries, money.receipts,
   money.mandates, money.approvals, money.transfer_authorizations,
   money.services, money.challenges, money.external_payments,
-  money.signed_request_nonces, money.owner_sessions
+  money.signed_request_nonces, money.owner_sessions,
+  money.treasury_controls, money.treasury_control_events, money.treasury_deposit_routes,
+  money.treasury_destinations, money.treasury_event_inbox, money.treasury_event_reviews,
+  money.treasury_provider_events, money.treasury_fundings,
+  money.treasury_exposures, money.treasury_freezes,
+  money.treasury_payouts, money.treasury_payout_reviews, money.treasury_asset_accounts,
+  money.treasury_asset_snapshots, money.treasury_poll_cursors
   to money_ops;
-grant execute on function money_private.ledger_health() to money_ops;
+grant execute on function money_private.ledger_health(), money_private.treasury_health() to money_ops;

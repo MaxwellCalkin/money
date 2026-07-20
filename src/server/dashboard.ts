@@ -65,10 +65,13 @@ export const dashboardHtml = `<!doctype html>
   .status.approved { color:var(--green); background:#143425; }
   .status.rejected,.status.failed,.status.expired { color:#ffaaaa; background:#351b1b; }
   .caps { padding:9px 15px 13px; color:var(--dim); font:11px/1.6 var(--mono); border-top:1px dashed var(--border); }
+  .payout-form { display:grid; grid-template-columns:minmax(0,1fr) 110px auto; gap:8px; padding:13px 15px; border-top:1px solid var(--border); }
+  .payout-form select,.payout-form input { min-width:0; padding:9px 10px; border:1px solid var(--border); border-radius:8px; color:var(--text); background:#09130f; }
+  .treasury-alert { padding:11px 15px; color:var(--red); background:#2a1818; border-top:1px solid #693d3d; }
   .hidden { display:none !important; }
   .error { margin-top:12px; color:var(--red); }
   @media (max-width:850px) { .summary { grid-template-columns:repeat(2,1fr); } .grid { grid-template-columns:1fr; } }
-  @media (max-width:520px) { header,main { padding-left:14px; padding-right:14px; } .summary { grid-template-columns:1fr 1fr; } .token-row { flex-direction:column; } }
+  @media (max-width:520px) { header,main { padding-left:14px; padding-right:14px; } .summary { grid-template-columns:1fr 1fr; } .token-row { flex-direction:column; } .payout-form { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
@@ -98,6 +101,7 @@ export const dashboardHtml = `<!doctype html>
       </div>
       <div class="stack">
         <section><div class="section-head"><h2>Balances</h2></div><div id="accounts" class="panel"></div></section>
+        <section><div class="section-head"><h2>Treasury & payouts</h2><span id="treasuryStatus" class="count"></span></div><div class="panel"><div id="treasuryControls" class="caps"></div><div id="payoutForm" class="payout-form"><select id="payoutDestination" aria-label="Payout destination"></select><input id="payoutAmount" inputmode="decimal" placeholder="Amount (USD)"><button id="requestPayout" class="primary">Cash out</button></div><div id="payoutError" class="treasury-alert hidden"></div><div id="treasury"></div></div></section>
         <section><div class="section-head"><h2>Mandates</h2></div><div id="mandates" class="panel"></div></section>
         <section><div class="section-head"><h2>Your services</h2></div><div id="services" class="panel"></div></section>
       </div>
@@ -137,6 +141,34 @@ export const dashboardHtml = `<!doctype html>
     finally { busy=false; await state(); }
   }
 
+  const dollarsToMicros = (value) => {
+    const match=/^(0|[1-9][0-9]*)(?:\.([0-9]{1,2}))?$/.exec(value.trim());
+    if(!match)return null;
+    return (BigInt(match[1])*1000000n+BigInt((match[2]||"").padEnd(2,"0")||"0")*10000n).toString();
+  };
+
+  const payoutAttemptKey="money_payout_attempt";
+  const readPayoutAttempt=()=>{try{return JSON.parse(sessionStorage.getItem(payoutAttemptKey)||"null");}catch{return null;}};
+  const clearPayoutAttempt=()=>sessionStorage.removeItem(payoutAttemptKey);
+
+  async function payout() {
+    const amountMicros=dollarsToMicros($("payoutAmount").value); const destinationId=$("payoutDestination").value;
+    if(!amountMicros||amountMicros==="0"||!destinationId){$("payoutError").textContent="Choose a verified destination and enter a positive amount with at most two decimals.";$("payoutError").classList.remove("hidden");return;}
+    const terms=destinationId+"|"+amountMicros; let attempt=readPayoutAttempt();
+    if(!attempt||attempt.terms!==terms||typeof attempt.key!=="string"){attempt={terms,key:"dashboard-"+crypto.randomUUID()};sessionStorage.setItem(payoutAttemptKey,JSON.stringify(attempt));}
+    busy=true; $("requestPayout").disabled=true; $("payoutError").classList.add("hidden");
+    try { const res=await fetch("/owner/payouts",{method:"POST",headers:{...auth(),"content-type":"application/json"},body:JSON.stringify({destinationId,amountMicros,idempotencyKey:attempt.key})}); const body=await res.json(); clearPayoutAttempt(); if(!res.ok)throw new Error(body.reason||"Payout could not be requested"); $("payoutAmount").value=""; }
+    catch(err){$("payoutError").textContent=err.message||"Payout could not be requested";$("payoutError").classList.remove("hidden");}
+    finally {busy=false;$("requestPayout").disabled=false;await state();}
+  }
+
+  async function cancelPayout(id) {
+    busy=true;
+    try { const res=await fetch("/owner/payouts/"+encodeURIComponent(id)+"/cancel",{method:"POST",headers:{...auth(),"content-type":"application/json"},body:"{}"}); if(!res.ok)throw new Error("Payout can no longer be cancelled"); }
+    catch(err){$("payoutError").textContent=err.message;$("payoutError").classList.remove("hidden");}
+    finally {busy=false;await state();}
+  }
+
   function render(s) {
     const agents=s.accounts.filter((a)=>a.kind==="agent"); const pending=s.approvals.filter((a)=>a.status==="pending");
     $("totalBalance").textContent=fmt(s.accounts.reduce((n,a)=>a.kind==="external"?n:n+a.balanceMicros,0));
@@ -147,13 +179,24 @@ export const dashboardHtml = `<!doctype html>
     $("feedCount").textContent=s.feed.length+" receipts";
     $("feed").innerHTML=[...s.feed].reverse().map((r)=>{ const mine=s.accounts.some((a)=>a.id===r.from),other=mine?r.toAccount:r.fromAccount; return '<div class="row"><div class="name">'+esc(r.memo||"Payment")+'<div class="meta">'+esc(mine?"to "+display(other):"from "+display(other))+' · '+new Date(r.ts).toLocaleString()+'</div></div><div class="amount '+(mine?"out":"in")+'">'+(mine?"−":"+")+fmt(r.amount)+'</div></div>'; }).join("")||'<div class="empty">No payments yet</div>';
     $("accounts").innerHTML=s.accounts.map((a)=>'<div class="row"><div class="name"><span class="kind">'+esc(a.kind)+'</span>'+esc(display(a))+'<div class="meta">'+esc(a.id)+'</div></div><div class="amount">'+fmt(a.balanceMicros)+'</div></div>').join("")||'<div class="empty">No accounts</div>';
+    const t=s.treasury||{controls:{},destinations:[],payouts:[],fundings:[],exposures:[]}; const controls=t.controls||{}; const open=t.exposures.filter((e)=>e.state==="open");
+    const treasuryOk=controls.fundingEnabled&&controls.payoutsEnabled&&controls.externalSpendEnabled&&!open.length;
+    $("treasuryStatus").textContent=treasuryOk?"rails available":"attention required";
+    $("treasuryControls").innerHTML=treasuryOk?'Funding, payouts, and external agent spend are available.':esc(controls.breakerReason||("Open return exposure: "+open.map((e)=>fmt(e.amountMicros-e.recoveredMicros)).join(", ")));
+    const verified=t.destinations.filter((d)=>d.status==="verified"); const optionKey=verified.map((d)=>d.id).join(","); if($("payoutDestination").dataset.key!==optionKey){$("payoutDestination").innerHTML=verified.map((d)=>'<option value="'+esc(d.id)+'">'+esc(d.label)+" ("+esc(d.provider)+")</option>").join("");$("payoutDestination").dataset.key=optionKey;}
+    $("payoutForm").classList.toggle("hidden",!controls.payoutsEnabled||!verified.length);
+    const payoutRows=t.payouts.map((p)=>'<div class="row"><div class="name">Payout to '+esc(t.destinations.find((d)=>d.id===p.destinationId)?.label||p.provider)+'<div class="meta">'+esc(p.state)+' · '+new Date(p.requestedAt).toLocaleString()+'</div></div><div><div class="amount out">−'+fmt(p.amountMicros)+'</div>'+(p.state==="queued"?'<button data-cancel-payout="'+esc(p.id)+'">Cancel</button>':"")+'</div></div>');
+    const fundingRows=t.fundings.map((f)=>'<div class="row"><div class="name">'+(f.state==="returned"?"Returned funding":"Bank funding")+'<div class="meta">'+esc(f.provider)+' · '+new Date(f.settledAt).toLocaleString()+'</div></div><div class="amount '+(f.state==="returned"?"out":"in")+'">'+(f.state==="returned"?"−":"+")+fmt(f.amountMicros)+'</div></div>');
+    $("treasury").innerHTML=[...payoutRows,...fundingRows].join("")||'<div class="empty">No bank activity yet</div>';
+    document.querySelectorAll("button[data-cancel-payout]").forEach((b)=>b.addEventListener("click",()=>cancelPayout(b.dataset.cancelPayout)));
     $("mandates").innerHTML=s.mandates.map((m)=>'<div><div class="row"><div class="name">'+esc(display(profile(s,m.agentId)))+'<div class="meta">'+(m.revoked?"revoked":"active")+'</div></div><div class="amount">'+fmt(m.spent)+' / '+fmt(m.budget)+'</div></div><div class="caps">per payment '+fmt(m.perTxCap)+' · daily '+fmt(m.dailyCap)+' · ask above '+fmt(m.escalateAbove)+'</div></div>').join("")||'<div class="empty">No mandates</div>';
     $("services").innerHTML=s.services.map((svc)=>'<div class="row"><div class="name">'+esc(svc.address||svc.name)+'<div class="meta">'+esc(svc.endpointUrl)+'</div></div><div class="amount">'+fmt(svc.priceMicros)+'</div></div>').join("")||'<div class="empty">No services</div>';
   }
 
-  $("connect").addEventListener("click",()=>{ token=$("tokenInput").value.trim(); if(!token)return; sessionStorage.setItem("money_owner_token",token); state(); });
+  $("connect").addEventListener("click",()=>{ token=$("tokenInput").value.trim(); if(!token)return; clearPayoutAttempt(); sessionStorage.setItem("money_owner_token",token); state(); });
+  $("requestPayout").addEventListener("click",payout);
   $("tokenInput").addEventListener("keydown",(e)=>{if(e.key==="Enter")$("connect").click();});
-  $("logout").addEventListener("click",async()=>{ try{await fetch("/owner/sessions/current",{method:"DELETE",headers:auth()});}catch{} sessionStorage.removeItem("money_owner_token");token="";showLogin(); });
+  $("logout").addEventListener("click",async()=>{ try{await fetch("/owner/sessions/current",{method:"DELETE",headers:auth()});}catch{} clearPayoutAttempt(); sessionStorage.removeItem("money_owner_token");token="";showLogin(); });
   if(token) state(); else showLogin(); setInterval(state,1500);
 })();
 </script>
