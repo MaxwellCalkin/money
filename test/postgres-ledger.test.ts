@@ -72,6 +72,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0003", applied: false }),
       expect.objectContaining({ version: "0004", applied: false }),
       expect.objectContaining({ version: "0005", applied: false }),
+      expect.objectContaining({ version: "0006", applied: false }),
     ]);
     const rows = await db.query<{ version: string; checksum: string }>("select version, checksum from money.schema_migrations");
     expect(rows.rows).toEqual([
@@ -80,6 +81,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0003", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0004", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0005", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
+      expect.objectContaining({ version: "0006", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
     ]);
     await db.query("update money.schema_migrations set checksum = repeat('0', 64) where version = '0001'");
     await expect(runMigrations(db)).rejects.toThrow(/checksum changed/);
@@ -223,7 +225,7 @@ describe("Postgres ledger kernel", () => {
     expect((await app.request("/health/live")).status).toBe(200);
     const ready = await app.request("/health/ready");
     expect(ready.status).toBe(200);
-    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0005" }));
+    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0006" }));
     expect((await app.request("/ops/reconcile")).status).toBe(404);
     const reconciled = await app.request("/ops/reconcile", { headers: { authorization: "Bearer ops-secret" } });
     expect(reconciled.status).toBe(200);
@@ -247,9 +249,13 @@ describe("Postgres ledger kernel", () => {
       app_market_refund: boolean;
       app_market_kernel: boolean;
       app_challenges: boolean;
-      app_external_request: boolean;
+      app_external_prepare: boolean;
+      app_external_activate: boolean;
+      app_external_resolve: boolean;
+      app_external_rotate: boolean;
       app_external_confirm: boolean;
       app_external_secret: boolean;
+      app_external_lookup: boolean;
       app_external_reverse: boolean;
       app_external_sweep: boolean;
       app_external_table: boolean;
@@ -265,6 +271,9 @@ describe("Postgres ledger kernel", () => {
       worker_external_sweep: boolean;
       worker_external_table: boolean;
       worker_ledger: boolean;
+      key_rotation_list: boolean;
+      key_rotation_reencrypt: boolean;
+      key_rotation_table: boolean;
       ops_ledger: boolean;
       ops_global_health: boolean;
       ops_challenges: boolean;
@@ -284,9 +293,13 @@ describe("Postgres ledger kernel", () => {
         has_function_privilege('money_app', 'money_private.issue_refund(text,uuid,bigint,text,text)', 'EXECUTE') as app_market_refund,
         has_function_privilege('money_app', 'money_private.post_transfer_kernel(text,text,text,text,text,text,bigint,text,jsonb,uuid)', 'EXECUTE') as app_market_kernel,
         has_table_privilege('money_app', 'money.challenges', 'SELECT') as app_challenges,
-        has_function_privilege('money_app', 'money_private.request_external_payment(uuid,text,text,text,text,text,text,text,text,bigint,bytea,bytea,timestamptz,timestamptz)', 'EXECUTE') as app_external_request,
+        has_function_privilege('money_app', 'money_private.prepare_external_payment(uuid,text,text,text,text,text,text,text,text,bigint,smallint,jsonb)', 'EXECUTE') as app_external_prepare,
+        has_function_privilege('money_app', 'money_private.activate_external_payment(text,uuid,bytea,bytea,text,timestamptz,timestamptz)', 'EXECUTE') as app_external_activate,
+        has_function_privilege('money_app', 'money_private.resolve_external_approval_v2(text,uuid,text,text,bytea,bytea,text,timestamptz,timestamptz)', 'EXECUTE') as app_external_resolve,
+        has_function_privilege('money_app', 'money_private.replace_external_authorization_ciphertext(uuid,bytea,bytea,text)', 'EXECUTE') as app_external_rotate,
         has_function_privilege('money_app', 'money_private.confirm_external_payment(text,uuid,text)', 'EXECUTE') as app_external_confirm,
         has_function_privilege('money_app', 'money_private.get_external_payment_secret(text,uuid)', 'EXECUTE') as app_external_secret,
+        has_function_privilege('money_app', 'money_private.get_unresolved_external_payment_by_resource(text,text)', 'EXECUTE') as app_external_lookup,
         has_function_privilege('money_app', 'money_private.reverse_external_payment(uuid)', 'EXECUTE') as app_external_reverse,
         has_function_privilege('money_app', 'money_private.sweep_external_payments(integer)', 'EXECUTE') as app_external_sweep,
         has_table_privilege('money_app', 'money.external_payments', 'SELECT') as app_external_table,
@@ -302,6 +315,9 @@ describe("Postgres ledger kernel", () => {
         has_function_privilege('money_worker', 'money_private.sweep_external_payments(integer)', 'EXECUTE') as worker_external_sweep,
         has_table_privilege('money_worker', 'money.external_payments', 'SELECT') as worker_external_table,
         has_table_privilege('money_worker', 'money.ledger_entries', 'SELECT') as worker_ledger,
+        has_function_privilege('money_key_rotation', 'money_private.list_external_authorizations_for_rotation(text,integer)', 'EXECUTE') as key_rotation_list,
+        has_function_privilege('money_key_rotation', 'money_private.replace_external_authorization_ciphertext(uuid,bytea,bytea,text)', 'EXECUTE') as key_rotation_reencrypt,
+        has_table_privilege('money_key_rotation', 'money.external_payments', 'SELECT') as key_rotation_table,
         has_table_privilege('money_ops', 'money.ledger_entries', 'SELECT') as ops_ledger,
         has_function_privilege('money_ops', 'money_private.ledger_health()', 'EXECUTE') as ops_global_health,
         has_table_privilege('money_ops', 'money.challenges', 'SELECT') as ops_challenges
@@ -321,9 +337,13 @@ describe("Postgres ledger kernel", () => {
       app_market_refund: true,
       app_market_kernel: false,
       app_challenges: false,
-      app_external_request: true,
+      app_external_prepare: true,
+      app_external_activate: true,
+      app_external_resolve: true,
+      app_external_rotate: false,
       app_external_confirm: true,
       app_external_secret: true,
+      app_external_lookup: true,
       app_external_reverse: false,
       app_external_sweep: false,
       app_external_table: false,
@@ -339,6 +359,9 @@ describe("Postgres ledger kernel", () => {
       worker_external_sweep: true,
       worker_external_table: false,
       worker_ledger: false,
+      key_rotation_list: true,
+      key_rotation_reencrypt: true,
+      key_rotation_table: false,
       ops_ledger: true,
       ops_global_health: true,
       ops_challenges: true,
@@ -360,7 +383,7 @@ describe("Postgres ledger kernel", () => {
       );
       expect((await db.query("select * from money_private.account_state('usr_role0001', 'USD')")).rows).toHaveLength(1);
       expect((await db.query("select * from money_private.list_public_services(10, null, null)")).rows).toEqual([]);
-      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0005" });
+      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0006" });
       await expect(db.query(
         "select * from money_private.register_account('usr_bypass01', 'user', 'Bypass', null, null, $1)",
         [`bypass-public-key-${"x".repeat(40)}`]

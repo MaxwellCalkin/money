@@ -1,9 +1,12 @@
 import { randomBytes } from "node:crypto";
+import { declarePaymentIdentifierExtension, PAYMENT_IDENTIFIER } from "@x402/extensions/payment-identifier";
 import { PGlite, type PGliteInterface, type Transaction } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createMockX402Server } from "../src/bridge/mock-x402.ts";
+import { LocalEvmSigner } from "../src/bridge/evm-wallet.ts";
 import { encodeSettlement, type Eip3009Authorization, type PaymentRequirements } from "../src/bridge/x402.ts";
+import { X402V2EvmPaymentSigner, decodedV2Payment } from "../src/bridge/x402-v2.ts";
 import { MockWallet, type ExternalWallet, type SigningDomain } from "../src/bridge/wallet.ts";
 import { generateAgentKeypair, signedHeaders } from "../src/core/identity.ts";
 import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/database.ts";
@@ -68,6 +71,7 @@ function signedRequest(
 }
 
 const MOCK_ASSET = "0x00000000000000000000000000000000000c0ffe";
+const BASE_SEPOLIA_USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 const PAY_TO = "0x209693bc6afc0c5328ba36faf03c514ef312287c";
 const URL = "https://data.example.com/external/report";
 
@@ -114,7 +118,7 @@ describe("Postgres signed external-payment API", () => {
       externalHeaderKey: randomBytes(32),
       verifyExternalSettlement: ({ payment, authorization, settlement }) => {
         verifierCalls += 1;
-        const auth = authorization.payload.authorization;
+        const auth = authorization.authorization;
         return {
           ok: verifierAccepts
             && settlement.transaction.startsWith("0xmock")
@@ -173,7 +177,7 @@ describe("Postgres signed external-payment API", () => {
   }
 
   it("pays a protocol-shaped seller, stores only ciphertext, verifies settlement, and replays without resigning", async () => {
-    const { user, ownerKeys, agent, agentKeys } = await world();
+    const { user, ownerKeys, agent, agentKeys, otherAgent, otherAgentKeys } = await world();
     const seller = createMockX402Server({
       payTo: PAY_TO,
       asset: MOCK_ASSET,
@@ -199,6 +203,18 @@ describe("Postgres signed external-payment API", () => {
     }));
     expect(signatures).toBe(1);
 
+    const lookupPath = `/pay-external/unresolved?resource=${encodeURIComponent(URL)}`;
+    const lookup = await signedRequest(
+      api.app, lookupPath, "GET", undefined,
+      agent.id, agentKeys.privateKey, "x-agent-id"
+    );
+    expect(lookup.status).toBe(200);
+    expect(await lookup.json()).toEqual(expect.objectContaining({ externalId: paid.externalId, state: "pending" }));
+    expect((await signedRequest(
+      api.app, lookupPath, "GET", undefined,
+      otherAgent.id, otherAgentKeys.privateKey, "x-agent-id"
+    )).status).toBe(404);
+
     const stored = await db.query<{ payment_header_ciphertext: Uint8Array; authorization_hash: Uint8Array }>(
       "select payment_header_ciphertext, authorization_hash from money.external_payments where id = $1::uuid",
       [paid.externalId]
@@ -207,6 +223,16 @@ describe("Postgres signed external-payment API", () => {
     expect(ciphertext.equals(Buffer.from(paid.paymentHeader, "utf8"))).toBe(false);
     expect(ciphertext.includes(Buffer.from(paid.paymentHeader, "utf8"))).toBe(false);
     expect(Buffer.from(stored.rows[0]!.authorization_hash).toString("hex")).toMatch(/^[0-9a-f]{64}$/);
+
+    const resumedById = await signedRequest(
+      api.app, `/pay-external/${paid.externalId}/resume`, "POST", {},
+      agent.id, agentKeys.privateKey, "x-agent-id"
+    );
+    expect(resumedById.status).toBe(200);
+    expect(await resumedById.json()).toEqual(expect.objectContaining({
+      externalId: paid.externalId, paymentHeader: paid.paymentHeader, replayed: true,
+    }));
+    expect(signatures).toBe(1);
 
     const replayResponse = await signedRequest(api.app, "/pay-external", "POST", body, agent.id, agentKeys.privateKey, "x-agent-id");
     expect(replayResponse.status).toBe(200);
@@ -227,6 +253,10 @@ describe("Postgres signed external-payment API", () => {
     const confirmed = await confirmedResponse.json() as any;
     expect(confirmed).toEqual(expect.objectContaining({ ok: true, state: "confirmed", settledTx: expect.stringMatching(/^0xmock/) }));
     expect(verifierCalls).toBe(1);
+    expect((await signedRequest(
+      api.app, lookupPath, "GET", undefined,
+      agent.id, agentKeys.privateKey, "x-agent-id"
+    )).status).toBe(404);
 
     const confirmedReplay = await signedRequest(
       api.app, `/pay-external/${paid.externalId}/confirm`, "POST", { settlement },
@@ -253,7 +283,7 @@ describe("Postgres signed external-payment API", () => {
       approval: expect.objectContaining({ status: "pending", amount: 50_000, to: "external:x402" }),
     }));
     expect(requested.paymentHeader).toBeUndefined();
-    expect(signatures).toBe(1);
+    expect(signatures).toBe(0);
 
     const approvedResponse = await signedRequest(
       api.app, `/owner/approvals/${requested.approval.id}/approve`, "POST", {},
@@ -266,6 +296,7 @@ describe("Postgres signed external-payment API", () => {
       external: expect.objectContaining({ status: "paid", state: "pending" }),
     }));
     expect(approved.external.paymentHeader).toBeUndefined();
+    expect(signatures).toBe(1);
 
     const resumedResponse = await signedRequest(api.app, "/pay-external", "POST", body, agent.id, agentKeys.privateKey, "x-agent-id");
     expect(resumedResponse.status).toBe(200);
@@ -273,6 +304,95 @@ describe("Postgres signed external-payment API", () => {
       externalId: requested.externalId, state: "pending", paymentHeader: expect.any(String), replayed: true,
     }));
     expect(signatures).toBe(1);
+  });
+
+  it("signs, resumes, and confirms an official x402 v2 PAYMENT-SIGNATURE flow", async () => {
+    const { agent, agentKeys } = await world();
+    const evm = new LocalEvmSigner(`0x${"11".repeat(32)}`);
+    let independentChecks = 0;
+    const v2Api = createPostgresApi(db, {
+      externalHeaderKey: randomBytes(32),
+      externalPaymentSigner: new X402V2EvmPaymentSigner(evm),
+      verifyExternalSettlement: ({ authorization, settlement }) => {
+        independentChecks += 1;
+        return {
+          ok: authorization.protocolVersion === 2
+            && authorization.accepted?.network === "eip155:84532"
+            && settlement.transaction === `0x${"ab".repeat(32)}`,
+        };
+      },
+    });
+    const body = {
+      url: URL,
+      idempotencyKey: "external-api-v2",
+      x402Version: 2,
+      resource: { url: URL, description: "v2 report" },
+      extensions: { [PAYMENT_IDENTIFIER]: declarePaymentIdentifierExtension(true) },
+      requirement: {
+        scheme: "exact",
+        network: "eip155:84532",
+        amount: "50000",
+        asset: BASE_SEPOLIA_USDC,
+        payTo: PAY_TO,
+        maxTimeoutSeconds: 137,
+        extra: { assetTransferMethod: "eip3009", name: "USDC", version: "2" },
+      },
+    };
+    const paidResponse = await signedRequest(
+      v2Api.app, "/pay-external", "POST", body,
+      agent.id, agentKeys.privateKey, "x-agent-id"
+    );
+    expect(paidResponse.status).toBe(200);
+    const paid = await paidResponse.json() as any;
+    expect(paid).toEqual(expect.objectContaining({
+      status: "paid",
+      protocolVersion: 2,
+      paymentHeaderName: "payment-signature",
+      settlementHeaderName: "payment-response",
+      paymentHeader: expect.any(String),
+    }));
+    const decoded = decodedV2Payment(paid.paymentHeader);
+    expect(decoded).toEqual(expect.objectContaining({
+      protocolVersion: 2,
+      network: "eip155:84532",
+      asset: BASE_SEPOLIA_USDC,
+    }));
+    expect((decoded?.payload as any)?.accepted?.maxTimeoutSeconds).toBe(137);
+    expect((decoded?.payload as any)?.resource?.description).toBe("v2 report");
+    expect((decoded?.payload as any)?.extensions?.[PAYMENT_IDENTIFIER]?.info?.id)
+      .toMatch(/^pay_[0-9a-f]{32}$/);
+
+    const resumed = await signedRequest(
+      v2Api.app, `/pay-external/${paid.externalId}/resume`, "POST", {},
+      agent.id, agentKeys.privateKey, "x-agent-id"
+    );
+    expect(await resumed.json()).toEqual(expect.objectContaining({
+      paymentHeader: paid.paymentHeader,
+      paymentHeaderName: "payment-signature",
+      replayed: true,
+    }));
+    const changedContext = await signedRequest(
+      v2Api.app, "/pay-external", "POST",
+      { ...body, requirement: { ...body.requirement, maxTimeoutSeconds: 138 } },
+      agent.id, agentKeys.privateKey, "x-agent-id"
+    );
+    expect(changedContext.status).toBe(409);
+    expect(await changedContext.json()).toEqual(expect.objectContaining({ code: "idempotency_conflict" }));
+
+    const settlement = encodeSettlement({
+      success: true,
+      transaction: `0x${"ab".repeat(32)}`,
+      network: "eip155:84532",
+      payer: evm.address,
+      amount: "50000",
+    });
+    const confirmed = await signedRequest(
+      v2Api.app, `/pay-external/${paid.externalId}/confirm`, "POST", { settlement },
+      agent.id, agentKeys.privateKey, "x-agent-id"
+    );
+    expect(confirmed.status).toBe(200);
+    expect(await confirmed.json()).toEqual(expect.objectContaining({ ok: true, state: "confirmed" }));
+    expect(independentChecks).toBe(1);
   });
 
   it("fails closed on missing rails, malformed requirements, forged claims, and cross-agent confirmation", async () => {

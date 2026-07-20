@@ -16,6 +16,9 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'money_ops') then
     create role money_ops nologin;
   end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_key_rotation') then
+    create role money_key_rotation nologin;
+  end if;
 end $$;
 
 revoke all on schema public from public;
@@ -48,12 +51,15 @@ grant execute on function money_private.register_public_identity(text, text, tex
   money_private.redeem_service_challenge(text, uuid, uuid, uuid),
   money_private.issue_refund(text, uuid, bigint, text, text),
   money_private.get_marketplace_challenges(text, uuid[]),
-  money_private.request_external_payment(uuid, text, text, text, text, text, text, text, text, bigint, bytea, bytea, timestamptz, timestamptz),
-  money_private.resolve_external_approval(text, uuid, text, text),
+  money_private.prepare_external_payment(uuid, text, text, text, text, text, text, text, text, bigint, smallint, jsonb),
+  money_private.activate_external_payment(text, uuid, bytea, bytea, text, timestamptz, timestamptz),
+  money_private.resolve_external_approval_v2(text, uuid, text, text, bytea, bytea, text, timestamptz, timestamptz),
   money_private.confirm_external_payment(text, uuid, text),
   money_private.list_external_payments_for_requester(text, integer),
   money_private.get_external_payment_secret(text, uuid),
   money_private.get_external_payment_secret_by_key(text, text),
+  money_private.get_external_payment_by_approval_for_owner(text, uuid),
+  money_private.get_unresolved_external_payment_by_resource(text, text),
   money_private.is_external_approval(text, uuid),
   money_private.payment_feed(text, integer),
   money_private.get_receipt(text, uuid)
@@ -80,6 +86,15 @@ grant execute on function money_private.post_confirmed_funding(text, text, text,
 grant usage on schema money, money_private to money_worker;
 grant select, update on money.outbox_events to money_worker;
 grant execute on function money_private.sweep_external_payments(integer) to money_worker;
+
+-- Re-encryption is isolated from the application, treasury, and worker. This
+-- role can replace ciphertext only when the caller supplies the unchanged
+-- plaintext hash; it cannot read balances or move funds.
+grant usage on schema money_private to money_key_rotation;
+grant execute on function
+  money_private.list_external_authorizations_for_rotation(text, integer),
+  money_private.replace_external_authorization_ciphertext(uuid, bytea, bytea, text)
+  to money_key_rotation;
 
 grant usage on schema money, money_private to money_ops;
 grant select on money.schema_migrations, money.accounts, money.assets,

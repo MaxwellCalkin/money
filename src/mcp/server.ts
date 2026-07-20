@@ -5,6 +5,7 @@ import { z } from "zod";
 import { decodeSettlement } from "../bridge/x402.ts";
 import { signedHeaders } from "../core/identity.ts";
 import { fmt, usd } from "../core/types.ts";
+import { parseExternalPaymentDemand, type ExternalPaymentDemand } from "./x402-demand.ts";
 
 /**
  * The agent-facing surface: an MCP server any runtime (Claude Code, Cursor,
@@ -55,7 +56,7 @@ function text(value: unknown) {
   return { content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };
 }
 
-const server = new McpServer({ name: "money", version: "0.8.0" });
+const server = new McpServer({ name: "money", version: "0.9.0" });
 
 server.tool(
   "money_balance",
@@ -201,11 +202,13 @@ async function discoverApproval(url: string): Promise<WaitingApproval | undefine
 }
 
 type PendingExternal = {
-  idempotencyKey: string;
+  idempotencyKey?: string;
   externalId?: string;
   paymentHeader?: string;
+  paymentHeaderName?: string;
   paidMicros?: number;
   settlementHeader?: string;
+  settlementHeaderName?: string;
   deliveredStatus?: number;
   deliveredBody?: string;
 };
@@ -251,7 +254,9 @@ async function retryExternal(url: string, pending: PendingExternal) {
   if (pending.settlementHeader) return confirmExternalDelivery(url, pending);
   let res: Response;
   try {
-    res = await fetch(url, { headers: { "x-payment": pending.paymentHeader! } });
+    res = await fetch(url, {
+      headers: { [pending.paymentHeaderName ?? "x-payment"]: pending.paymentHeader! },
+    });
   } catch {
     return text({
       status: 0,
@@ -262,7 +267,7 @@ async function retryExternal(url: string, pending: PendingExternal) {
   }
   const bodyText = await res.text();
   if (res.ok) {
-    const settlementHeader = res.headers.get("x-payment-response");
+    const settlementHeader = res.headers.get(pending.settlementHeaderName ?? "x-payment-response");
     pending.deliveredStatus = res.status;
     pending.deliveredBody = bodyText;
     if (!settlementHeader || !decodeSettlement(settlementHeader)) {
@@ -290,13 +295,17 @@ async function retryExternal(url: string, pending: PendingExternal) {
 
 /** Fresh external x402 purchase: pay through the bridge, retry with the
  *  issued X-PAYMENT header. */
-async function externalFetch(url: string, accepts: unknown[]) {
-  const requirement = (accepts as Array<{ scheme?: string } | null>).find((a) => a?.scheme === "exact");
-  if (!requirement) {
-    return text({ status: 402, error: "external 402 offers no supported payment scheme (need 'exact')" });
-  }
-
+async function externalFetch(url: string, demand: ExternalPaymentDemand) {
   let pending = pendingExternal.get(url);
+  if (!pending) {
+    const recovered = await discoverExternal(url).catch(() => undefined);
+    if (recovered) {
+      pendingExternal.set(url, recovered);
+      const resumed = await resumeExternal(url, recovered);
+      if (resumed) return resumed;
+    }
+  }
+  pending = pendingExternal.get(url);
   if (!pending) {
     pending = { idempotencyKey: `xfetch-${randomUUID()}` };
     pendingExternal.set(url, pending); // stored BEFORE paying: a lost response resumes with the same key
@@ -304,9 +313,17 @@ async function externalFetch(url: string, accepts: unknown[]) {
 
   const payment = await api("/pay-external", {
     method: "POST",
-    body: JSON.stringify({ url, requirement, idempotencyKey: pending.idempotencyKey }),
+    body: JSON.stringify({
+      url,
+      requirement: demand.requirement,
+      idempotencyKey: pending.idempotencyKey,
+      x402Version: demand.protocolVersion,
+      ...(demand.resource ? { resource: demand.resource } : {}),
+      ...(demand.extensions ? { extensions: demand.extensions } : {}),
+    }),
   });
   if (payment.body?.status === "approval_required") {
+    pending.externalId = payment.body.externalId;
     return text({
       status: 202,
       approval: payment.body.approval,
@@ -320,8 +337,43 @@ async function externalFetch(url: string, accepts: unknown[]) {
   }
   pending.externalId = payment.body.externalId;
   pending.paymentHeader = payment.body.paymentHeader;
+  pending.paymentHeaderName = payment.body.paymentHeaderName;
+  pending.settlementHeaderName = payment.body.settlementHeaderName;
   pending.paidMicros = payment.body.receipt?.amount;
   return retryExternal(url, pending);
+}
+
+async function resumeExternal(url: string, pending: PendingExternal) {
+  if (!pending.externalId) return undefined;
+  const resumed = await api(`/pay-external/${pending.externalId}/resume`, {
+    method: "POST",
+    body: "{}",
+  });
+  if (resumed.body?.status === "approval_required") {
+    return text({
+      status: 202,
+      approval: resumed.body.approval,
+      externalId: pending.externalId,
+      note: "external payment is still waiting in the owner's approval inbox",
+    });
+  }
+  if (resumed.body?.status !== "paid") {
+    pendingExternal.delete(url);
+    return text({ status: resumed.status, error: "durable external payment could not be resumed", decision: resumed.body });
+  }
+  pending.paymentHeader = resumed.body.paymentHeader;
+  pending.paymentHeaderName = resumed.body.paymentHeaderName;
+  pending.settlementHeaderName = resumed.body.settlementHeaderName;
+  pending.paidMicros = resumed.body.receipt?.amount;
+  return retryExternal(url, pending);
+}
+
+/** Rediscover an unresolved external purchase after this MCP process restarts. */
+async function discoverExternal(url: string): Promise<PendingExternal | undefined> {
+  const lookup = await api(`/pay-external/unresolved?resource=${encodeURIComponent(url)}`);
+  return lookup.status === 200 && typeof lookup.body?.externalId === "string"
+    ? { externalId: lookup.body.externalId }
+    : undefined;
 }
 
 server.tool(
@@ -331,10 +383,21 @@ server.tool(
     url: z.string().url().describe("the URL to fetch"),
   },
   async ({ url }) => {
-    // Resume path (external): we already hold a paid X-PAYMENT header.
+    // Resume path (external): memory first, then the durable network record so
+    // an MCP restart cannot create a second debit for the same in-flight URL.
     const extPending = pendingExternal.get(url);
     if (extPending?.paymentHeader) {
       return retryExternal(url, extPending);
+    }
+    if (extPending?.externalId) {
+      const resumed = await resumeExternal(url, extPending);
+      if (resumed) return resumed;
+    }
+    const recoveredExternal = await discoverExternal(url).catch(() => undefined);
+    if (recoveredExternal) {
+      pendingExternal.set(url, recoveredExternal);
+      const resumed = await resumeExternal(url, recoveredExternal);
+      if (resumed) return resumed;
     }
 
     // Resume path (internal): we already paid for this URL but never got the resource.
@@ -376,16 +439,20 @@ server.tool(
       amountMicros?: number;
       payTo?: string;
       accepts?: unknown[];
+      x402Version?: number;
+      resource?: unknown;
+      extensions?: unknown;
     } | null;
     if (!challenge?.challengeId) {
       // Not our network's 402. If it speaks external x402 (accepts[]), pay it
       // through the bridge. The internal challengeId flow is deliberately
       // preferred when both are present — flow choice must not be steerable
       // by a malicious body.
-      if (Array.isArray(challenge?.accepts) && challenge.accepts.length > 0) {
-        return externalFetch(url, challenge.accepts);
-      }
-      return text({ status: 402, error: "server demanded payment but sent no supported payment challenge", body: challenge });
+      const demand = parseExternalPaymentDemand(first.headers.get("payment-required"), challenge);
+      const paymentUrl = first.url || url;
+      return demand.ok
+        ? externalFetch(paymentUrl, demand.demand)
+        : text({ status: 402, error: demand.reason, body: challenge });
     }
 
     // A fresh seller challenge may have been issued after this MCP process

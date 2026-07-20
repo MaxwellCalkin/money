@@ -13,7 +13,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 3. **Prefunding buys the speed.** Authorization is a local policy + balance check — no external round-trip on the hot path.
 4. **Exactly-once by construction.** Idempotency keys on every transfer; 402 challenges pay-once/redeem-once. Agents retry by default — the network must shrug.
 
-## What's here (v0.8)
+## What's here (v0.9)
 
 | Piece | File | What it does |
 |---|---|---|
@@ -30,7 +30,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | Postgres signed API | `src/server/postgres-api.ts` | Multi-instance-safe Ed25519 auth, durable nonce replay defense, hashed owner sessions, internal and external payments, provider catalog, 402 challenge/redeem, refunds, tenant-scoped state, and the private dashboard |
 | Owner control plane | `src/server/dashboard.ts` | Private, session-gated balances, activity, services, mandates, and an exact-payment approval inbox |
 | Database operations | `src/server/database-ops.ts` | Liveness, schema readiness, and token-gated ledger reconciliation on **:4022**; deliberately no ungoverned payment route |
-| x402 boundary | `src/bridge/`, `src/db/external.ts` | Allowlisted x402 v1 authorizations, AES-256-GCM header custody, HSM-friendly retry recovery, exact external approvals, verifier-gated confirmation, and automatic journal reversal |
+| x402 boundary | `src/bridge/`, `src/db/external.ts` | Official x402 v2 exact/EVM signing, HTTPS HSM adapter, pinned Base USDC, rotatable AES-256-GCM custody, exact external approvals, independent calldata/log verification, restart recovery, and automatic journal reversal |
 | MCP server | `src/mcp/server.ts` | `money_balance`, `money_pay`, `money_fetch` (auto-pays internal 402s AND external x402 sellers within mandate), `money_feed` |
 | Demo | `src/demo.ts` | The full story end-to-end (10 sections), including a separately authenticated seller joining and earning through the network |
 
@@ -87,19 +87,25 @@ redemption, cumulative-capped refunds, durable external x402 settlement,
 scoped balances/activity, and the private dashboard. The ops service
 intentionally exposes no payment endpoint.
 
-External routes fail closed unless a wallet, a 32-byte header-encryption key,
-and an independent settlement verifier are all configured. `POST
-/pay-external` stores only AES-256-GCM ciphertext plus a plaintext-header hash,
-then returns the original authorization after an atomic debit. The agent sends
-the seller's complete settlement response to `POST
-/pay-external/:id/confirm`; the verifier runs before the short database
-transaction, and confirmation races safely against the SKIP LOCKED reversal
-worker. See `docs/EXTERNAL_SETTLEMENT.md` for the API and deployment contract.
+External routes fail closed unless a signer, a versioned header-encryption
+keyring, and an independent settlement verifier are all configured. `POST
+/pay-external` first stores an unsigned intent and evaluates policy. It signs a
+fresh EIP-3009 authorization only immediately before an atomic recheck and
+debit; owner approvals wait unsigned. PostgreSQL stores only AES-256-GCM
+ciphertext plus a plaintext-header hash. The agent sends the seller's complete
+settlement response to `POST /pay-external/:id/confirm`; the verifier checks
+the EIP-712 signature, exact transaction calldata, receipt log and confirmation
+depth before the short database transition. Confirmation races safely against
+the SKIP LOCKED reversal worker. See `docs/EXTERNAL_SETTLEMENT.md` for the API,
+key-rotation procedure and deployment contract.
 
 For local protocol-shaped testing only, set `MONEY_EXTERNAL_MOCK=true` and a
 stable `MONEY_EXTERNAL_HEADER_KEY` (32 bytes, base64 or 64 hex characters).
-Mock mode is refused when `NODE_ENV=production`. A deployed process must
-inject a real EIP-712 wallet/HSM adapter and facilitator or chain verifier.
+Mock mode and raw EVM private keys are refused when `NODE_ENV=production`.
+Production v2 uses `MONEY_EVM_SIGNER_URL`, `MONEY_EVM_SIGNER_ADDRESS`,
+`MONEY_EXTERNAL_HEADER_KEYS`, `MONEY_EXTERNAL_HEADER_ACTIVE_KEY_ID`, and
+`MONEY_EVM_RPC_URLS`. Rotate stored authorization ciphertext under the
+dedicated database role with `npm run external:rotate-keys`.
 
 Owner-signed `/fund` is disabled on the Postgres API by default because real
 top-ups belong to a separately credentialed treasury integration. For an
@@ -216,7 +222,7 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 - Identity is an Ed25519 keypair per account: agents sign spends and owners sign admin mutations over method+path+body+timestamp+nonce. The Postgres API records accepted nonces durably, rejects replay across replicas, makes public-key onboarding retry-safe, and revokes browser sessions when an owner rotates keys (→ RFC 9421 HTTP Message Signatures + `@authority` binding on the wire; keys chained to a KYC'd owner; signup rate-limiting and owner-key delivery off stdout).
 - Browser access uses an eight-hour bearer session minted by an owner-signed request. Only SHA-256 token hashes are stored; sessions survive restart, cap at ten per owner, expire, revoke individually, and die on owner-key rotation (→ passkeys for the production owner ceremony).
 - The JSONL product path is single-node and remains a showcase. The Postgres path is multi-instance-safe for ledger, mandate, approval, signed identity, nonce, session, tenant-scoped control-plane, marketplace, challenge, redemption, refunds, and the pending/confirmed/cancelled/reversed external state machine.
-- External top-up is simulated. The repository ships a protocol-faithful x402 v1 client and mock wallet/seller, but the mock uses Ed25519 instead of EIP-712/secp256k1 and cannot certify chain finality. The production adapter is still required: real USDC wallet/HSM plus facilitator or chain verification on the selected network, followed by card/ACH top-up and payout through a sponsor-bank FBO program.
+- External top-up is simulated. The repository now ships an official x402 v2 exact/EVM client, remote HSM signing boundary, Base Sepolia/mainnet USDC allowlist, and independent receipt/calldata/log verification. It has not been connected to customer funds. A launch still needs a funded and continuously reconciled treasury wallet, RPC/HSM redundancy, card/ACH top-up and payout through a sponsor-bank FBO program, and the compliance/risk controls described below.
 - The ledger can settle between accounts owned by different users, but this is still a development sandbox. Turning that path on for real customer funds requires the sponsor-bank/FBO, KYC/KYB, sanctions, fraud, safeguarding, and licensing program around it; code alone does not cross the money-transmission line.
 - No subscriptions, sub-agent delegation, seller payouts, disputes, or insurance yet. Those are later programmable-commerce and risk layers after the internal marketplace and external settlement rail.
 

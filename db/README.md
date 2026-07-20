@@ -59,15 +59,26 @@ can win. Reversals restore the agent balance but deliberately do not restore
 mandate counters. Historical non-external request and receipt hashes remain
 byte-for-byte compatible across the v0.7 to v0.8 upgrade.
 
+Migration `0006_x402_v2_activation.sql` adds the production-oriented x402 v2
+boundary. Policy first creates an unsigned `prepared` intent (or an unsigned
+owner approval); the HSM signs only immediately before a second atomic policy
+check and debit. The migration stores the normalized non-economic signing
+context needed to reproduce the seller's exact offer after a restart, pins the
+authorization to its mandate and protocol version, adds rotatable ciphertext
+key IDs, and keeps historical v0.8 retries byte-for-byte compatible. Pending
+and confirmed authorization ciphertext can be enumerated and replaced only
+through narrow key-rotation functions; the plaintext hash and economic tuple
+cannot change.
+
 `money_private.post_transfer_kernel(...)` is the generalized posting kernel
-under v0.8. It is not granted to the application role. The old
+under the current schema. It is not granted to the application role. The old
 `post_transfer(...)` signature remains a compatibility wrapper; application
 traffic receives only narrow marketplace commands such as
 `request_challenge_payment(...)` and `issue_refund(...)`.
 
 Run `db/roles.sql` separately as an administrator. Production login roles
 should inherit exactly one narrow role: `money_app`, `money_treasury`,
-`money_worker`, or `money_ops`. They should never own the schema or receive
+`money_worker`, `money_key_rotation`, or `money_ops`. They should never own the schema or receive
 direct journal/balance write privileges; the application role cannot directly
 read tenant financial tables either. Tenant-scoped mandate and approval reads
 also go through reviewed functions, so the role can power owner and agent

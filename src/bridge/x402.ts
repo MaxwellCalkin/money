@@ -3,11 +3,10 @@ import { usd, type Micros } from "../core/types.ts";
 import type { ExternalWallet } from "./wallet.ts";
 
 /**
- * x402 protocol v1 wire format (per the coinbase/x402 spec: 402 JSON body +
- * base64 X-PAYMENT header carrying an EIP-3009 authorization). v2 (Dec 2025)
- * moves the 402 payload into a PAYMENT-REQUIRED header, renames the header
- * to PAYMENT-SIGNATURE, and switches networks to CAIP-2 ids — the bridge
- * targets v1 (the widely deployed format) and treats v2 as a follow-up.
+ * Legacy x402 v1 wire types and shared economic pinning. The production v2
+ * client lives in x402-v2.ts and uses PAYMENT-REQUIRED, PAYMENT-SIGNATURE,
+ * PAYMENT-RESPONSE, CAIP-2 network IDs and the official x402 packages. v1 is
+ * retained for the local compatibility seller and live-upgrade tests.
  *
  * Everything in a 402 response is attacker-controlled. The bridge trusts
  * NONE of it economically: (network, asset) must match the server-side
@@ -61,6 +60,7 @@ export interface SettlementResponse {
   transaction: string;
   network: string;
   payer: string;
+  amount?: string;
   errorReason?: string;
 }
 
@@ -72,6 +72,9 @@ export interface AllowedAsset {
   symbol: string;
   /** Must be 6 for the 1:1 atomic-units→micro-dollars peg to hold. */
   decimals: number;
+  /** Pinned EIP-712 domain for production EIP-3009 authorization. */
+  eip712Name?: string;
+  eip712Version?: string;
 }
 
 /**
@@ -83,6 +86,22 @@ export interface AllowedAsset {
 export const ASSET_ALLOWLIST: AllowedAsset[] = [
   { network: "mock-local", asset: "0x00000000000000000000000000000000000c0ffe", symbol: "USDC", decimals: 6 },
   { network: "base-sepolia", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", symbol: "USDC", decimals: 6 },
+  {
+    network: "eip155:84532",
+    asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    symbol: "USDC",
+    decimals: 6,
+    eip712Name: "USDC",
+    eip712Version: "2",
+  },
+  {
+    network: "eip155:8453",
+    asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    symbol: "USDC",
+    decimals: 6,
+    eip712Name: "USD Coin",
+    eip712Version: "2",
+  },
 ];
 
 /** No single external purchase above this, whatever the mandate says. */
