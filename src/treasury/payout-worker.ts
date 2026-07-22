@@ -23,6 +23,23 @@ export interface ColumnPayoutSource {
   accountNumberId?: string;
 }
 
+/** A Column ACH payout draws from exactly one source: a bank account or an
+ * account number. The production preflight enforces the identical rule, and
+ * test/deployment.test.ts pins the two contracts together. */
+export function payoutSourceFromEnv(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): ColumnPayoutSource {
+  const bankAccountId = env.MONEY_COLUMN_PAYOUT_BANK_ACCOUNT_ID?.trim();
+  const accountNumberId = env.MONEY_COLUMN_PAYOUT_ACCOUNT_NUMBER_ID?.trim();
+  if ((!bankAccountId && !accountNumberId) || (bankAccountId && accountNumberId)) {
+    throw new Error("configure exactly one MONEY_COLUMN_PAYOUT_BANK_ACCOUNT_ID or MONEY_COLUMN_PAYOUT_ACCOUNT_NUMBER_ID");
+  }
+  return {
+    ...(bankAccountId ? { bankAccountId } : {}),
+    ...(accountNumberId ? { accountNumberId } : {}),
+  };
+}
+
 /** Claims are committed before this function is called. No database lock is
  * held over the provider request. Column receives a deterministic idempotency
  * key derived from the immutable payout UUID. */
@@ -83,20 +100,12 @@ export async function startTreasuryPayoutWorker() {
   enforceProductionPreflight("treasury-payouts");
   const connectionString = process.env.MONEY_PAYOUT_DATABASE_URL;
   const apiKey = process.env.MONEY_COLUMN_PAYOUT_API_KEY;
-  const bankAccountId = process.env.MONEY_COLUMN_PAYOUT_BANK_ACCOUNT_ID;
-  const accountNumberId = process.env.MONEY_COLUMN_PAYOUT_ACCOUNT_NUMBER_ID;
   if (!connectionString || !apiKey) throw new Error("MONEY_PAYOUT_DATABASE_URL and MONEY_COLUMN_PAYOUT_API_KEY are required");
-  if ((!bankAccountId && !accountNumberId) || (bankAccountId && accountNumberId)) {
-    throw new Error("configure exactly one MONEY_COLUMN_PAYOUT_BANK_ACCOUNT_ID or MONEY_COLUMN_PAYOUT_ACCOUNT_NUMBER_ID");
-  }
+  const source = payoutSourceFromEnv();
   const db = new PostgresDatabase({ connectionString, applicationName: "money-treasury-payouts", maxConnections: 2 });
   const treasury = new PostgresTreasury(db);
   const column = new ColumnClient({ apiKey });
   const workerId = `${hostname()}:${process.pid}:treasury-payouts`;
-  const source: ColumnPayoutSource = {
-    ...(bankAccountId ? { bankAccountId } : {}),
-    ...(accountNumberId ? { accountNumberId } : {}),
-  };
   const intervalMs = readBoundedInteger(process.env.MONEY_PAYOUT_INTERVAL_MS, 1_000, 250, 2_147_483_647, "MONEY_PAYOUT_INTERVAL_MS");
   let stopping = false;
   const stop = () => { stopping = true; };

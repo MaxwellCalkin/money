@@ -6,6 +6,7 @@ import { decodeSettlement } from "../bridge/x402.ts";
 import { configuredHttpOrigin } from "../core/api-client.ts";
 import { readBoundedResponseText } from "../core/bounded-response.ts";
 import { signedHeaders } from "../core/identity.ts";
+import { secretFromEnv } from "../core/key-files.ts";
 import { fmt, usd } from "../core/types.ts";
 import { AgentFetchPolicy, pinnedAgentFetch } from "./outbound.ts";
 import { parseExternalPaymentDemand, type ExternalPaymentDemand } from "./x402-demand.ts";
@@ -28,10 +29,12 @@ import { parseExternalPaymentDemand, type ExternalPaymentDemand } from "./x402-d
  * agent creation. Spend requests without a valid signature are rejected.
  *
  * Config:
- *   MONEY_API       base URL of the network API (default http://127.0.0.1:4021)
- *   MONEY_AGENT_ID  this agent's account id (required)
- *   MONEY_AGENT_KEY this agent's private key, base64 PKCS#8 (required; comes
- *                   from onboarding — treat it like a password)
+ *   MONEY_API            base URL of the network API (default http://127.0.0.1:4021)
+ *   MONEY_AGENT_ID       this agent's account id (required)
+ *   MONEY_AGENT_KEY_FILE path to a file whose first line is the agent's
+ *                        private key, base64 PKCS#8 (written by onboarding;
+ *                        preferred — keeps the key out of .mcp.json)
+ *   MONEY_AGENT_KEY      the private key inline (fallback; treat like a password)
  */
 const MAX_NETWORK_RESPONSE_BYTES = 256 * 1024;
 const MAX_RESOURCE_RESPONSE_BYTES = 512 * 1024;
@@ -42,13 +45,25 @@ const API = configuredHttpOrigin(
   "MONEY_API",
 );
 const AGENT_ID = process.env.MONEY_AGENT_ID;
-const AGENT_KEY = process.env.MONEY_AGENT_KEY;
+let AGENT_KEY: string | undefined;
+try {
+  AGENT_KEY = secretFromEnv("MONEY_AGENT_KEY");
+} catch (error) {
+  // A missing or unreadable key file is the expected failure when a checked-in
+  // .mcp.json lands on a machine without the gitignored .money/ directory —
+  // it deserves a directed message, not a raw ENOENT stack.
+  console.error(
+    `money MCP: could not read MONEY_AGENT_KEY_FILE (${error instanceof Error ? error.message : error}). ` +
+    "Run npm run onboard on this machine, or fix the path in .mcp.json.",
+  );
+  process.exit(1);
+}
 const fetchPolicy = new AgentFetchPolicy({
   privateOrigins: process.env.MONEY_FETCH_PRIVATE_ORIGINS,
 });
 
 if (!AGENT_ID || !AGENT_KEY) {
-  console.error("MONEY_AGENT_ID and MONEY_AGENT_KEY are required (both come from onboarding: npm run onboard)");
+  console.error("MONEY_AGENT_ID and MONEY_AGENT_KEY_FILE (or MONEY_AGENT_KEY) are required (both come from onboarding: npm run onboard)");
   process.exit(1);
 }
 
@@ -339,7 +354,7 @@ async function retryExternal(url: string, pending: PendingExternal) {
 async function externalFetch(url: string, demand: ExternalPaymentDemand) {
   let pending = pendingExternal.get(url);
   if (!pending) {
-    const recovered = await discoverExternal(url).catch(() => undefined);
+    const recovered = await bestEffortRecovery("external payment recovery", discoverExternal(url));
     if (recovered) {
       pendingExternal.set(url, recovered);
       const resumed = await resumeExternal(url, recovered);
@@ -399,6 +414,9 @@ async function resumeExternal(url: string, pending: PendingExternal) {
     });
   }
   if (resumed.body?.status !== "paid") {
+    if (resumed.status === 404 && resumed.body?.error !== "external_payment_not_found") {
+      warnRecoveryUnsupported("/pay-external/:id/resume");
+    }
     pendingExternal.delete(url);
     return text({ status: resumed.status, error: "durable external payment could not be resumed", decision: resumed.body });
   }
@@ -409,12 +427,42 @@ async function resumeExternal(url: string, pending: PendingExternal) {
   return retryExternal(url, pending);
 }
 
+/** Recovery is best-effort, but its failures must be audible: a connected API
+ * that lacks the durable recovery endpoints (the JSONL showcase server) means
+ * crash recovery of in-flight external payments silently does not exist. */
+let recoveryUnsupportedWarned = false;
+
+function warnRecoveryUnsupported(path: string): void {
+  if (recoveryUnsupportedWarned) return;
+  recoveryUnsupportedWarned = true;
+  console.error(
+    `money MCP: ${API} does not implement ${path} — crash recovery of in-flight external payments is unavailable on this API. Point MONEY_API at the Postgres server (npm run api:db) for durable recovery.`,
+  );
+}
+
+async function bestEffortRecovery<T>(operation: string, task: Promise<T>): Promise<T | undefined> {
+  try {
+    return await task;
+  } catch (error) {
+    console.error(
+      `money MCP: ${operation} failed (${error instanceof Error ? error.message : "unknown error"}); continuing without recovered state`,
+    );
+    return undefined;
+  }
+}
+
 /** Rediscover an unresolved external purchase after this MCP process restarts. */
 async function discoverExternal(url: string): Promise<PendingExternal | undefined> {
   const lookup = await api(`/pay-external/unresolved?resource=${encodeURIComponent(url)}`);
-  return lookup.status === 200 && typeof lookup.body?.externalId === "string"
-    ? { externalId: lookup.body.externalId }
-    : undefined;
+  if (lookup.status === 200 && typeof lookup.body?.externalId === "string") {
+    return { externalId: lookup.body.externalId };
+  }
+  // The Postgres API answers "nothing to recover" with an explicit error body;
+  // a bare 404 means the route itself is missing on this server.
+  if (lookup.status === 404 && lookup.body?.error !== "external_payment_not_found") {
+    warnRecoveryUnsupported("/pay-external/unresolved");
+  }
+  return undefined;
 }
 
 server.tool(
@@ -446,7 +494,7 @@ server.tool(
       const resumed = await resumeExternal(url, extPending);
       if (resumed) return resumed;
     }
-    const recoveredExternal = await discoverExternal(url).catch(() => undefined);
+    const recoveredExternal = await bestEffortRecovery("external payment recovery", discoverExternal(url));
     if (recoveredExternal) {
       pendingExternal.set(url, recoveredExternal);
       const resumed = await resumeExternal(url, recoveredExternal);
@@ -557,7 +605,7 @@ server.tool(
     // A fresh seller challenge may have been issued after this MCP process
     // restarted. Prefer any older durable, unredeemed approval for the same
     // resource and let the new unpaid challenge expire in memory.
-    const recovered = await discoverApproval(url).catch(() => undefined);
+    const recovered = await bestEffortRecovery("approval recovery", discoverApproval(url));
     if (recovered) {
       pendingApprovals.set(url, recovered);
       return resumeInternalApproval(url, recovered);

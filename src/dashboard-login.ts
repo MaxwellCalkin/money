@@ -7,14 +7,20 @@ import {
   readBoundedJsonResponse,
 } from "./core/api-client.ts";
 import { signedHeaders } from "./core/identity.ts";
+import { secretFromEnv } from "./core/key-files.ts";
 
 const API = configuredHttpOrigin(process.env.MONEY_API ?? "http://127.0.0.1:4021", "MONEY_API");
 const USER_ID = process.env.MONEY_USER_ID;
-const OWNER_KEY = process.env.MONEY_OWNER_KEY;
 
 async function main() {
+  let OWNER_KEY: string | undefined;
+  try {
+    OWNER_KEY = secretFromEnv("MONEY_OWNER_KEY");
+  } catch (error) {
+    throw new Error(`could not read MONEY_OWNER_KEY_FILE: ${error instanceof Error ? error.message : error}`);
+  }
   if (!USER_ID || !OWNER_KEY) {
-    throw new Error("MONEY_USER_ID and MONEY_OWNER_KEY are required (printed by npm run onboard)");
+    throw new Error("MONEY_USER_ID and MONEY_OWNER_KEY_FILE (or MONEY_OWNER_KEY) are required (written by npm run onboard)");
   }
   const path = "/owner/sessions";
   const body = "{}";

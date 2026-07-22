@@ -241,8 +241,10 @@ explicit local-only walkthrough, start it with
 `MONEY_ALLOW_DEV_FUNDING=true npm run api:db`; never enable that switch in a
 deployed environment.
 
-The dashboard is private. Export the `MONEY_USER_ID` and `MONEY_OWNER_KEY`
-printed during onboarding, then mint an eight-hour browser session:
+The dashboard is private. Onboarding writes the owner key to the gitignored
+`.money/owner-<user>.key` file and prints the exact login command; set
+`MONEY_USER_ID` and `MONEY_OWNER_KEY_FILE` (the raw `MONEY_OWNER_KEY` is still
+accepted), then mint an eight-hour browser session:
 
 ```bash
 npm run dashboard:login
@@ -254,13 +256,42 @@ in-memory session immediately.
 
 ### Give a Claude Code agent a wallet
 
-Start the API (`npm run api`), then in another terminal:
+Onboard against the Postgres kernel — the engine the MCP's crash recovery and
+durable external approvals are built for. Start the database and API (see "Run
+the production money kernel"), enabling the local-only funding switch for this
+walkthrough:
 
 ```bash
-npm run onboard    # creates user + agent + mandate, prints the MCP config
+docker compose up -d postgres pgbouncer
+export DATABASE_URL=postgres://money:money-dev-only@127.0.0.1:5432/money
+npm run db:migrate
+MONEY_ALLOW_DEV_FUNDING=true npm run api:db   # local walkthrough only — never in a deployed environment
 ```
 
-Or wire it manually — add to `.mcp.json`:
+Then in another terminal:
+
+```bash
+npm run onboard    # creates the owner, writes the key to .money/, stops at the compliance gate
+```
+
+The kernel fails closed: a brand-new owner has no reviewed identity/sanctions
+evidence, so funding is denied and onboarding prints the two commands to
+finish the local walkthrough — a development-only approval that writes the
+same deterministic non-PII evidence the integration tests use (refused when
+`NODE_ENV=production`, and impossible with production role credentials), then
+a resume that reuses the saved owner key:
+
+```bash
+DATABASE_URL=postgres://money:money-dev-only@127.0.0.1:5432/money npm run dev:approve -- --user usr_xxxxxxxx
+npm run onboard -- --user usr_xxxxxxxx   # funds, creates agent + mandate, prints the MCP config
+```
+
+(`npm run api` still serves the zero-dependency JSONL showcase and onboarding
+works against it too, but it lacks the durable external-payment recovery and
+escalation endpoints — the MCP warns on stderr when it detects that.)
+
+Or wire it manually — add to `.mcp.json` (the key stays in the gitignored
+`.money/` file; `MONEY_AGENT_KEY` with an inline key is still accepted):
 
 ```json
 {
@@ -271,7 +302,7 @@ Or wire it manually — add to `.mcp.json`:
       "env": {
         "MONEY_API": "http://127.0.0.1:4021",
         "MONEY_AGENT_ID": "agt_xxxxxxxx",
-        "MONEY_AGENT_KEY": "<base64 Ed25519 private key from onboarding — keep out of git>"
+        "MONEY_AGENT_KEY_FILE": "C:/Users/mcalk/code/money/.money/agent-agt_xxxxxxxx.key"
       }
     }
   }
@@ -295,7 +326,8 @@ other reserved ranges cannot be enabled through this escape hatch.
 
 Provider identities are created by an owner, then use their own signing key to
 publish services and redeem receipts. After `npm run onboard`, export the
-`MONEY_USER_ID` and `MONEY_OWNER_KEY` it prints, then run:
+`MONEY_USER_ID` it prints and point `MONEY_OWNER_KEY_FILE` at the owner key
+file it wrote, then run:
 
 ```bash
 npm run onboard:seller -- \
@@ -305,28 +337,32 @@ npm run onboard:seller -- \
   --price 0.05
 ```
 
-The command prints `MONEY_PROVIDER_ID`, `MONEY_PROVIDER_KEY`, and
-`MONEY_SERVICE_ID`. It writes the provider key and stable registration keys to
-the gitignored `.money/` directory before contacting the network, so an
+The command prints `MONEY_PROVIDER_ID`, `MONEY_SERVICE_ID`, and the path of a
+`MONEY_PROVIDER_KEY_FILE`. It writes the provider key and stable registration
+keys to the gitignored `.money/` directory before contacting the network, so an
 interrupted run can be repeated without orphaning the handle or duplicating the
-service. Mount the reusable Hono middleware on the registered route:
+service, and the private key itself never transits stdout. Mount the reusable
+Hono middleware on the registered route:
 
 ```ts
 import { Hono } from "hono";
+import { secretFromEnv } from "./src/core/key-files.ts";
 import { createMoneySellerClient, moneyPaid } from "./src/seller/middleware.ts";
+
+const providerKey = secretFromEnv("MONEY_PROVIDER_KEY")!; // reads MONEY_PROVIDER_KEY_FILE or the inline var
 
 const app = new Hono();
 app.get("/report", moneyPaid({
   networkUrl: process.env.MONEY_API!,
   providerId: process.env.MONEY_PROVIDER_ID!,
-  providerKey: process.env.MONEY_PROVIDER_KEY!,
+  providerKey,
   serviceId: process.env.MONEY_SERVICE_ID!,
 }), (c) => c.json({ report: "valuable machine-readable result" }));
 
 const seller = createMoneySellerClient({
   networkUrl: process.env.MONEY_API!,
   providerId: process.env.MONEY_PROVIDER_ID!,
-  providerKey: process.env.MONEY_PROVIDER_KEY!,
+  providerKey,
 });
 
 // Partial or full; the same key can be retried without issuing it twice.
@@ -358,7 +394,7 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 
 - The complete showcase API still defaults to the local JSONL engine (`data/events.jsonl`; `MONEY_DATA` overrides it). The Postgres API now serves the signed identity, payment, approval, owner control plane, service marketplace, challenge, redemption, refund, and external x402 paths; new deployment work should target `api:db`.
 - Postgres marketplace challenges are durable, claimed by at most one agent, paid once, and redeemed once; paid retries win over expiry. Expired unpaid rows are cleaned in bounded batches. At truly enormous anonymous-request volume, challenge issuance should move to signed stateless edge tokens so unpaid 402 traffic does not require one database write per offer.
-- Identity is an Ed25519 keypair per account: agents sign spends and owners sign admin mutations over method+path+body+timestamp+nonce. The Postgres API records accepted nonces durably, rejects replay across replicas, makes public-key onboarding retry-safe, and revokes browser sessions when an owner rotates keys (→ RFC 9421 HTTP Message Signatures + `@authority` binding on the wire; keys chained to a KYC'd owner; signup rate-limiting and owner-key delivery off stdout).
+- Identity is an Ed25519 keypair per account: agents sign spends and owners sign admin mutations over method+path+body+timestamp+nonce. The Postgres API records accepted nonces durably, rejects replay across replicas, makes public-key onboarding retry-safe, and revokes browser sessions when an owner rotates keys. Onboarding writes owner, agent, and provider private keys to gitignored `.money/` files, and the CLIs, seller client, and MCP server read them by `*_FILE` path, so no private key transits stdout or `.mcp.json` (→ RFC 9421 HTTP Message Signatures + `@authority` binding on the wire; keys chained to a KYC'd owner; signup rate-limiting).
 - Browser access uses an eight-hour bearer session minted by an owner-signed request. Only SHA-256 token hashes are stored; sessions survive restart, cap at ten per owner, expire, revoke individually, and die on owner-key rotation (→ passkeys for the production owner ceremony).
 - The JSONL product path is single-node and remains a showcase. The Postgres path is multi-instance-safe for ledger, mandate, approval, signed identity, nonce, session, tenant-scoped control-plane, marketplace, challenge, redemption, refunds, and the pending/confirmed/cancelled/reversed external state machine.
 - The real-rail software boundary is implemented but not activated with customer funds. Column ACH funding/payouts, provider-event recovery, returns, freezes, and continuous bank/stablecoin reconciliation are present; x402 has remote-HSM signing and independent chain verification. A launch still needs an executed sponsor-bank/FBO program, production Column/RPC/HSM credentials and redundancy, funded reserves, verified customer/counterparty enrollment, and the legal and operating program in `docs/COMPLIANCE.md`.

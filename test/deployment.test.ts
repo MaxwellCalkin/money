@@ -9,6 +9,7 @@ import { readBoundedResponseText } from "../src/core/bounded-response.ts";
 import { isLocalEndpointHostname, isLoopbackHostname } from "../src/core/url-security.ts";
 import { preflightProductionService } from "../src/deploy/preflight.ts";
 import { listenHost } from "../src/server/listen.ts";
+import { payoutSourceFromEnv } from "../src/treasury/payout-worker.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const KEY = Buffer.alloc(32, 11).toString("base64");
@@ -137,6 +138,35 @@ describe("production deployment contract", () => {
       ...worker,
       MONEY_COMPLIANCE_PROVIDER_URL: "https://provider.invalid",
     })).toThrow(/api\.withpersona\.com/);
+  });
+
+  it("keeps the payout-source contract identical between preflight and the worker", () => {
+    const base = {
+      NODE_ENV: "production",
+      MONEY_PAYOUT_DATABASE_URL:
+        "postgres://money_payout_login:correct-horse-battery-staple@db.internal:5432/money?sslmode=verify-full",
+      MONEY_COLUMN_PAYOUT_API_KEY: "column-payout-release-key",
+    };
+    for (const source of [
+      { MONEY_COLUMN_PAYOUT_BANK_ACCOUNT_ID: "bacc_release" },
+      { MONEY_COLUMN_PAYOUT_ACCOUNT_NUMBER_ID: "acno_release" },
+    ]) {
+      const env = { ...base, ...source };
+      expect(preflightProductionService("treasury-payouts", env))
+        .toEqual({ service: "treasury-payouts", ok: true });
+      expect(() => payoutSourceFromEnv(env)).not.toThrow();
+    }
+    for (const invalid of [
+      base,
+      {
+        ...base,
+        MONEY_COLUMN_PAYOUT_BANK_ACCOUNT_ID: "bacc_release",
+        MONEY_COLUMN_PAYOUT_ACCOUNT_NUMBER_ID: "acno_release",
+      },
+    ]) {
+      expect(() => preflightProductionService("treasury-payouts", invalid)).toThrow(/exactly one/);
+      expect(() => payoutSourceFromEnv(invalid)).toThrow(/exactly one/);
+    }
   });
 
   it("keeps local binds private unless deployment explicitly selects a container interface", () => {

@@ -93,7 +93,6 @@ const services = {
       MONEY_PAYOUT_DATABASE_URL: database("money_payout_worker"),
       MONEY_COLUMN_PAYOUT_API_KEY: "column-payout-release-key",
       MONEY_COLUMN_PAYOUT_BANK_ACCOUNT_ID: "bank-release-account",
-      MONEY_COLUMN_PAYOUT_ACCOUNT_NUMBER_ID: "account-number-release-id",
     },
     foreign: { MONEY_COLUMN_EVENT_API_KEY: "must-not-cross" },
   },

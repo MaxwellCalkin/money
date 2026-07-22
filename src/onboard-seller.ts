@@ -1,8 +1,9 @@
 /**
  * One-command, crash-safe seller onboarding.
  *
- * Required environment (printed by `npm run onboard`):
- *   MONEY_USER_ID, MONEY_OWNER_KEY
+ * Required environment (written/printed by `npm run onboard`):
+ *   MONEY_USER_ID, and MONEY_OWNER_KEY_FILE (path to the key file in .money/)
+ *   or MONEY_OWNER_KEY (the key inline)
  *
  * Example:
  *   npm run onboard:seller -- --handle research-cloud --slug market-report \
@@ -10,19 +11,19 @@
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   configuredHttpOrigin,
   DEFAULT_CLIENT_TIMEOUT_MS,
   readBoundedJsonResponse,
 } from "./core/api-client.ts";
 import { generateAgentKeypair, signedHeaders } from "./core/identity.ts";
+import { secretFromEnv } from "./core/key-files.ts";
 import { isValidHandle, isValidServiceSlug, normalizeHandle, normalizeServiceSlug } from "./core/network.ts";
 import { fmt, usd } from "./core/types.ts";
 
 const API = configuredHttpOrigin(process.env.MONEY_API ?? "http://127.0.0.1:4021", "MONEY_API");
 const USER_ID = process.env.MONEY_USER_ID;
-const OWNER_KEY = process.env.MONEY_OWNER_KEY;
 
 function arg(flag: string, fallback: string): string {
   const i = process.argv.indexOf(`--${flag}`);
@@ -92,9 +93,16 @@ async function post<T>(
 }
 
 async function main() {
-  if (!USER_ID || !OWNER_KEY) {
-    throw new Error("MONEY_USER_ID and MONEY_OWNER_KEY are required (run npm run onboard first)");
+  let ownerKey: string | undefined;
+  try {
+    ownerKey = secretFromEnv("MONEY_OWNER_KEY");
+  } catch (error) {
+    throw new Error(`could not read MONEY_OWNER_KEY_FILE: ${error instanceof Error ? error.message : error}`);
   }
+  if (!USER_ID || !ownerKey) {
+    throw new Error("MONEY_USER_ID and MONEY_OWNER_KEY_FILE (or MONEY_OWNER_KEY) are required (run npm run onboard first)");
+  }
+  const OWNER_KEY = ownerKey;
   const handle = normalizeHandle(arg("handle", "research-cloud"));
   const slug = normalizeServiceSlug(arg("slug", "market-report"));
   if (!isValidHandle(handle)) throw new Error("--handle must be a valid 3-32 character network handle");
@@ -177,15 +185,23 @@ async function main() {
   serviceState.serviceId = service.id;
   saveState(statePath, state);
 
+  // The provider key already lives in the 0600 state file; a bare one-line
+  // copy lets the seller process read it via MONEY_PROVIDER_KEY_FILE so the
+  // private key never transits stdout or an env file in plain text.
+  const relativeKeyPath = join(dirname(statePath), `provider-${handle}.key`);
+  const providerKeyPath = isAbsolute(relativeKeyPath) ? relativeKeyPath : resolve(relativeKeyPath);
+  writeFileSync(providerKeyPath, state.providerKeys.privateKey + "\n", { encoding: "utf8", mode: 0o600 });
+
   console.log(`provider ${provider.id} (@${provider.handle})`);
   console.log(`service  ${service.id} (${service.address}) -> ${endpointUrl} at ${fmt(price)}`);
   console.log(`resumable seller state saved to ${statePath}`);
+  console.log(`provider key written to ${providerKeyPath}`);
   console.log();
-  console.log("Seller environment — keep MONEY_PROVIDER_KEY out of git:");
+  console.log("Seller environment (read the key by path — it stays out of stdout and git):");
   console.log(JSON.stringify({
     MONEY_API: API,
     MONEY_PROVIDER_ID: provider.id,
-    MONEY_PROVIDER_KEY: state.providerKeys.privateKey,
+    MONEY_PROVIDER_KEY_FILE: providerKeyPath.replace(/\\/g, "/"),
     MONEY_SERVICE_ID: service.id,
   }, null, 2));
 }

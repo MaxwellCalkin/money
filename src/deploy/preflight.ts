@@ -62,7 +62,9 @@ const SEGREGATED_AUTHORITY = [
   "MONEY_COMPLIANCE_OPS_TOKEN",
   "MONEY_COMPLIANCE_OPERATOR_KEY",
   "MONEY_OWNER_KEY",
+  "MONEY_OWNER_KEY_FILE",
   "MONEY_AGENT_KEY",
+  "MONEY_AGENT_KEY_FILE",
 ] as const;
 
 function required(env: Environment, name: string): string {
@@ -80,6 +82,14 @@ function secret(env: Environment, name: string, min = 16): string {
 function forbidden(env: Environment, ...names: string[]): void {
   const present = names.filter((name) => Boolean(env[name]?.trim()));
   if (present.length) throw new Error(`${present.join(", ")} must not be present in this service`);
+}
+
+function exactlyOne(env: Environment, ...names: string[]): void {
+  const present = names.filter((name) => Boolean(env[name]?.trim()));
+  if (present.length !== 1) {
+    throw new Error(`configure exactly one of ${names.join(", ")}`);
+  }
+  required(env, present[0]!);
 }
 
 function restrictAuthority(env: Environment, ...allowed: string[]): void {
@@ -235,8 +245,7 @@ export function preflightProductionService(
     case "treasury-payouts":
       database(env, "MONEY_PAYOUT_DATABASE_URL");
       secret(env, "MONEY_COLUMN_PAYOUT_API_KEY", 16);
-      required(env, "MONEY_COLUMN_PAYOUT_BANK_ACCOUNT_ID");
-      required(env, "MONEY_COLUMN_PAYOUT_ACCOUNT_NUMBER_ID");
+      exactlyOne(env, "MONEY_COLUMN_PAYOUT_BANK_ACCOUNT_ID", "MONEY_COLUMN_PAYOUT_ACCOUNT_NUMBER_ID");
       forbidden(env, "MONEY_COLUMN_WEBHOOK_SECRET", "MONEY_COLUMN_EVENT_API_KEY");
       restrictAuthority(env, "MONEY_PAYOUT_DATABASE_URL", "MONEY_COLUMN_PAYOUT_API_KEY");
       break;
