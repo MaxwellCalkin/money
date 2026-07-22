@@ -71,7 +71,7 @@ needs:
 | --- | --- | --- |
 | `migrate.env` | schema owner, deployment window only | none |
 | `api.env` | `money_app` | hosted-URL and external-header decrypt keys; remote signer URL, public address, and bearer credential; never provider credentials |
-| `database-ops.env` | `money_ops` | random 32+ character ops token |
+| `database-ops.env` | `money_ops` | random 32+ character ops token; optional `MONEY_LEDGER_HEALTH_INTERVAL_MS` (default 300000, floor 30000) for the ledger-integrity recorder the owner dashboard reads |
 | `external-worker.env` | `money_worker` | none |
 | `treasury-webhook.env` | `money_treasury_ingress` | Column webhook secret only |
 | `treasury-events.env` | `money_treasury_worker` | read-only Column event API key |

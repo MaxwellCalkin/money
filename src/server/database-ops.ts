@@ -45,7 +45,8 @@ export function createDatabaseOpsApi(
           (select max(version) from money.schema_migrations) as version,
           to_regprocedure('money_private.request_agent_payment(text,text,text,text,bigint,text)') is not null
           and to_regprocedure('money_private.treasury_health()') is not null
-          and to_regprocedure('money_private.compliance_subject_state(text)') is not null as posting_ready
+          and to_regprocedure('money_private.compliance_subject_state(text)') is not null
+          and to_regprocedure('money_private.record_ledger_health()') is not null as posting_ready
       `);
       const row = result.rows[0];
       if (!row?.version || !row.posting_ready) {
@@ -195,16 +196,44 @@ export function createDatabaseOpsApi(
 
 export async function startDatabaseOpsServer(port = Number(process.env.OPS_PORT ?? 4022)) {
   enforceProductionPreflight("database-ops");
-  const db = new PostgresDatabase({ applicationName: "money-ops" });
+  // The integrity probe is a full-journal scan; a bounded statement timeout
+  // keeps a slow scan from occupying the ops pool indefinitely.
+  const db = new PostgresDatabase({ applicationName: "money-ops", statementTimeoutMs: 60_000 });
   if (process.env.MONEY_AUTO_MIGRATE === "true") await runMigrations(db);
   const app = createDatabaseOpsApi(db);
   const server = serve({ fetch: app.fetch, hostname: listenHost("127.0.0.1"), port });
   console.log(`database health and reconciliation listening on :${port}`);
 
+  // Record the global integrity verdict on a schedule under the ops role.
+  // The product API serves only the latest stored row, so this loop is what
+  // keeps the owner dashboard's integrity indicator honest and fresh. Like
+  // every other periodic worker, iterations run to completion before the
+  // next sleep — the full-journal probe must never overlap itself.
+  const ledger = new PostgresLedger(db);
+  const healthIntervalMs = Math.max(30_000, Number(process.env.MONEY_LEDGER_HEALTH_INTERVAL_MS ?? 300_000) || 300_000);
+  const recordHealth = async () => {
+    try {
+      const verdict = await ledger.recordLedgerHealth();
+      if (!verdict.zeroSum || !verdict.receiptsOk) {
+        console.error(`ledger integrity FAILED: zeroSum=${verdict.zeroSum} receiptsOk=${verdict.receiptsOk}`);
+      }
+    } catch (error) {
+      console.error("ledger health recording failed", error instanceof Error ? error.message : error);
+    }
+  };
+  let stoppingHealth = false;
+  void (async () => {
+    while (!stoppingHealth) {
+      await recordHealth();
+      await new Promise<void>((resolve) => setTimeout(resolve, healthIntervalMs));
+    }
+  })();
+
   let closing = false;
   const close = async () => {
     if (closing) return;
     closing = true;
+    stoppingHealth = true;
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await db.close();
   };

@@ -117,7 +117,8 @@ grant execute on function money_private.register_public_identity(text, text, tex
   money_private.get_unresolved_external_payment_by_resource(text, text),
   money_private.is_external_approval(text, uuid),
   money_private.payment_feed(text, integer),
-  money_private.get_receipt(text, uuid)
+  money_private.get_receipt(text, uuid),
+  money_private.latest_ledger_health()
   to money_app;
 grant execute on function money_private.grant_mandate(text, text, text, bigint, bigint, bigint, bigint, bigint, text[], timestamptz, text)
   to money_app;
@@ -312,6 +313,10 @@ grant select on money.schema_migrations, money.accounts, money.assets,
   money.treasury_asset_snapshots, money.treasury_poll_cursors
   to money_ops;
 grant execute on function money_private.ledger_health(), money_private.treasury_health() to money_ops;
+-- Ops records ledger-health verdicts; the product role may only read the
+-- latest stored verdict (money_private.latest_ledger_health, granted with the
+-- other money_app function grants), never run the global probe itself.
+grant execute on function money_private.record_ledger_health() to money_ops;
 
 -- Compliance case data is segregated from ordinary financial operations.
 -- In particular, product and general ops roles cannot infer regulatory-report

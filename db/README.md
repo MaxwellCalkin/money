@@ -129,6 +129,17 @@ The worker role receives only this atomic command, not the older independent
 evidence function, and migration `0010` removes the obsolete split-phase inbox
 completion function entirely.
 
+Migration `0011_ledger_health_reports.sql` stores ledger-integrity verdicts so
+the owner surface can serve a real indicator without the global probe
+privilege. `money_private.record_ledger_health()` (granted to `money_ops`;
+executed by the database-ops service at startup and every
+`MONEY_LEDGER_HEALTH_INTERVAL_MS`, default five minutes) runs the existing
+`ledger_health()` probe and appends the verdict to the append-only
+`money.ledger_health_reports` table. `money_private.latest_ledger_health()`
+(granted to `money_app`) returns only the newest stored row — two booleans and
+a timestamp — so the product role never touches the journal-wide probe, and
+the API degrades to a null indicator when no verdict exists yet.
+
 `money_private.post_transfer_kernel(...)` is the generalized posting kernel
 under the current schema. It is not granted to the application role. The old
 `post_transfer(...)` signature remains a compatibility wrapper; application

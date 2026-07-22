@@ -96,7 +96,8 @@ jobs:
               "dist/treasury/payout-worker.js", "dist/treasury/reconciler.js",
               "dist/compliance/webhook-server.js", "dist/compliance/event-worker.js",
               "dist/compliance/onboarding-worker.js", "dist/compliance/review-worker.js",
-              "dist/compliance/ops-server.js", "dist/compliance/console-server.js"
+              "dist/compliance/ops-server.js", "dist/compliance/console-server.js",
+              "/app/.money-production-image"
             ];
             const forbidden = [
               "/bin/sh", "/usr/local/bin/npm", "/usr/local/bin/npx",

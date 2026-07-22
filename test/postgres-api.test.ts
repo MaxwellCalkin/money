@@ -161,10 +161,16 @@ describe("Postgres signed product API", () => {
     const token = await session(user.id, ownerKeys.privateKey);
     const state = await api.app.request("/owner/state", { headers: { authorization: `Bearer ${token}` } });
     expect(state.status).toBe(200);
+    // Integrity is honest: null until the ops role has recorded a verdict,
+    // then the latest stored verdict — never a hardcoded constant.
     expect(await state.json()).toEqual(expect.objectContaining({
-      zeroSum: true,
-      receiptsOk: true,
+      integrity: null,
       approvals: [expect.objectContaining({ id: pending.approval.id, status: "pending" })],
+    }));
+    await db.query("select * from money_private.record_ledger_health()");
+    const verified = await api.app.request("/owner/state", { headers: { authorization: `Bearer ${token}` } });
+    expect(await verified.json()).toEqual(expect.objectContaining({
+      integrity: { zeroSum: true, receiptsOk: true, verifiedAt: expect.any(Number) },
     }));
 
     const approved = await api.app.request(`/owner/approvals/${pending.approval.id}/approve`, {

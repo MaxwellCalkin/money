@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   configuredHttpOrigin,
@@ -7,7 +8,7 @@ import {
 } from "../src/core/api-client.ts";
 import { readBoundedResponseText } from "../src/core/bounded-response.ts";
 import { isLocalEndpointHostname, isLoopbackHostname } from "../src/core/url-security.ts";
-import { preflightProductionService } from "../src/deploy/preflight.ts";
+import { enforceProductionPreflight, preflightProductionService, PRODUCTION_IMAGE_MARKER } from "../src/deploy/preflight.ts";
 import { listenHost } from "../src/server/listen.ts";
 import { payoutSourceFromEnv } from "../src/treasury/payout-worker.ts";
 
@@ -166,6 +167,38 @@ describe("production deployment contract", () => {
     ]) {
       expect(() => preflightProductionService("treasury-payouts", invalid)).toThrow(/exactly one/);
       expect(() => payoutSourceFromEnv(invalid)).toThrow(/exactly one/);
+    }
+  });
+
+  it("refuses to run a production-built image with NODE_ENV overridden", () => {
+    const dir = mkdtempSync(join(tmpdir(), "money-marker-"));
+    try {
+      const marker = join(dir, ".money-production-image");
+      writeFileSync(marker, "money production image\n", "utf8");
+      // Marker present + NODE_ENV missing or overridden: crash, never no-op.
+      expect(() => enforceProductionPreflight("api", {}, marker))
+        .toThrow(/built for production/);
+      expect(() => enforceProductionPreflight("api", { NODE_ENV: "development" }, marker))
+        .toThrow(/built for production/);
+      // NODE_ENV=production runs the real preflight (which rejects an empty env).
+      expect(() => enforceProductionPreflight("api", { NODE_ENV: "production" }, marker))
+        .toThrow(/not configured/);
+      // No marker (a developer machine): development stays a no-op.
+      enforceProductionPreflight("api", {}, join(dir, "missing-marker"));
+      // The Dockerfile actually lands the marker at the exact path the
+      // preflight constant reads: runtime WORKDIR /app plus the relative
+      // COPY destination must compose to PRODUCTION_IMAGE_MARKER, and the CI
+      // image job verifies the built image contains that absolute path.
+      expect(PRODUCTION_IMAGE_MARKER).toBe("/app/.money-production-image");
+      const dockerfile = readFileSync(resolve(ROOT, "Dockerfile"), "utf8");
+      const runtimeStage = dockerfile.slice(dockerfile.indexOf(" AS runtime"));
+      expect(runtimeStage).toMatch(/^WORKDIR \/app$/m);
+      const copyIndex = runtimeStage.indexOf("COPY --from=build --chown=65532:65532 /app/production-image.marker ./.money-production-image");
+      expect(copyIndex).toBeGreaterThan(runtimeStage.indexOf("WORKDIR /app"));
+      const workflow = readFileSync(resolve(ROOT, ".github/workflows/ci.yml"), "utf8");
+      expect(workflow).toContain(`"${PRODUCTION_IMAGE_MARKER}"`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

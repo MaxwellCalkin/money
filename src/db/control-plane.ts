@@ -276,4 +276,16 @@ export class PostgresControlPlane {
     if (!row) throw new Error("ledger health returned no row");
     return { zeroSum: row.zero_sum, receiptsOk: row.receipts_ok };
   }
+
+  /** The latest stored integrity verdict — the only ledger-health surface the
+   * product role can reach (the global probe itself is ops-only). */
+  async latestLedgerHealth(): Promise<{ zeroSum: boolean; receiptsOk: boolean; verifiedAt: Date } | undefined> {
+    const result = await this.db.query<{ zero_sum: boolean; receipts_ok: boolean; verified_at: Date | string }>(
+      "select * from money_private.latest_ledger_health()"
+    );
+    const row = result.rows[0];
+    return row
+      ? { zeroSum: row.zero_sum, receiptsOk: row.receipts_ok, verifiedAt: new Date(row.verified_at) }
+      : undefined;
+  }
 }

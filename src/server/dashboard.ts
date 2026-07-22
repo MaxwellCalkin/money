@@ -39,6 +39,7 @@ export const dashboardHtml = `<!doctype html>
   .metric .label { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
   .metric .value { margin-top:8px; font:700 21px var(--mono); }
   .metric .value.green { color:var(--green); }
+  .metric .value.red { color:var(--danger, #c0392b); }
   .grid { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(300px,.75fr); gap:18px; }
   .stack { display:grid; gap:18px; align-content:start; }
   section { min-width:0; }
@@ -93,6 +94,7 @@ export const dashboardHtml = `<!doctype html>
       <div class="metric"><div class="label">Agents</div><div id="agentCount" class="value">0</div></div>
       <div class="metric"><div class="label">Needs approval</div><div id="pendingCount" class="value">0</div></div>
       <div class="metric"><div class="label">Paid services</div><div id="serviceCount" class="value">0</div></div>
+      <div class="metric"><div class="label">Ledger integrity</div><div id="integrityStatus" class="value">—</div><div id="integrityMeta" class="label"></div></div>
     </div>
     <div class="grid">
       <div class="stack">
@@ -173,6 +175,11 @@ export const dashboardHtml = `<!doctype html>
     const agents=s.accounts.filter((a)=>a.kind==="agent"); const pending=s.approvals.filter((a)=>a.status==="pending");
     $("totalBalance").textContent=fmt(s.accounts.reduce((n,a)=>a.kind==="external"?n:n+a.balanceMicros,0));
     $("agentCount").textContent=agents.length; $("pendingCount").textContent=pending.length; $("serviceCount").textContent=s.services.length;
+    // Postgres API: s.integrity is the latest ops-recorded verdict or null.
+    // JSONL API: legacy top-level booleans computed per request.
+    const integ=s.integrity!==undefined?s.integrity:(typeof s.zeroSum==="boolean"?{zeroSum:s.zeroSum,receiptsOk:s.receiptsOk,verifiedAt:s.now}:null);
+    if(!integ){$("integrityStatus").textContent="not yet verified";$("integrityStatus").className="value";$("integrityMeta").textContent="awaiting ops verdict";}
+    else{const ok=integ.zeroSum&&integ.receiptsOk;$("integrityStatus").textContent=ok?"verified":"FAILED";$("integrityStatus").className="value "+(ok?"green":"red");$("integrityMeta").textContent="checked "+new Date(integ.verifiedAt).toLocaleTimeString();}
     $("approvalCount").textContent=s.approvals.length+" total";
     $("approvals").innerHTML=[...s.approvals].reverse().map((a)=>{ const agent=profile(s,a.agentId),payee=profile(s,a.to); const actions=a.status==="pending"?'<div class="approval-actions"><button class="primary" data-action="approve" data-id="'+esc(a.id)+'">Approve exact payment</button><button class="danger" data-action="reject" data-id="'+esc(a.id)+'">Reject</button></div>':""; return '<div class="approval"><div class="approval-top"><div><div class="name">'+esc(display(agent))+' → '+esc(display(payee))+'</div><div class="meta">'+esc(a.agentId)+' → '+esc(a.to)+' · '+esc(a.id)+'</div></div><div><div class="approval-amount">'+fmt(a.amount)+'</div><span class="status '+esc(a.status)+'">'+esc(a.status)+'</span></div></div><div class="memo">'+esc(a.memo||"No memo")+'</div>'+actions+(a.reason?'<div class="meta">'+esc(a.reason)+'</div>':"")+'</div>'; }).join("")||'<div class="empty">No approval requests yet</div>';
     document.querySelectorAll("button[data-action]").forEach((b)=>b.addEventListener("click",()=>resolve(b.dataset.id,b.dataset.action)));

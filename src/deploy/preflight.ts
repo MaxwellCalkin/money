@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { parseExternalHeaderKeyring } from "../bridge/cipher.ts";
 import { parseEvmRpcNetworks } from "../bridge/evm-settlement.ts";
@@ -334,15 +335,32 @@ export function preflightProductionService(
   return { service, ok: true };
 }
 
+/** The Dockerfile bakes this marker into the read-only production image. Its
+ * presence proves the process is running in a container built for production
+ * regardless of what NODE_ENV says at runtime. */
+export const PRODUCTION_IMAGE_MARKER = "/app/.money-production-image";
+
 /** Production entry points call this before opening sockets, database pools,
  * or provider clients. Development and tests retain their narrow local
  * defaults, while a production process cannot bypass the deployment contract
- * merely because an operator skipped the separate preflight command. */
+ * merely because an operator skipped the separate preflight command — or
+ * overrode NODE_ENV inside the production image, which crashes here instead
+ * of silently standing down every safeguard. */
 export function enforceProductionPreflight(
   service: ProductionService,
   env: Environment = process.env,
+  productionMarkerPath: string = PRODUCTION_IMAGE_MARKER,
 ): void {
-  if (env.NODE_ENV === "production") preflightProductionService(service, env);
+  if (env.NODE_ENV === "production") {
+    preflightProductionService(service, env);
+    return;
+  }
+  if (existsSync(productionMarkerPath)) {
+    throw new Error(
+      `this container was built for production but NODE_ENV is ${JSON.stringify(env.NODE_ENV ?? "")} — ` +
+      "refusing to start with the deployment contract disabled",
+    );
+  }
 }
 
 async function main() {

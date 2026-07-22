@@ -35,6 +35,16 @@ authoritative evidence that a runtime or hosted control was active.
 - Pins the certified v0.13 compliance deployment to Persona's official API
   origin and dated contract, and requires all schema changes to pass through
   the standalone reviewed migration job.
+- Post-candidate hardening: the payout worker and production preflight share
+  one exactly-one payout-source contract; onboarding writes private keys to
+  gitignored files read via `*_FILE` variables and targets the Postgres
+  kernel with a dev-only, production-refused approval CLI; the MCP wallet
+  surfaces recovery failures instead of swallowing them; migration `0011`
+  stores ops-recorded ledger-health verdicts so the owner surface serves a
+  real integrity indicator without the global probe privilege; and the
+  production image bakes a marker that makes an overridden `NODE_ENV` crash
+  at startup instead of silently disabling the deployment contract (the CI
+  image contract verifies the marker's exact path).
 - Hardens remote x402 signing with a required production bearer credential,
   HTTPS and non-loopback enforcement, redirect refusal, a bounded response,
   nonzero signer identity, and local EIP-712 signature verification.
@@ -87,7 +97,7 @@ Additionally:
    manifest digest; do not substitute the local image ID for that digest.
 3. Run `npm run test:postgres-live` against an explicitly disposable loopback
    PostgreSQL 18 database with data checksums enabled. The gate applies all
-   migrations through `0010`, proves a no-op replay, applies `db/roles.sql`
+   migrations through `0011`, proves a no-op replay, applies `db/roles.sql`
    twice, checks effective roles and removed bypasses, races independent
    connections against one spending cap, and reconciles the journal. Repeat on
    an isolated production-shaped restore for the backup/forward-repair drill.

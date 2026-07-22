@@ -153,6 +153,22 @@ export class PostgresLedger {
     return BigInt(result.rows[0].available_micros);
   }
 
+  /** Run the global integrity probe (per-transfer zero-sum, receipt evidence
+   * hashes) and store the verdict. Runs under the ops role on a schedule; the
+   * product API serves only the latest stored row, never the probe itself. */
+  async recordLedgerHealth(): Promise<{ zeroSum: boolean; receiptsOk: boolean; verifiedAt: Date }> {
+    // Wrapped in a transaction so the configured statement timeout bounds the
+    // full-journal scan.
+    return this.db.transaction(async (tx) => {
+      const result = await tx.query<{ zero_sum: boolean; receipts_ok: boolean; verified_at: Date | string }>(
+        "select * from money_private.record_ledger_health()"
+      );
+      const row = result.rows[0];
+      if (!row) throw new Error("ledger health recording returned no row");
+      return { zeroSum: row.zero_sum, receiptsOk: row.receipts_ok, verifiedAt: new Date(row.verified_at) };
+    });
+  }
+
   /** Recompute every cached balance from the immutable journal. A production
    * monitor runs this continuously and pages on any mismatch. */
   async reconcile(): Promise<Array<{

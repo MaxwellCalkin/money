@@ -10,6 +10,10 @@ COPY scripts ./scripts
 COPY src ./src
 RUN npm run typecheck && npm run build
 RUN npm prune --omit=dev --no-audit --no-fund
+# Baked production marker: enforceProductionPreflight refuses to start any
+# service inside this image when NODE_ENV is overridden away from
+# "production", so the deployment contract cannot be silently disabled.
+RUN node -e "require('fs').writeFileSync('production-image.marker', 'money production image: NODE_ENV must remain \"production\".\n')"
 
 FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:af85d11ce7ef10172855a6e3649e3e8125b1b9e3ca41849ec2918036f05cb212 AS runtime
 ARG SOURCE_COMMIT=unknown
@@ -21,6 +25,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build --chown=65532:65532 /app/node_modules ./node_modules
 COPY --from=build --chown=65532:65532 /app/dist ./dist
+COPY --from=build --chown=65532:65532 /app/production-image.marker ./.money-production-image
 COPY --chown=65532:65532 package.json package-lock.json ./
 COPY --chown=65532:65532 db ./db
 COPY --chown=65532:65532 docs ./docs

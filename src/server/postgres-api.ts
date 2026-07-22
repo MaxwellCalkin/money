@@ -935,8 +935,31 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     };
   };
 
+  // The ops role records real verdicts (per-transfer zero-sum, receipt
+  // evidence-hash recheck) on a schedule; the product role serves only the
+  // latest stored row — a cheap single-row read the role matrix allows. An
+  // unavailable or never-recorded verdict degrades to null: this indicator
+  // must never take the owner surface down or manufacture assurance.
+  const ledgerIntegrityView = async () => {
+    try {
+      const report = await control.latestLedgerHealth();
+      return report
+        ? {
+            integrity: {
+              zeroSum: report.zeroSum,
+              receiptsOk: report.receiptsOk,
+              verifiedAt: report.verifiedAt.getTime(),
+            },
+          }
+        : { integrity: null };
+    } catch (error) {
+      console.error("ledger integrity read failed", error);
+      return { integrity: null };
+    }
+  };
+
   const ownerSnapshot = async (userId: string) => {
-    const [accounts, mandates, approvals, feed, services, externalPayments, treasuryState, complianceState] = await Promise.all([
+    const [accounts, mandates, approvals, feed, services, externalPayments, treasuryState, complianceState, integrityView] = await Promise.all([
       control.accountState(userId),
       policy.listMandates(userId, 100),
       policy.listApprovals(userId, undefined, 100),
@@ -945,14 +968,12 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       external.list(userId, 100),
       treasurySnapshot(userId, true),
       compliance.state(userId),
+      ledgerIntegrityView(),
     ]);
     const renderedApprovals = await approvalViews(userId, approvals.reverse());
     return {
       now: Date.now(),
-      // Posting constraints enforce zero-sum journals and immutable evidence.
-      // Expensive global recomputation belongs to /ops/reconcile, not a UI poll.
-      zeroSum: true,
-      receiptsOk: true,
+      ...integrityView,
       accounts: accounts.map(accountView),
       services,
       mandates: mandates.map(mandateView),
@@ -1002,6 +1023,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
           and to_regprocedure('money_private.activate_external_payment(text,uuid,bytea,bytea,text,timestamptz,timestamptz)') is not null
           and to_regprocedure('money_private.resolve_external_approval_v2(text,uuid,text,text,bytea,bytea,text,timestamptz,timestamptz)') is not null
           and to_regprocedure('money_private.get_unresolved_external_payment_by_resource(text,text)') is not null
+          and to_regprocedure('money_private.latest_ledger_health()') is not null
           and to_regprocedure('money_private.confirm_external_payment(text,uuid,text)') is not null
           and to_regprocedure('money_private.request_treasury_payout(text,text,uuid,text,bigint)') is not null
           and to_regprocedure('money_private.treasury_control_state()') is not null

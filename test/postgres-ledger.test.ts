@@ -79,6 +79,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0008", applied: false }),
       expect.objectContaining({ version: "0009", applied: false }),
       expect.objectContaining({ version: "0010", applied: false }),
+      expect.objectContaining({ version: "0011", applied: false }),
     ]);
     const rows = await db.query<{ version: string; checksum: string }>("select version, checksum from money.schema_migrations");
     expect(rows.rows).toEqual([
@@ -92,6 +93,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0008", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0009", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0010", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
+      expect.objectContaining({ version: "0011", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
     ]);
     await db.query("update money.schema_migrations set checksum = repeat('0', 64) where version = '0001'");
     await expect(runMigrations(db)).rejects.toThrow(/checksum changed/);
@@ -235,7 +237,7 @@ describe("Postgres ledger kernel", () => {
     expect((await app.request("/health/live")).status).toBe(200);
     const ready = await app.request("/health/ready");
     expect(ready.status).toBe(200);
-    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0010" }));
+    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0011" }));
     expect((await app.request("/ops/reconcile")).status).toBe(404);
     expect((await app.request("/ops/treasury")).status).toBe(404);
     const reconciled = await app.request("/ops/reconcile", { headers: { authorization: "Bearer ops-secret" } });
@@ -388,6 +390,9 @@ describe("Postgres ledger kernel", () => {
         has_function_privilege('money_app', 'money_private.consume_signed_request(text,text,text,text,bigint,bytea)', 'EXECUTE') as app_signed_auth,
         has_function_privilege('money_app', 'money_private.create_owner_session(text,bytea)', 'EXECUTE') as app_session,
         has_function_privilege('money_app', 'money_private.ledger_health()', 'EXECUTE') as app_global_health,
+        has_function_privilege('money_app', 'money_private.latest_ledger_health()', 'EXECUTE') as app_latest_health,
+        has_function_privilege('money_app', 'money_private.record_ledger_health()', 'EXECUTE') as app_record_health,
+        has_function_privilege('money_ops', 'money_private.record_ledger_health()', 'EXECUTE') as ops_record_health,
         has_function_privilege('money_app', 'money_private.register_service(text,text,text,text,text,text,bigint,text)', 'EXECUTE') as app_market_register,
         has_function_privilege('money_app', 'money_private.request_challenge_payment(text,uuid)', 'EXECUTE') as app_market_challenge,
         has_function_privilege('money_app', 'money_private.issue_refund(text,uuid,bigint,text,text)', 'EXECUTE') as app_market_refund,
@@ -509,6 +514,9 @@ describe("Postgres ledger kernel", () => {
       app_signed_auth: true,
       app_session: true,
       app_global_health: false,
+      app_latest_health: true,
+      app_record_health: false,
+      ops_record_health: true,
       app_market_register: true,
       app_market_challenge: true,
       app_market_refund: true,
@@ -637,7 +645,7 @@ describe("Postgres ledger kernel", () => {
       );
       expect((await db.query("select * from money_private.account_state('usr_role0001', 'USD')")).rows).toHaveLength(1);
       expect((await db.query("select * from money_private.list_public_services(10, null, null)")).rows).toEqual([]);
-      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0010" });
+      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0011" });
       await expect(db.query(
         "select * from money_private.register_account('usr_bypass01', 'user', 'Bypass', null, null, $1)",
         [`bypass-public-key-${"x".repeat(40)}`]

@@ -68,7 +68,7 @@ backup process. In-memory and PGlite tests cannot substitute for these rows.
 
 | Gate | Result and evidence |
 |---|---|
-| Fresh migrations apply through `0010` | `<database ID, output, migration rows/checksums>` |
+| Fresh migrations apply through `0011` | `<database ID, output, migration rows/checksums>` |
 | Rerun is a no-op and altered checksum is rejected | `<evidence>` |
 | `db/roles.sql` applies from the administrative identity | `<evidence>` |
 | Effective roles allow only the documented commands | `<positive and negative assertions>` |
