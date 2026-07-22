@@ -1,0 +1,45 @@
+{
+  "name": "@agentmoney/seller-sdk",
+  "version": "0.13.0",
+  "description": "Seller SDK for the money agent-payment network: a Hono paywall middleware plus a signed client for challenges, receipt redemption, and refunds.",
+  "type": "module",
+  "scripts": {
+    "prepack": "node ../../scripts/build-packages.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "index.d.ts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "hono": "^4.12.30"
+  },
+  "peerDependenciesMeta": {
+    "hono": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "agent-payments",
+    "paywall",
+    "hono",
+    "x402",
+    "http-402",
+    "ai-agents"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MaxwellCalkin/money.git",
+    "directory": "packages/seller-sdk"
+  },
+  "license": "UNLICENSED"
+}

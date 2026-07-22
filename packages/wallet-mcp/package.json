@@ -1,0 +1,37 @@
+{
+  "name": "@agentmoney/wallet-mcp",
+  "version": "0.13.0",
+  "description": "MCP wallet for AI agents on the money network: check balance, pay accounts, and auto-pay 402-gated URLs under an owner-signed mandate.",
+  "type": "module",
+  "scripts": {
+    "prepack": "node ../../scripts/build-packages.mjs"
+  },
+  "bin": {
+    "money-wallet-mcp": "dist/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agent-payments",
+    "x402",
+    "wallet",
+    "ai-agents"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MaxwellCalkin/money.git",
+    "directory": "packages/wallet-mcp"
+  },
+  "license": "UNLICENSED"
+}

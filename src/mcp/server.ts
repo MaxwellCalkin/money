@@ -54,7 +54,7 @@ try {
   // it deserves a directed message, not a raw ENOENT stack.
   console.error(
     `money MCP: could not read MONEY_AGENT_KEY_FILE (${error instanceof Error ? error.message : error}). ` +
-    "Run npm run onboard on this machine, or fix the path in .mcp.json.",
+    "Fix the path in .mcp.json, or re-run onboarding on this machine to write the key file.",
   );
   process.exit(1);
 }
@@ -63,7 +63,7 @@ const fetchPolicy = new AgentFetchPolicy({
 });
 
 if (!AGENT_ID || !AGENT_KEY) {
-  console.error("MONEY_AGENT_ID and MONEY_AGENT_KEY_FILE (or MONEY_AGENT_KEY) are required (both come from onboarding: npm run onboard)");
+  console.error("MONEY_AGENT_ID and MONEY_AGENT_KEY_FILE (or MONEY_AGENT_KEY) are required — both come from onboarding on your money network");
   process.exit(1);
 }
 
@@ -436,7 +436,7 @@ function warnRecoveryUnsupported(path: string): void {
   if (recoveryUnsupportedWarned) return;
   recoveryUnsupportedWarned = true;
   console.error(
-    `money MCP: ${API} does not implement ${path} — crash recovery of in-flight external payments is unavailable on this API. Point MONEY_API at the Postgres server (npm run api:db) for durable recovery.`,
+    `money MCP: ${API} does not implement ${path} — crash recovery of in-flight external payments is unavailable on this API. Point MONEY_API at a network API with durable recovery (the Postgres-backed server).`,
   );
 }
 

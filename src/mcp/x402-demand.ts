@@ -1,4 +1,4 @@
-import { decodePaymentRequiredV2, type X402V2PaymentRequired } from "../bridge/x402-v2.ts";
+import { decodePaymentRequiredV2, type X402V2PaymentRequired } from "../bridge/x402-v2-wire.ts";
 
 export interface ExternalPaymentDemand {
   protocolVersion: 1 | 2;

@@ -22,10 +22,17 @@ import {
   type XPaymentPayload,
 } from "./x402.ts";
 import { getAddress } from "viem";
+import {
+  decodeX402V2Header,
+  X402_V2_PAYMENT_HEADER,
+  X402_V2_RESPONSE_HEADER,
+  type X402V2Requirement,
+} from "./x402-v2-wire.ts";
 
-export const X402_V2_PAYMENT_HEADER = "payment-signature";
-export const X402_V2_REQUIRED_HEADER = "payment-required";
-export const X402_V2_RESPONSE_HEADER = "payment-response";
+// The wire-level constants, types, and decode helpers live in the
+// dependency-free x402-v2-wire.ts (shared with the published agent wallet);
+// re-exported here so server-side consumers keep one import site.
+export * from "./x402-v2-wire.ts";
 
 export interface EvmTypedDataSigner {
   readonly address: `0x${string}`;
@@ -35,24 +42,6 @@ export interface EvmTypedDataSigner {
     primaryType: string;
     message: Record<string, unknown>;
   }): Promise<`0x${string}`>;
-}
-
-export interface X402V2Requirement {
-  scheme: string;
-  network: `${string}:${string}`;
-  amount: string;
-  asset: string;
-  payTo: string;
-  maxTimeoutSeconds: number;
-  extra: Record<string, unknown>;
-}
-
-export interface X402V2PaymentRequired {
-  x402Version: 2;
-  error?: string;
-  resource: ResourceInfo;
-  accepts: X402V2Requirement[];
-  extensions?: Record<string, unknown>;
 }
 
 export interface NormalizedExternalRequirement {
@@ -298,26 +287,6 @@ export class X402V2EvmPaymentSigner implements X402PaymentSigner {
       payload,
     };
   }
-}
-
-export function encodeX402V2Header(value: unknown): string {
-  return Buffer.from(JSON.stringify(value), "utf8").toString("base64");
-}
-
-export function decodeX402V2Header<T = unknown>(value: string): T | null {
-  try {
-    if (!value || value.length > 128 * 1024) return null;
-    return JSON.parse(Buffer.from(value, "base64").toString("utf8")) as T;
-  } catch {
-    return null;
-  }
-}
-
-export function decodePaymentRequiredV2(value: string): X402V2PaymentRequired | null {
-  const parsed = decodeX402V2Header<X402V2PaymentRequired>(value);
-  if (!parsed || parsed.x402Version !== 2 || !parsed.resource
-    || !Array.isArray(parsed.accepts) || parsed.accepts.length === 0) return null;
-  return parsed;
 }
 
 export function decodePaymentPayloadV2(value: string): PaymentPayload | null {

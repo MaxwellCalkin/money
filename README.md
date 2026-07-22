@@ -322,6 +322,24 @@ enabled by default. Opt-ins must resolve entirely to loopback, RFC1918, CGNAT,
 or IPv6 ULA addresses. Link-local metadata, multicast, documentation, and
 other reserved ranges cannot be enabled through this escape hatch.
 
+### Publishable packages
+
+`npm run build:packages` assembles two publish-ready packages from this same
+source tree (no duplication) into `packages/`:
+
+- **`packages/wallet-mcp`** — the agent wallet MCP server as an npx-runnable
+  bin. Ships with only `@modelcontextprotocol/sdk` and `zod`; the x402 wire
+  decoders it needs live in the dependency-free `src/bridge/x402-v2-wire.ts`,
+  so `viem` and `@x402/*` stay server-side.
+- **`packages/seller-sdk`** — `moneyPaid`, `createMoneySellerClient`, and
+  `secretFromEnv` with zero runtime dependencies (`hono` is an optional
+  types-only peer) and hand-written declarations.
+
+`test/packages-build.test.ts` builds both in CI and pins the bin shebang, the
+dependency guards, and the declaration surface. Publishing is manual
+(`npm publish` from each package directory) and still requires the scope,
+license, and version decisions tracked in the package manifests.
+
 ### Publish a paid API
 
 Provider identities are created by an owner, then use their own signing key to

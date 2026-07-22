@@ -12,6 +12,7 @@
     "onboard": "tsx src/onboard.ts",
     "onboard:seller": "tsx src/onboard-seller.ts",
     "dev:approve": "tsx src/dev-approve.ts",
+    "build:packages": "node scripts/build-packages.mjs",
     "dashboard:login": "tsx src/dashboard-login.ts",
     "api": "tsx src/server/api.ts",
     "api:db": "tsx src/server/postgres-api.ts",
