@@ -85,7 +85,7 @@ backup process. In-memory and PGlite tests cannot substitute for these rows.
 |---|---|
 | Image built with candidate commit as `SOURCE_COMMIT` | `<build output>` |
 | Image revision label equals candidate commit | `<inspect output>` |
-| Image runs as non-root with reviewed entry point/files | `<inspect/run evidence>` |
+| Runtime contract proves UID 65532, all 14 commands, and no shell/npm/Yarn | `<runtime-contract.json>` |
 | CycloneDX metadata image ID equals recorded image ID | `<bounded comparison output>` |
 | HIGH/CRITICAL report targets that same image | `<report target and result>` |
 | `SHA256SUMS` verifies after artifact download | `<verification output>` |

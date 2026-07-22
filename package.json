@@ -64,6 +64,7 @@
   },
   "overrides": {
     "@hono/node-server": "$@hono/node-server",
-    "esbuild": "0.25.12"
+    "esbuild": "0.25.12",
+    "fast-uri": "3.1.4"
   }
 }

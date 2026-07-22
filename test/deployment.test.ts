@@ -207,14 +207,19 @@ describe("production deployment contract", () => {
       engines: { node: ">=24" },
     }));
     expect(dockerfile.match(
-      /FROM node:24\.18\.0-bookworm-slim@sha256:[0-9a-f]{64}/g,
-    )).toHaveLength(2);
+      /FROM node:24\.18\.0-bookworm-slim@sha256:[0-9a-f]{64} AS build/g,
+    )).toHaveLength(1);
+    expect(dockerfile).toContain(
+      "FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:af85d11ce7ef10172855a6e3649e3e8125b1b9e3ca41849ec2918036f05cb212 AS runtime",
+    );
     expect(dockerfile).not.toMatch(/ARG\s+NODE_IMAGE|#\s*syntax=/);
     expect(dockerfile).toContain("ARG SOURCE_COMMIT=unknown");
     expect(dockerfile).toContain('org.opencontainers.image.revision="$SOURCE_COMMIT"');
     expect(readFileSync(resolve(ROOT, ".dockerignore"), "utf8")).toMatch(/^release-evidence$/m);
     expect(readFileSync(resolve(ROOT, ".gitignore"), "utf8")).toMatch(/^release-evidence\/$/m);
-    expect(dockerfile).toMatch(/USER node/);
+    expect(dockerfile).toMatch(/USER 65532/);
+    expect(dockerfile).toContain('ENTRYPOINT ["/nodejs/bin/node", "--enable-source-maps"]');
+    expect(dockerfile.slice(dockerfile.indexOf(" AS runtime"))).not.toMatch(/^RUN /m);
     expect(dockerfile).toMatch(/npm prune --omit=dev/);
     expect(dockerfile).not.toMatch(/COPY \. \./);
     expect(attributes).toContain("* text=auto eol=lf");
@@ -269,6 +274,13 @@ describe("production deployment contract", () => {
     expect(actionRefs.every((ref) => /@[0-9a-f]{40}$/.test(ref!))).toBe(true);
     expect(workflow).toContain('--build-arg SOURCE_COMMIT="$SOURCE_COMMIT"');
     expect(workflow).toContain("docker image inspect --format='image_id={{.Id}}'");
+    expect(workflow).toContain("release-evidence/runtime-contract.json");
+    expect(workflow).toContain("evidence.uid !== 65532");
+    for (const forbiddenRuntimePath of [
+      '"/bin/sh"', '"/usr/local/bin/npm"', '"/usr/local/bin/yarn"',
+    ]) {
+      expect(workflow).toContain(forbiddenRuntimePath);
+    }
     expect(workflow.match(/scan-type:\s*image/g)).toHaveLength(2);
     expect(workflow.match(/image-ref:\s*money:\$\{\{ github\.sha \}\}/g)).toHaveLength(2);
     expect(workflow.match(/version:\s*v0\.70\.0/g)).toHaveLength(2);
@@ -294,6 +306,7 @@ describe("production deployment contract", () => {
     expect(compose).toMatch(/read_only: true/);
     expect(compose).toMatch(/cap_drop:\s*\n\s*- ALL/);
     expect(compose).toMatch(/no-new-privileges:true/);
+    expect(compose.match(/test: \[CMD, \/nodejs\/bin\/node,/g)).toHaveLength(6);
     expect(compose).not.toMatch(/POSTGRES_PASSWORD|money-dev-only/);
     for (const service of [
       "api",
@@ -327,6 +340,7 @@ describe("production deployment contract", () => {
     for (const [service, entrypoint] of Object.entries(productionEntrypoints)) {
       expect(readFileSync(resolve(ROOT, entrypoint), "utf8"))
         .toContain(`enforceProductionPreflight("${service}")`);
+      expect(workflow).toContain(entrypoint.replace(/^src\//, "dist/").replace(/\.ts$/, ".js"));
     }
   });
 });

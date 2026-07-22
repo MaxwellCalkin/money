@@ -87,6 +87,31 @@ jobs:
           printf 'source_commit=%s\nsource_repository=%s\nworkflow_ref=%s\nrun_id=%s\nrun_attempt=%s\n' \
             "$SOURCE_COMMIT" "$SOURCE_REPOSITORY" "$WORKFLOW_REF" "$RUN_ID" "$RUN_ATTEMPT" \
             >> release-evidence/image-identity.txt
+          docker run --rm "$IMAGE_REF" -e '
+            const fs = require("node:fs");
+            const required = [
+              "dist/server/postgres-api.js", "dist/server/database-ops.js",
+              "dist/db/external-worker.js", "dist/db/migrate.js",
+              "dist/treasury/webhook-server.js", "dist/treasury/event-worker.js",
+              "dist/treasury/payout-worker.js", "dist/treasury/reconciler.js",
+              "dist/compliance/webhook-server.js", "dist/compliance/event-worker.js",
+              "dist/compliance/onboarding-worker.js", "dist/compliance/review-worker.js",
+              "dist/compliance/ops-server.js", "dist/compliance/console-server.js"
+            ];
+            const forbidden = [
+              "/bin/sh", "/usr/local/bin/npm", "/usr/local/bin/npx",
+              "/usr/local/bin/yarn", "/usr/local/lib/node_modules/npm", "/opt/yarn-v1.22.22"
+            ];
+            const evidence = {
+              node: process.version,
+              uid: process.getuid(),
+              required: Object.fromEntries(required.map(path => [path, fs.existsSync(path)])),
+              forbidden: Object.fromEntries(forbidden.map(path => [path, fs.existsSync(path)]))
+            };
+            if (evidence.uid !== 65532 || Object.values(evidence.required).includes(false) ||
+                Object.values(evidence.forbidden).includes(true)) process.exit(1);
+            console.log(JSON.stringify(evidence));
+          ' > release-evidence/runtime-contract.json
       - name: Generate CycloneDX image SBOM
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

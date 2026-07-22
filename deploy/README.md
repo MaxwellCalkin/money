@@ -7,11 +7,13 @@ an external secrets manager, and an authenticated edge/load balancer.
 
 ## Immutable image
 
-Build the root `Dockerfile` and publish it by digest. The image compiles the
-TypeScript entry points on Node 24 LTS, prunes development dependencies, runs
-as the unprivileged `node` user, and contains the SQL migrations alongside the
-compiled services. Deploy `registry.example/money@sha256:...`, never a mutable
-tag. The base image is itself pinned to an official multi-platform digest.
+Build the root `Dockerfile` and publish it by digest. A pinned full Node 24 LTS
+stage compiles the TypeScript entry points and prunes development dependencies;
+only a separately pinned distroless Node 24 Debian 13 stage reaches production.
+The runtime has no shell, npm, or Yarn, runs as numeric non-root UID 65532, and
+contains the SQL migrations alongside the compiled services. Deploy
+`registry.example/money@sha256:...`, never a mutable tag. Both external image
+inputs are pinned to reviewed multi-platform digests.
 Every third-party CI action is pinned to a reviewed full commit. CI scans that
 exact built image with a full-commit-pinned Trivy action, an explicit scanner
 version, no restored scanner/database cache, and
@@ -22,11 +24,12 @@ owner, justification, compensating controls, and an expiration date.
 The CI build supplies the source commit as the OCI
 `org.opencontainers.image.revision` label. For every successful image build it
 retains one 90-day GitHub Actions artifact named with that commit. The artifact
-contains the local image ID and workflow identity, a CycloneDX inventory, and
-the machine-readable HIGH/CRITICAL scan report, covered by a sorted
-`SHA256SUMS` manifest. The upload step runs even when the vulnerability gate
-fails, so the blocking evidence is not lost. Verify the manifest immediately
-after download. Before a release, copy this evidence into the controlled
+contains the local image ID and workflow identity, a runtime contract proving
+numeric non-root execution, all 14 compiled commands, and the absence of a
+shell/npm/Yarn, a CycloneDX inventory, and the machine-readable HIGH/CRITICAL
+scan report, covered by a sorted `SHA256SUMS` manifest. The upload step runs
+even when the vulnerability gate fails, so the blocking evidence is not lost.
+Verify the manifest immediately after download. Before a release, copy this evidence into the controlled
 long-term release store and record the immutable registry manifest digest
 produced by publication; a local Docker image ID is not a registry digest or a
 signed provenance statement.
