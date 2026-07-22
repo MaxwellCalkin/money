@@ -3,16 +3,17 @@ import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import { PostgresCompliance } from "../db/compliance.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
-import { parseComplianceWebhookEnvelope, verifyComplianceWebhook } from "./provider.ts";
+import { listenHost } from "../server/listen.ts";
+import type { ComplianceWebhookCodec } from "./provider.ts";
+import { createComplianceWebhookCodecFromEnv } from "./runtime.ts";
 
 const MAX_COMPLIANCE_EVENT_BYTES = 64 * 1024;
 
 export interface ComplianceWebhookOptions {
-  provider: string;
-  secret: string;
-  endpointId: string;
+  codec: ComplianceWebhookCodec;
   maxBodyBytes?: number;
 }
 
@@ -30,10 +31,6 @@ export function createComplianceWebhookApp(
   compliance: PostgresCompliance,
   options: ComplianceWebhookOptions
 ) {
-  if (!/^[a-z][a-z0-9_-]{1,31}$/.test(options.provider)) throw new Error("compliance provider is invalid");
-  if (!options.secret || options.secret.length > 512 || !options.endpointId) {
-    throw new Error("compliance webhook secret and endpoint id are required");
-  }
   const maxBodyBytes = options.maxBodyBytes ?? MAX_COMPLIANCE_EVENT_BYTES;
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1) {
     throw new Error("maxBodyBytes must be a positive safe integer");
@@ -57,26 +54,24 @@ export function createComplianceWebhookApp(
       return c.json({ error: rawBody.length > maxBodyBytes ? "payload_too_large" : "invalid_payload" },
         rawBody.length > maxBodyBytes ? 413 : 400);
     }
-    if (!verifyComplianceWebhook({
-      rawBody,
-      signature: c.req.header("x-compliance-signature"),
-      endpointId: c.req.header("x-compliance-endpoint-id"),
-      expectedEndpointId: options.endpointId,
-      secret: options.secret,
-    })) {
+    if (!options.codec.authenticate({ rawBody, headers: c.req.raw.headers })) {
       return c.json({ error: "invalid_signature" }, 401);
     }
     let event;
     try {
-      event = parseComplianceWebhookEnvelope(JSON.parse(rawBody.toString("utf8")) as unknown);
+      event = options.codec.parse(JSON.parse(rawBody.toString("utf8")) as unknown);
     } catch {
       return c.json({ error: "invalid_payload" }, 400);
     }
+    if (!event) {
+      c.header("cache-control", "no-store");
+      return c.json({ accepted: false, ignored: true }, 202);
+    }
     const result = await compliance.enqueueEvent({
-      provider: options.provider,
+      provider: options.codec.provider,
       providerEventId: event.id,
       providerResultRef: event.resultRef,
-      endpointId: options.endpointId,
+      endpointId: options.codec.endpointId,
       deliveryHash: createHash("sha256").update(rawBody).digest(),
     });
     c.header("cache-control", "no-store");
@@ -88,21 +83,16 @@ export function createComplianceWebhookApp(
 export async function startComplianceWebhookServer(
   port = boundedInteger(process.env.COMPLIANCE_WEBHOOK_PORT, 4024, 1, 65_535, "COMPLIANCE_WEBHOOK_PORT")
 ) {
+  enforceProductionPreflight("compliance-webhook");
   const connectionString = process.env.MONEY_COMPLIANCE_INGRESS_DATABASE_URL;
-  const provider = process.env.MONEY_COMPLIANCE_PROVIDER;
-  const secret = process.env.MONEY_COMPLIANCE_WEBHOOK_SECRET;
-  const endpointId = process.env.MONEY_COMPLIANCE_WEBHOOK_ENDPOINT_ID;
-  if (!connectionString || !provider || !secret || !endpointId) {
-    throw new Error(
-      "MONEY_COMPLIANCE_INGRESS_DATABASE_URL, MONEY_COMPLIANCE_PROVIDER, " +
-      "MONEY_COMPLIANCE_WEBHOOK_SECRET, and MONEY_COMPLIANCE_WEBHOOK_ENDPOINT_ID are required"
-    );
-  }
+  if (!connectionString) throw new Error("MONEY_COMPLIANCE_INGRESS_DATABASE_URL is required");
   const db = new PostgresDatabase({
     connectionString, applicationName: "money-compliance-webhook", maxConnections: 5,
   });
-  const app = createComplianceWebhookApp(new PostgresCompliance(db), { provider, secret, endpointId });
-  const server = serve({ fetch: app.fetch, hostname: "0.0.0.0", port });
+  const app = createComplianceWebhookApp(new PostgresCompliance(db), {
+    codec: createComplianceWebhookCodecFromEnv(),
+  });
+  const server = serve({ fetch: app.fetch, hostname: listenHost("127.0.0.1"), port });
   console.log(`compliance webhook ingress listening on :${port}`);
   let closing = false;
   const close = async () => {

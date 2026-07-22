@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { canonicalHostname, isLoopbackHostname } from "../core/url-security.ts";
 import { usd, type Micros } from "../core/types.ts";
 import type { ExternalWallet } from "./wallet.ts";
 
@@ -144,7 +145,13 @@ export function canonicalHostOf(url: string): { ok: true; host: string } | { ok:
   try {
     const u = new URL(url);
     if (u.protocol !== "http:" && u.protocol !== "https:") return { ok: false, reason: "url must be http(s)" };
-    const host = u.hostname.toLowerCase().replace(/\.$/, "");
+    if (u.protocol === "http:" && !isLoopbackHostname(u)) {
+      return { ok: false, reason: "url must use HTTPS outside localhost development" };
+    }
+    if (u.username || u.password || u.hash) {
+      return { ok: false, reason: "url must not contain credentials or a fragment" };
+    }
+    const host = canonicalHostname(u);
     if (!host) return { ok: false, reason: "url has no host" };
     return { ok: true, host };
   } catch {

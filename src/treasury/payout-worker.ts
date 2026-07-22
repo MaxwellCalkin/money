@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import { pathToFileURL } from "node:url";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
 import { PostgresTreasury } from "../db/treasury.ts";
 import { ColumnApiError, ColumnClient, columnPayoutState } from "./column.ts";
@@ -79,6 +80,7 @@ export async function runTreasuryPayoutBatch(
 }
 
 export async function startTreasuryPayoutWorker() {
+  enforceProductionPreflight("treasury-payouts");
   const connectionString = process.env.MONEY_PAYOUT_DATABASE_URL;
   const apiKey = process.env.MONEY_COLUMN_PAYOUT_API_KEY;
   const bankAccountId = process.env.MONEY_COLUMN_PAYOUT_BANK_ACCOUNT_ID;

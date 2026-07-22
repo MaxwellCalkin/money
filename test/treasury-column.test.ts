@@ -33,6 +33,21 @@ function event(type: string, data: ColumnAchTransfer, id = "evnt_fixture_001") {
 }
 
 describe("Column treasury adapter", () => {
+  it("rejects ambiguous privileged API configuration", () => {
+    expect(() => new ColumnClient({
+      apiKey: "test_fixture_key",
+      baseUrl: "http://column.test",
+    })).toThrow(/HTTPS/);
+    expect(() => new ColumnClient({
+      apiKey: "test_fixture_key",
+      baseUrl: "https://user:secret@column.test",
+    })).toThrow(/bare origin/);
+    expect(() => new ColumnClient({
+      apiKey: " padded-key ",
+      baseUrl: "https://column.test",
+    })).toThrow(/API key/);
+  });
+
   it("verifies the exact raw webhook bytes and endpoint binding", () => {
     const raw = Buffer.from('{\n  "id":"evnt_fixture_001", "created_at":"2026-07-19T10:01:00Z", "type":"ach.incoming_transfer.settled", "data":{}\n}');
     const signature = createHmac("sha256", "whsec_fixture").update(raw).digest("hex");

@@ -2,9 +2,11 @@ import { serve } from "@hono/node-server";
 import { timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Hono } from "hono";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import { PostgresCompliance } from "../db/compliance.ts";
 import type { TransactionalDatabase } from "../db/database.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
+import { listenHost } from "../server/listen.ts";
 
 function sameToken(expected: string, authorization?: string): boolean {
   const presented = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
@@ -156,6 +158,7 @@ export function createComplianceOpsApi(
 export async function startComplianceOpsServer(
   listenPort = port(process.env.COMPLIANCE_OPS_PORT)
 ) {
+  enforceProductionPreflight("compliance-ops");
   const connectionString = process.env.MONEY_COMPLIANCE_OPS_DATABASE_URL;
   const token = process.env.MONEY_COMPLIANCE_OPS_TOKEN;
   if (!connectionString || !token) {
@@ -167,7 +170,11 @@ export async function startComplianceOpsServer(
     maxConnections: 3,
   });
   const app = createComplianceOpsApi(db, token);
-  const server = serve({ fetch: app.fetch, hostname: "0.0.0.0", port: listenPort });
+  const server = serve({
+    fetch: app.fetch,
+    hostname: listenHost("127.0.0.1"),
+    port: listenPort,
+  });
   console.log(`compliance operations listening on :${listenPort}`);
   let closing = false;
   const close = async () => {

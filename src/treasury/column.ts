@@ -1,8 +1,11 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { readBoundedResponseText } from "../core/bounded-response.ts";
+import { isLoopbackHostname } from "../core/url-security.ts";
 import type { TreasuryPayoutState } from "../db/treasury.ts";
 
 const COLUMN_API = "https://api.column.com";
 const MICROS_PER_CENT = 10_000n;
+const MAX_COLUMN_BODY_BYTES = 512 * 1024;
 
 export interface ColumnEvent {
   id: string;
@@ -290,11 +293,18 @@ export class ColumnClient {
   private readonly timeoutMs: number;
 
   constructor(options: ColumnClientOptions) {
-    if (!options.apiKey || options.apiKey.length > 512) throw new Error("Column API key is required");
+    if (!options.apiKey || options.apiKey.length > 512
+      || options.apiKey.trim() !== options.apiKey || /[\r\n]/.test(options.apiKey)) {
+      throw new Error("Column API key is required");
+    }
     this.baseUrl = new URL(options.baseUrl ?? COLUMN_API);
-    const loopback = this.baseUrl.hostname === "localhost" || this.baseUrl.hostname === "127.0.0.1" || this.baseUrl.hostname === "[::1]";
+    const loopback = isLoopbackHostname(this.baseUrl);
     if (this.baseUrl.protocol !== "https:" && !(options.allowInsecureLocalhost && loopback)) {
       throw new Error("Column API must use HTTPS");
+    }
+    if (this.baseUrl.username || this.baseUrl.password || this.baseUrl.pathname !== "/"
+      || this.baseUrl.search || this.baseUrl.hash) {
+      throw new Error("Column API URL must be a bare origin without credentials");
     }
     this.fetcher = options.fetch ?? globalThis.fetch;
     this.authorization = `Basic ${Buffer.from(`:${options.apiKey}`).toString("base64")}`;
@@ -318,7 +328,20 @@ export class ColumnClient {
     } catch (error) {
       throw new ColumnApiError(`Column request failed: ${error instanceof Error ? error.message : "network error"}`, 0, true);
     }
-    const body = await response.text();
+    let body: string;
+    try {
+      body = await readBoundedResponseText(
+        response,
+        MAX_COLUMN_BODY_BYTES,
+        "Column API response is too large",
+      );
+    } catch (error) {
+      throw new ColumnApiError(
+        error instanceof Error ? error.message : "Column API response could not be read",
+        response.status,
+        true,
+      );
+    }
     if (!response.ok) {
       throw new ColumnApiError(
         `Column API returned HTTP ${response.status}`,

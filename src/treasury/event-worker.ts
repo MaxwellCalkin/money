@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { pathToFileURL } from "node:url";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
 import { PostgresTreasury } from "../db/treasury.ts";
 import { ColumnApiError, ColumnClient, normalizeColumnEvent, type ColumnEvent } from "./column.ts";
@@ -163,6 +164,7 @@ export async function pollMissedColumnEvents(
 }
 
 export async function startTreasuryEventWorker() {
+  enforceProductionPreflight("treasury-events");
   const connectionString = process.env.MONEY_TREASURY_WORKER_DATABASE_URL;
   const apiKey = process.env.MONEY_COLUMN_EVENT_API_KEY;
   if (!connectionString || !apiKey) throw new Error("MONEY_TREASURY_WORKER_DATABASE_URL and MONEY_COLUMN_EVENT_API_KEY are required");

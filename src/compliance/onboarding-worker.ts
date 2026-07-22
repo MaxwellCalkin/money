@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { pathToFileURL } from "node:url";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import {
   PostgresCompliance,
   type ComplianceVerificationClaim,
 } from "../db/compliance.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
-import { ComplianceProviderClient, ComplianceProviderError } from "./provider.ts";
+import { ComplianceProviderError, type ComplianceProvider } from "./provider.ts";
+import { createComplianceProviderFromEnv } from "./runtime.ts";
 import {
   encryptHostedVerificationUrl,
   parseComplianceSessionKeyring,
@@ -27,8 +29,11 @@ function boundedInteger(
   return parsed;
 }
 
-function retrySeconds(attempts: number): number {
-  return Math.min(21_600, Math.max(5, 2 ** Math.min(attempts, 14)));
+function retrySeconds(attempts: number, error?: unknown): number {
+  const backoff = Math.min(21_600, Math.max(5, 2 ** Math.min(attempts, 14)));
+  return error instanceof ComplianceProviderError && error.retryAfterSeconds !== undefined
+    ? Math.min(86_400, Math.max(backoff, error.retryAfterSeconds))
+    : backoff;
 }
 
 function safeMessage(error: unknown): string {
@@ -42,6 +47,10 @@ function permanent(error: unknown): boolean {
     || error.message.includes("expiry is outside")
     || error.message.includes("profile is invalid")
     || error.message.includes("returned invalid JSON")
+    || error.message.includes("response is too large")
+    || error.message.includes("non-inquiry resource")
+    || error.message.includes("bound to a different subject")
+    || error.message.includes("used a different template")
     || error.message.includes("must be an object")
     || error.message.includes("must be a non-empty string")
   );
@@ -49,7 +58,7 @@ function permanent(error: unknown): boolean {
 
 export async function processComplianceVerificationClaim(
   compliance: PostgresCompliance,
-  provider: ComplianceProviderClient,
+  provider: ComplianceProvider,
   keyring: ComplianceSessionKeyring,
   workerId: string,
   claim: ComplianceVerificationClaim,
@@ -84,7 +93,7 @@ export async function processComplianceVerificationClaim(
 
 export async function runComplianceOnboardingBatch(
   compliance: PostgresCompliance,
-  provider: ComplianceProviderClient,
+  provider: ComplianceProvider,
   keyring: ComplianceSessionKeyring,
   workerId: string,
   limit = 25,
@@ -102,7 +111,7 @@ export async function runComplianceOnboardingBatch(
         workerId,
         sessionId: claim.id,
         error: safeMessage(error),
-        retrySeconds: retrySeconds(claim.attempts),
+        retrySeconds: retrySeconds(claim.attempts, error),
         dead: claim.attempts >= 25 || permanent(error),
       });
       failed += 1;
@@ -112,19 +121,13 @@ export async function runComplianceOnboardingBatch(
 }
 
 export async function startComplianceOnboardingWorker() {
+  enforceProductionPreflight("compliance-onboarding");
   const connectionString = process.env.MONEY_COMPLIANCE_ONBOARDING_DATABASE_URL;
-  const providerName = process.env.MONEY_COMPLIANCE_PROVIDER;
-  const baseUrl = process.env.MONEY_COMPLIANCE_PROVIDER_URL;
-  const apiKey = process.env.MONEY_COMPLIANCE_PROVIDER_API_KEY;
   const encodedKeys = process.env.MONEY_COMPLIANCE_SESSION_KEYS;
   const activeKeyId = process.env.MONEY_COMPLIANCE_SESSION_ACTIVE_KEY_ID;
-  const hostedOrigins = process.env.MONEY_COMPLIANCE_HOSTED_ORIGINS
-    ?.split(",").map((value) => value.trim()).filter(Boolean);
-  if (!connectionString || !providerName || !baseUrl || !apiKey
-    || !encodedKeys || !activeKeyId || !hostedOrigins?.length) {
+  if (!connectionString || !encodedKeys || !activeKeyId) {
     throw new Error(
-      "MONEY_COMPLIANCE_ONBOARDING_DATABASE_URL, provider configuration, "
-      + "MONEY_COMPLIANCE_HOSTED_ORIGINS, and compliance session keyring are required",
+      "MONEY_COMPLIANCE_ONBOARDING_DATABASE_URL and compliance session keyring are required",
     );
   }
   const db = new PostgresDatabase({
@@ -133,13 +136,7 @@ export async function startComplianceOnboardingWorker() {
     maxConnections: 2,
   });
   const compliance = new PostgresCompliance(db);
-  const provider = new ComplianceProviderClient({
-    provider: providerName,
-    baseUrl,
-    apiKey,
-    hostedOrigins,
-    allowInsecureLocalhost: process.env.NODE_ENV !== "production",
-  });
+  const provider = createComplianceProviderFromEnv();
   const keyring = parseComplianceSessionKeyring(encodedKeys, activeKeyId);
   const workerId = `${hostname()}:${process.pid}:compliance-onboarding`;
   const intervalMs = boundedInteger(

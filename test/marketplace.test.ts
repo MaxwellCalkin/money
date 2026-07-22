@@ -208,6 +208,34 @@ describe("two-sided marketplace", () => {
     expect(replayedCredential.status).toBe(402); // resource redemption is single-use
   });
 
+  it("keeps seller signatures on a bounded, non-redirecting network origin", async () => {
+    const { provider, providerKeys } = world();
+    expect(() => createMoneySellerClient({
+      networkUrl: "http://network.example",
+      providerId: provider.id,
+      providerKey: providerKeys.privateKey,
+    })).toThrow(/HTTPS/);
+    expect(() => createMoneySellerClient({
+      networkUrl: "https://user:secret@network.example",
+      providerId: provider.id,
+      providerKey: providerKeys.privateKey,
+    })).toThrow(/bare origin/);
+
+    let requestInit: RequestInit | undefined;
+    const client = createMoneySellerClient({
+      networkUrl: "https://network.example",
+      providerId: provider.id,
+      providerKey: providerKeys.privateKey,
+      fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
+        requestInit = init;
+        return new Response(JSON.stringify({ challengeId: "chl_fixture" }), { status: 402 });
+      }) as typeof fetch,
+    });
+    await client.challenge("svc_fixture");
+    expect(requestInit?.redirect).toBe("error");
+    expect(requestInit?.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it("handles resolve for payments and remain globally unique", async () => {
     const { network, agent, provider, agentKeys } = world();
     const { app } = createApi(network);

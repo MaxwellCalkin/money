@@ -13,7 +13,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 3. **Prefunding buys the speed.** Authorization is a local policy + balance check — no external round-trip on the hot path.
 4. **Exactly-once by construction.** Idempotency keys on every transfer; 402 challenges pay-once/redeem-once. Agents retry by default — the network must shrug.
 
-## What's here (v0.12)
+## What's here (v0.13)
 
 | Piece | File | What it does |
 |---|---|---|
@@ -32,23 +32,36 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | Database operations | `src/server/database-ops.ts` | Liveness, schema readiness, and token-gated ledger reconciliation on **:4022**; deliberately no ungoverned payment route |
 | x402 boundary | `src/bridge/`, `src/db/external.ts` | Official x402 v2 exact/EVM signing, HTTPS HSM adapter, pinned Base USDC, rotatable AES-256-GCM custody, exact external approvals, independent calldata/log verification, restart recovery, and automatic journal reversal |
 | Treasury boundary | `db/migrations/0007_treasury.sql`, `src/treasury/` | Real Column ACH funding and payouts, raw-body webhook HMAC, authenticated event re-fetch, out-of-order recovery, exact returns, exposure freezes, reserve-first payout workers, bank/stablecoin reconciliation, and global circuit breakers |
-| Compliance and risk perimeter | `db/migrations/0008_compliance_risk.sql`, `src/compliance/`, `src/db/compliance.ts` | KYC/KYB and sanctions evidence, customer/counterparty lifecycle, whole-family restrictions, case evidence, atomic transfer decisions, exact velocity limits, isolated webhook/workers, expiry sweeps, and a segregated operations service |
+| Compliance and risk perimeter | `db/migrations/0008_compliance_risk.sql`, `db/migrations/0010_compliance_evidence_sets.sql`, `src/compliance/`, `src/db/compliance.ts` | KYC/KYB and sanctions evidence, atomic event-to-evidence sets, customer/counterparty lifecycle, whole-family restrictions, case evidence, atomic transfer decisions, exact velocity limits, isolated webhook/workers, expiry sweeps, and a segregated operations service |
 | Hosted verification and review desk | `db/migrations/0009_compliance_operations.sql`, `src/compliance/onboarding-worker.ts`, `src/compliance/console-server.ts` | Replay-safe hosted inquiries, encrypted redirect custody, named Ed25519 reviewers, a private case console, append-only operator evidence, and database-enforced maker/checker approval |
-| MCP server | `src/mcp/server.ts` | `money_balance`, `money_pay`, `money_fetch` (auto-pays internal 402s AND external x402 sellers within mandate), `money_feed` |
+| Persona production adapter | `src/compliance/persona.ts`, `src/compliance/runtime.ts` | Pinned Persona `2025-12-08` inquiry/report API, account-bound one-time links, database-enforced provider-subject continuity, sparse identity and sanctions refetch, timestamped raw-body HMAC with rotating secrets, and fail-closed KYC/KYB mapping without persisted provider PII |
+| Production artifact | `Dockerfile`, `deploy/compose.production.yaml`, `src/deploy/preflight.ts` | Reproducible Node 24 build, source-revision-labeled non-root read-only container, segregated service credentials, readiness probes, startup-enforced production configuration, byte-stable migrations, and SHA-pinned test/image gates that retain the image identity, CycloneDX SBOM, and high/critical vulnerability report |
+| MCP server | `src/mcp/server.ts`, `src/mcp/outbound.ts` | `money_balance`, `money_pay`, bounded `money_fetch` with internal/external 402 auto-pay, exact private-origin opt-ins, DNS/private-target rejection, and no credential-forwarding redirects, plus `money_feed` |
 | Demo | `src/demo.ts` | The full story end-to-end (10 sections), including a separately authenticated seller joining and earning through the network |
+
+The verification and non-code launch gates for this candidate are tracked in
+`docs/RELEASES.md`; copy `docs/RELEASE_EVIDENCE_TEMPLATE.md` to retain the
+exact-commit proof for each candidate. The repository-specific adversarial model, protected
+invariants, trust boundaries, residual risks, and incident containment order
+are in `docs/THREAT_MODEL.md`; private vulnerability reporting and initial
+response rules are in `SECURITY.md`.
 
 ## Run it
 
 ```bash
-npm install
-npm test         # ledger/policy/network/persistence/identity invariants
-npm run demo     # the whole story in one script
-npm run api      # the HTTP server on :4021 (durable: data/events.jsonl)
+npm ci                    # install the exact reviewed dependency tree
+npm run typecheck
+npm test                  # complete product and invariant suite
+npm run build             # compile every production entry point into dist/
+npm run verify:deployment # exercise all 14 compiled service preflights, positive and negative
+npm audit --audit-level=moderate
+npm run demo              # the whole story in one script
+npm run api               # the HTTP server on :4021 (durable: data/events.jsonl)
 ```
 
 ### Run the production money kernel
 
-The database path requires Node 20+ and PostgreSQL 18. Start the local database
+The database path requires Node 24+ and PostgreSQL 18. Start the local database
 and transaction pool (the committed password is intentionally local-only):
 
 ```bash
@@ -71,10 +84,30 @@ npm run compliance:ops
 npm run compliance:console
 ```
 
+The ordinary suite safely skips its destructive real-server gate. Before a
+release candidate, point `MONEY_TEST_DATABASE_URL` at an explicitly disposable
+loopback PostgreSQL 18 database whose name contains `test`, `live`, or a version
+marker, then run `npm run test:postgres-live`. That gate applies and replays the
+exact migrations and roles, checks data checksums and effective privileges,
+proves that application-role bypasses fail, races independent connections
+against one spending cap, and reconciles the resulting journal. The pinned CI
+`postgres` job runs the same gate on every candidate branch and pull request.
+
 Application traffic should use PgBouncer on port `6432`; migrations and
 administrative work should connect directly on `5432`. Transaction pooling is
 safe here because the application uses transaction-local settings and
 transaction-level advisory locks, never session-local state.
+
+For a deployed environment, build the root `Dockerfile`, publish the image by
+digest, and use the process-separated reference topology in
+`deploy/compose.production.yaml`. It does not bundle PostgreSQL, secrets, fake
+funding, or fake rails. Each process receives a different database login and
+credential file. Run `npm run deploy:preflight -- <service>` before rollout to
+reject cross-service credential leakage, obvious owner database URLs,
+non-verifying TLS, provider version drift, local signing keys, and development
+escape hatches. Every production entry point enforces the same contract again
+before opening a database pool, provider client, or listening socket. See
+`deploy/README.md` for the complete rollout and network contract.
 
 The Postgres kernel stores micros as signed 64-bit integers (not JavaScript
 numbers), locks both account rows in deterministic order, writes exactly two
@@ -138,6 +171,40 @@ remain immediate, while subject activation, restriction release, terminal case
 resolution, and risk-limit changes require a different supervisor checker.
 The prior administrator bypasses for those actions are removed.
 
+Migration `0010` makes a provider event and all evidence derived from it one
+database commit. It records an ordered event-to-evidence audit link, applies
+every identity/screening result, and completes the inbox claim atomically. A
+crash can therefore replay the whole set or none of it; it cannot strand a
+mutable provider result between a committed evidence row and an unfinished
+event. For Persona, that command also establishes the inquiry's opaque Account
+ID on the compliance subject and requires every later sanctions/monitoring
+result to present the identical provider subject.
+
+With `MONEY_COMPLIANCE_PROVIDER=persona`, v0.13 replaces the generic launch
+placeholder with a dated Persona adapter. Inquiry creation uses Persona's
+idempotency header, separate reviewed individual/business templates, stable
+account reference IDs, and one-time hosted links. Signed final decisions and
+watchlist state changes enter the inbox; workers independently refetch a sparse
+Inquiry or Report view, with the Report response explicitly including only its
+Account reference. A clear inquiry is therefore not
+enough by itself: current no-match sanctions evidence is also required.
+Positive and continuous-monitoring matches immediately become review, never
+automatic clearance; delayed match, dismissal, and error events cannot be
+weakened by a newer provider response. The database also requires every report's
+opaque Persona Account ID to match the account established by that subject's
+approved inquiry, so a signed but unrelated report cannot clear screening.
+Authenticated inquiry decline/review events carry their decision in the durable
+reference and cannot be weakened by a later approved provider state; ambiguous
+legacy references are review-only.
+Persona's Business
+Associated Persons report is recorded as owner discovery—not verified UBO
+evidence—so business activation remains fail-closed until each owner has a
+separate identity and screening workflow. Webhook payloads and provider fields
+may contain PII transiently, but the product database receives only object
+references, hashes, expiry, and a small allowlisted decision summary. A real
+launch still requires the organization's own Persona sandbox/production
+contract and reviewed inquiry/report template configuration.
+
 The production treasury path is documented in `docs/TREASURY.md`. Incoming
 funding is credited only after an HMAC-authenticated webhook has been queued by
 a no-money-movement role and independently re-fetched with Column API
@@ -162,10 +229,11 @@ key-rotation procedure and deployment contract.
 For local protocol-shaped testing only, set `MONEY_EXTERNAL_MOCK=true` and a
 stable `MONEY_EXTERNAL_HEADER_KEY` (32 bytes, base64 or 64 hex characters).
 Mock mode and raw EVM private keys are refused when `NODE_ENV=production`.
-Production v2 uses `MONEY_EVM_SIGNER_URL`, `MONEY_EVM_SIGNER_ADDRESS`,
-`MONEY_EXTERNAL_HEADER_KEYS`, `MONEY_EXTERNAL_HEADER_ACTIVE_KEY_ID`, and
-`MONEY_EVM_RPC_URLS`. Rotate stored authorization ciphertext under the
-dedicated database role with `npm run external:rotate-keys`.
+Production v2 uses `MONEY_EVM_SIGNER_URL`, `MONEY_EVM_SIGNER_ADDRESS`, a
+separately rotatable `MONEY_EVM_SIGNER_TOKEN`, `MONEY_EXTERNAL_HEADER_KEYS`,
+`MONEY_EXTERNAL_HEADER_ACTIVE_KEY_ID`, and `MONEY_EVM_RPC_URLS`. Rotate stored
+authorization ciphertext under the dedicated database role with
+`npm run external:rotate-keys`.
 
 Owner-signed `/fund` is disabled on the Postgres API by default because real
 top-ups belong to a separately credentialed treasury integration. For an
@@ -210,7 +278,18 @@ Or wire it manually — add to `.mcp.json`:
 }
 ```
 
-The agent can then check its balance, pay other agents, and fetch 402-gated URLs that get paid automatically inside its mandate.
+The agent can then check its balance, pay other agents, and fetch 402-gated URLs
+that get paid automatically inside its mandate. Internet fetches require HTTPS,
+reject local/private/reserved literal or DNS results, pin the checked address
+to the actual socket, cap upstream bodies, and never forward a receipt or
+one-time payment authorization across a redirect.
+An unauthenticated redirect is returned as a validated URL for a second
+`money_fetch` call. To let an agent pay an explicitly trusted local CLI, set a
+JSON allowlist of exact origins such as
+`MONEY_FETCH_PRIVATE_ORIGINS=["http://127.0.0.1:8080"]`; no private origin is
+enabled by default. Opt-ins must resolve entirely to loopback, RFC1918, CGNAT,
+or IPv6 ULA addresses. Link-local metadata, multicast, documentation, and
+other reserved ranges cannot be enabled through this escape hatch.
 
 ### Publish a paid API
 
@@ -284,6 +363,7 @@ grant: budget $10 · per-tx $1 · daily $5 · ask-me-above $2 · new-payee first
 - The JSONL product path is single-node and remains a showcase. The Postgres path is multi-instance-safe for ledger, mandate, approval, signed identity, nonce, session, tenant-scoped control-plane, marketplace, challenge, redemption, refunds, and the pending/confirmed/cancelled/reversed external state machine.
 - The real-rail software boundary is implemented but not activated with customer funds. Column ACH funding/payouts, provider-event recovery, returns, freezes, and continuous bank/stablecoin reconciliation are present; x402 has remote-HSM signing and independent chain verification. A launch still needs an executed sponsor-bank/FBO program, production Column/RPC/HSM credentials and redundancy, funded reserves, verified customer/counterparty enrollment, and the legal and operating program in `docs/COMPLIANCE.md`.
 - The ledger can settle between accounts owned by different users and now enforces reviewed KYC/KYB, sanctions, counterparty, and velocity decisions in the database. It is still a development sandbox: real customer funds require the sponsor-bank/FBO, licensing analysis, BSA/AML and OFAC programs, trained reviewers, SAR governance, safeguarding, independent testing, and production provider contracts. Code alone does not cross the money-transmission line.
+- The Persona adapter can make an individual eligible only after both an approved inquiry and current configured watchlist evidence, and it ingests later monitoring matches. Business KYB remains deliberately fail-closed: v0.13 discovers associated persons but does not yet orchestrate and link a separate KYC/sanctions inquiry for every UBO or control person.
 - No subscriptions, delegated sub-agent mandates, complete dispute/chargeback case workflows, tax reporting, credit, or insurance yet. Provider payouts now exist; the remaining programmable-commerce and risk layers come next.
 
 ## The bigger picture

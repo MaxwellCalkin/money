@@ -19,6 +19,7 @@ import {
 } from "../src/bridge/cipher.ts";
 import {
   EvmRpcSettlementVerifier,
+  parseEvmRpcNetworks,
   type EvmSettlementClient,
 } from "../src/bridge/evm-settlement.ts";
 import { HttpEvmSigner, LocalEvmSigner } from "../src/bridge/evm-wallet.ts";
@@ -191,6 +192,7 @@ describe("x402 v2 payment rail", () => {
       const body = JSON.parse(String(init?.body)) as typeof request & { address: string };
       expect(body.address).toBe(local.address);
       expect((init?.headers as Record<string, string>).authorization).toBe("Bearer hsm-token");
+      expect(init?.redirect).toBe("error");
       const signature = await local.signTypedData(body);
       return new Response(JSON.stringify({ signature }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
@@ -209,6 +211,23 @@ describe("x402 v2 payment rail", () => {
     }).signTypedData(request)).rejects.toThrow(/wrong key|different typed data/);
     expect(() => new HttpEvmSigner({ url: "http://keys.example.com/sign", address: local.address }))
       .toThrow(/HTTPS/);
+    expect(() => new HttpEvmSigner({
+      url: "https://keys.example.com/sign?token=must-not-live-in-a-url",
+      address: local.address,
+    })).toThrow(/query/);
+    expect(() => new HttpEvmSigner({ url: "https://localhost/sign", address: local.address }))
+      .toThrow(/development mode/);
+    expect(() => new HttpEvmSigner({
+      url: "https://keys.example.com/sign",
+      address: "0x0000000000000000000000000000000000000000",
+    })).toThrow(/must not be zero/);
+    const oversizedFetcher = (async () => new Response("x".repeat(16 * 1_024 + 1), {
+      status: 200,
+      headers: { "content-length": String(16 * 1_024 + 1) },
+    })) as typeof fetch;
+    await expect(new HttpEvmSigner({
+      url: "https://keys.example.com/sign", address: local.address, fetch: oversizedFetcher,
+    }).signTypedData(request)).rejects.toThrow(/too large/);
   });
 
   it("round-trips legacy and rotatable encrypted headers while binding key id and economic terms", () => {
@@ -305,5 +324,19 @@ describe("x402 v2 payment rail", () => {
       ...claim,
       settlement: { ...claim.settlement, payer: new LocalEvmSigner(OTHER_PRIVATE_KEY).address },
     })).toEqual(expect.objectContaining({ ok: false, reason: expect.stringMatching(/payer/) }));
+  });
+
+  it("rejects ambiguous or over-broad EVM RPC configuration", () => {
+    expect(() => parseEvmRpcNetworks("{}")).toThrow(/one to sixteen/);
+    expect(() => parseEvmRpcNetworks(JSON.stringify({
+      "eip155:8453": { url: "https://rpc.example", confirmations: 2, fallback: true },
+    }))).toThrow(/unsupported field/);
+    expect(() => new EvmRpcSettlementVerifier([
+      { network: NETWORK, rpcUrl: "https://rpc.example" },
+      { network: NETWORK, rpcUrl: "https://rpc-backup.example" },
+    ], () => ({}) as EvmSettlementClient)).toThrow(/duplicate/);
+    expect(() => new EvmRpcSettlementVerifier([
+      { network: NETWORK, rpcUrl: "https://user:secret@rpc.example" },
+    ], () => ({}) as EvmSettlementClient)).toThrow(/credentials/);
   });
 });

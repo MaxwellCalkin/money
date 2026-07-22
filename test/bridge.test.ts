@@ -195,6 +195,9 @@ describe("external x402 bridge", () => {
 
     // Case/port/trailing-dot variants are the SAME payee — no fresh allowance needed, and the throttle can't be dodged.
     expect(canonicalHostOf("https://DATA.EXAMPLE.COM.:8443/y")).toEqual({ ok: true, host: "data.example.com" });
+    expect(canonicalHostOf("http://data.example.com/y")).toEqual(expect.objectContaining({ ok: false }));
+    expect(canonicalHostOf("https://user:secret@data.example.com/y")).toEqual(expect.objectContaining({ ok: false }));
+    expect(canonicalHostOf("https://data.example.com/y#duplicate-alias")).toEqual(expect.objectContaining({ ok: false }));
     const variant = await agentPost(app, "/pay-external", {
       url: "https://DATA.EXAMPLE.COM.:8443/y",
       requirement: requirement({ maxAmountRequired: String(usd(0.5)) }),

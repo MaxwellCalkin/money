@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import { PostgresExternal } from "./external.ts";
 import { PostgresDatabase } from "./postgres.ts";
 
@@ -20,6 +21,7 @@ export async function sweepExternalOnce(
 /** Separate least-privilege worker. It never receives API identity keys,
  * wallet material, ciphertext keys, or table-write privileges. */
 export async function startExternalReversalWorker() {
+  enforceProductionPreflight("external-worker");
   const intervalMs = boundedInteger(process.env.MONEY_EXTERNAL_SWEEP_INTERVAL_MS, 5_000, 100, 60_000);
   const batchSize = boundedInteger(process.env.MONEY_EXTERNAL_SWEEP_BATCH, 100, 1, 1_000);
   const db = new PostgresDatabase({

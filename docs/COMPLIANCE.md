@@ -1,7 +1,8 @@
 # Compliance and risk operating contract
 
 This is the operating contract for migrations `0008_compliance_risk.sql` and
-`0009_compliance_operations.sql`. The software supplies fail-closed controls,
+`0009_compliance_operations.sql` and atomic evidence-set hardening in
+`0010_compliance_evidence_sets.sql`. The software supplies fail-closed controls,
 segregated process identities, and audit evidence. It does not itself make the
 company licensed, satisfy a sponsor bank, file a SAR, or replace written
 BSA/AML, sanctions, fraud, privacy, complaints, and incident programs.
@@ -68,7 +69,8 @@ The signed product API exposes:
 
 Run `npm run compliance:onboarding` with the
 `money_compliance_onboarding` login. The product API queues a non-PII profile;
-the worker claims with `FOR UPDATE SKIP LOCKED`, commits, then calls:
+the worker claims with `FOR UPDATE SKIP LOCKED` and commits before network I/O.
+For non-Persona development adapters, the provider-neutral wire contract is:
 
 ```http
 POST /v1/inquiries
@@ -101,13 +103,148 @@ URL. Rotate with `MONEY_COMPLIANCE_SESSION_KEYS` and
 `MONEY_COMPLIANCE_SESSION_ACTIVE_KEY_ID`; retain old keys until every unexpired
 session using them has expired.
 
-The repository defines a provider-neutral contract, not a vendor-specific
-mapping. A launch deployment still needs an adapter tested against the chosen
-provider's sandbox and contractual API. Customer-visible state never includes
-provider references, evidence hashes, internal reasons, case details, or
-regulatory-report status.
+The generic contract remains available for development adapters. The v0.13
+production path is the pinned Persona adapter below. Customer-visible state
+never includes provider references, evidence hashes, internal reasons, case
+details, or regulatory-report status.
+
+### Persona `2025-12-08` adapter
+
+Set:
+
+```text
+MONEY_COMPLIANCE_PROVIDER=persona
+MONEY_COMPLIANCE_PROVIDER_URL=https://api.withpersona.com
+MONEY_PERSONA_API_VERSION=2025-12-08
+MONEY_PERSONA_INDIVIDUAL_TEMPLATE_ID=itmpl_...
+MONEY_PERSONA_BUSINESS_TEMPLATE_ID=itmpl_...
+MONEY_PERSONA_INDIVIDUAL_WATCHLIST_REPORT_TEMPLATE_ID=rptp_...
+MONEY_PERSONA_BUSINESS_WATCHLIST_REPORT_TEMPLATE_ID=rptp_...
+MONEY_PERSONA_BUSINESS_ASSOCIATED_PERSONS_REPORT_TEMPLATE_ID=rptp_...
+MONEY_PERSONA_SCREENING_TTL_DAYS=30
+MONEY_COMPLIANCE_HOSTED_ORIGINS=https://withpersona.com
+```
+
+All five template IDs are required and must be different. The inquiry IDs
+identify separately reviewed KYC and KYB flows. Each flow must create the
+configured watchlist report, and the business flow must also create the
+configured Business Associated Persons report. Pinning report-template IDs
+prevents an unrelated report of the same type from satisfying the evidence
+contract. The adapter refuses another API date until its mapping and fixtures
+are deliberately upgraded.
+
+The hosted worker calls Persona's documented Create an Inquiry endpoint with
+`Persona-Version: 2025-12-08`, `Key-Inflection: kebab`, and the internal
+session UUID in `Idempotency-Key`. It sends no name, address, tax number,
+document, or contact data:
+
+```json
+{
+  "data": {
+    "attributes": { "inquiry-template-id": "itmpl_..." }
+  },
+  "meta": {
+    "auto-create-account": true,
+    "auto-create-account-reference-id": "usr_...",
+    "auto-create-one-time-link": true,
+    "expiration-after-create-interval-seconds": 86400
+  }
+}
+```
+
+It requires the response's account reference and template to match the
+request, takes only `meta.one-time-link`, validates the configured origin and
+`expires-at`, then hands the URL to the existing encrypted-session store.
+Persona recommends one-time links instead of persistent session-token links;
+the implementation never stores or returns a session token. See Persona's
+[Create an Inquiry](https://docs.withpersona.com/api-reference/inquiries/create-an-inquiry),
+[Inquiries overview](https://docs.withpersona.com/inquiries), and
+[one-time link](https://docs.withpersona.com/docs/inquiry-one-time-links)
+documentation.
+
+Persona webhook ingress accepts its JSON:API event shape and verifies the
+`Persona-Signature` over `<unix-seconds>.<exact raw body>`. Timestamps outside
+the configured 30-900 second window are rejected. Set
+`MONEY_COMPLIANCE_WEBHOOK_SECRETS` to a JSON array with the current and prior
+secret during rotation; all candidate comparisons use constant-time digests.
+`inquiry.approved`, `inquiry.declined`, and `inquiry.marked-for-review` enter
+the durable inbox, as do `ready`, `matched`, `dismissed`, and `errored` events
+for individual and business watchlist reports. Other correctly signed
+lifecycle events receive a successful ignored response. Configure Persona's
+webhook event filter and attribute blocklist anyway, so unnecessary identity
+fields do not cross the ingress boundary. Persona documents duplicate and
+out-of-order delivery, raw-body signatures, and overlapping rotation secrets
+in its [webhook best practices](https://docs.withpersona.com/webhooks-best-practices).
+
+The inbox stores a composite inquiry/event/decision-code reference, not the
+webhook payload. That authenticated code is monotonic: a delayed `declined`
+event remains blocked and a delayed `marked-for-review` event remains review
+even if the inquiry is later re-fetched as approved. Legacy references without
+a decision code are review-only and can never create clearance.
+The evidence worker independently retrieves a sparse Inquiry projection and
+requires the account reference, inquiry ID, configured template, and the
+relationship IDs Persona returns outside `data.attributes`. For an approved
+inquiry it retrieves only allowlisted status attributes from the configured
+watchlist report and explicitly includes that report's Account with only its
+`reference-id`. Relationship names never appear in Persona's `fields[...]`
+parameters, which accept attribute names only. The adapter never requests match
+details, queries, owner records, or identity attributes. Reports are
+asynchronous, so a missing or pending required report keeps the inbox event
+retryable instead of silently producing incomplete evidence. For an
+authenticated approval event, the currently fetched final inquiry status maps
+as follows:
+
+| Persona Inquiry status | Money evidence decision |
+| --- | --- |
+| `approved` | `clear` |
+| `declined` | `blocked` |
+| `needs_review` | `review` |
+
+Every other current status is retryable on an approval event and cannot become
+`clear`. Authenticated decline and review events instead retain their blocked
+or review floor even if the later fetched status is non-final or less
+restrictive. A ready watchlist report with `has-match=false` produces current sanctions evidence;
+`has-match=true` produces `review`, never an automatic sanctions block or
+clearance. A later continuous-monitoring match is independently re-fetched and
+bound twice: the sparse Account `reference-id` must name the local subject, and
+the opaque Persona Account ID must equal the provider-subject reference stored
+from that subject's approved inquiry. The ordered event/evidence link retains
+the same opaque reference for immutable replay comparison. Thus a signed report
+for an unrelated Persona account cannot clear another user's screening, and no
+second provider round trip is required. A match immediately moves an approved
+subject back to review. Report-event handling is likewise monotonic even if the
+provider report changes before the worker refetches it:
+`matched` and `dismissed` events require review, and an `errored` event produces
+error evidence. A delayed safety event therefore cannot silently become
+clearance from a newer no-match response. The adapter
+hashes each exact sparse response, discards it, and returns only status,
+configured template IDs, a one-way version fingerprint, boolean match state, timestamps, and
+expiry. The database's recursive identity-field constraint remains a second
+independent barrier. `MONEY_PERSONA_EVIDENCE_TTL_DAYS` and
+`MONEY_PERSONA_SCREENING_TTL_DAYS` are reviewed program parameters, not claims
+by Persona about regulatory validity.
+
+Persona's Business Associated Persons report discovers ownership data; it does
+not prove each beneficial owner passed identity verification and sanctions
+screening. Money therefore records that report as `beneficial_owner: review`
+with `ownerVerification=required`. It never flips
+`beneficial_owners_verified`. Business accounts remain in the review queue and
+cannot be approved until a future UBO orchestration flow links and verifies
+each owner. Treating discovery as verification would be a material compliance
+bug. Persona likewise recommends using a Case payload when KYB spans separate
+business and UBO inquiries. See Persona's [Reports](https://docs.withpersona.com/api-reference/reports),
+[Business Associated Persons event](https://docs.withpersona.com/2023-01-05/api-reference/webhooks/report-events/webhook-report-business-associated-persons-ready),
+and [payload integration guide](https://docs.withpersona.com/integration-guide-understanding-a-persona-api-payload).
+
+The automated suite is a contract fixture, not proof of account access. Before
+real funds, run the same approval/review/decline, duplicate, reordering,
+rotation, malformed response, and untrusted-link scenarios in the company's
+own Persona sandbox and retain the provider request IDs as launch evidence.
 
 ## Provider result contract
+
+This subsection describes the provider-neutral fallback used by fixture and
+custom adapters. Persona uses the dated JSON:API mapping above.
 
 Run public ingress with `npm run compliance:webhooks`. Its login inherits only
 `money_compliance_ingress`.
@@ -156,6 +293,14 @@ fetch, binds response ID to requested ID, caps responses at 256 KiB, and never
 stores an error body. Permanent schema/PII failures dead-letter; transient
 failures retry with bounded backoff. A blocked result opens a critical case and
 freezes the subject family.
+
+After provider I/O, the worker submits one bounded evidence set to the
+database. `record_compliance_event_evidence_set` records every item, links each
+row to its inbox event with an ordinal, and marks the claim complete in one
+transaction. If any item is malformed or the process/database fails, the
+entire set rolls back. The worker role cannot call the older free-standing
+record/complete commands, which removes the crash window between evidence and
+inbox completion.
 
 Provider adapters must not invent `clear` from an incomplete or timed-out
 check. Store raw documents only with the contracted identity provider under
@@ -280,15 +425,21 @@ and test effective grants before launch.
 
 ## Deployment order
 
-1. Back up and apply migrations `0008` and `0009`. Existing users backfill as
+1. Back up and apply migrations `0008`, `0009`, and `0010`. Existing users backfill as
    unverified and regulated movement fails closed. Exact historical retries
    retain their original result.
 2. Apply `db/roles.sql`; provision distinct ingress, evidence-worker,
    onboarding-worker, risk-worker, compliance-admin, compliance-console, and
    compliance-ops logins.
-3. Configure provider webhook and inquiry APIs. Test exact-body webhook
-   signatures, authenticated result fetch, subject binding, provider-side
-   inquiry idempotency, an untrusted redirect, and malformed evidence.
+3. Configure the pinned Persona API, two reviewed inquiry-template IDs, three
+   reviewed report-template IDs, one-time-link origin, decision-only webhook
+   filter, attribute blocklist, and overlapping webhook secrets. Test
+   exact-body signatures and age limits, authenticated sparse inquiry/report
+   refetch, account/template binding, pending reports, positive watchlist
+   matches, provider-side idempotency, an untrusted link,
+   duplicate/reordered decisions, and malformed evidence in the company's
+   sandbox. Keep business activation disabled until the separate UBO
+   verification workflow is complete.
 4. Generate and escrow the hosted-URL keyring. Start ingress, evidence worker,
    onboarding worker, review worker, console, and compliance ops. Alert on
    process absence, dead events, failed inquiries, pending checker actions,
@@ -300,6 +451,9 @@ and test effective grants before launch.
    counterparty needed for launch.
 7. Reconcile treasury assets, restore external breakers through the treasury
    procedure, and release traffic gradually under reviewed limits.
+
+The container/process topology, no-network preflight, image build, port
+exposure, and per-service secret inventory are in `deploy/README.md`.
 
 There is no down migration. Removing the perimeter while customer value exists
 would silently broaden authority. Roll forward, or stop funding/payout/x402

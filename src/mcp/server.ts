@@ -3,8 +3,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { decodeSettlement } from "../bridge/x402.ts";
+import { configuredHttpOrigin } from "../core/api-client.ts";
+import { readBoundedResponseText } from "../core/bounded-response.ts";
 import { signedHeaders } from "../core/identity.ts";
 import { fmt, usd } from "../core/types.ts";
+import { AgentFetchPolicy, pinnedAgentFetch } from "./outbound.ts";
 import { parseExternalPaymentDemand, type ExternalPaymentDemand } from "./x402-demand.ts";
 
 /**
@@ -30,9 +33,19 @@ import { parseExternalPaymentDemand, type ExternalPaymentDemand } from "./x402-d
  *   MONEY_AGENT_KEY this agent's private key, base64 PKCS#8 (required; comes
  *                   from onboarding — treat it like a password)
  */
-const API = process.env.MONEY_API ?? "http://127.0.0.1:4021";
+const MAX_NETWORK_RESPONSE_BYTES = 256 * 1024;
+const MAX_RESOURCE_RESPONSE_BYTES = 512 * 1024;
+const FETCH_TIMEOUT_MS = 30_000;
+
+const API = configuredHttpOrigin(
+  process.env.MONEY_API ?? "http://127.0.0.1:4021",
+  "MONEY_API",
+);
 const AGENT_ID = process.env.MONEY_AGENT_ID;
 const AGENT_KEY = process.env.MONEY_AGENT_KEY;
+const fetchPolicy = new AgentFetchPolicy({
+  privateOrigins: process.env.MONEY_FETCH_PRIVATE_ORIGINS,
+});
 
 if (!AGENT_ID || !AGENT_KEY) {
   console.error("MONEY_AGENT_ID and MONEY_AGENT_KEY are required (both come from onboarding: npm run onboard)");
@@ -48,15 +61,43 @@ async function api(path: string, init?: RequestInit): Promise<{ status: number; 
       ...signedHeaders(AGENT_ID!, AGENT_KEY!, { method: init?.method ?? "GET", path, body }),
       ...(init?.headers ?? {}),
     },
+    redirect: "error",
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  return { status: res.status, body: await res.json().catch(() => ({})) };
+  const responseBody = await readBoundedResponseText(
+    res,
+    MAX_NETWORK_RESPONSE_BYTES,
+    "money API response is too large",
+  );
+  let parsed: unknown = {};
+  try {
+    parsed = responseBody ? JSON.parse(responseBody) as unknown : {};
+  } catch {
+    parsed = {};
+  }
+  return { status: res.status, body: parsed };
+}
+
+async function agentFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  return pinnedAgentFetch(fetchPolicy, url, {
+    ...init,
+    signal: init.signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+}
+
+async function resourceBody(response: Response): Promise<string> {
+  return readBoundedResponseText(
+    response,
+    MAX_RESOURCE_RESPONSE_BYTES,
+    "fetched resource is too large",
+  );
 }
 
 function text(value: unknown) {
   return { content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };
 }
 
-const server = new McpServer({ name: "money", version: "0.9.0" });
+const server = new McpServer({ name: "money", version: "0.13.0" });
 
 server.tool(
   "money_balance",
@@ -117,7 +158,7 @@ const pendingApprovals = new Map<string, WaitingApproval>();
 const pendingExternal = new Map<string, PendingExternal>();
 
 async function fetchWithReceipt(url: string, challengeId: string, receiptId: string): Promise<Response> {
-  return fetch(url, {
+  return agentFetch(url, {
     headers: {
       "x-agent-id": AGENT_ID!,
       "x-payment-challenge": challengeId,
@@ -147,7 +188,7 @@ async function deliverInternal(
       receiptId,
     });
   }
-  const body = await retry.text();
+  const body = await resourceBody(retry);
   if (retry.ok) pendingRedemptions.delete(url);
   return text({
     status: retry.status,
@@ -254,7 +295,7 @@ async function retryExternal(url: string, pending: PendingExternal) {
   if (pending.settlementHeader) return confirmExternalDelivery(url, pending);
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await agentFetch(url, {
       headers: { [pending.paymentHeaderName ?? "x-payment"]: pending.paymentHeader! },
     });
   } catch {
@@ -265,7 +306,7 @@ async function retryExternal(url: string, pending: PendingExternal) {
       externalId: pending.externalId,
     });
   }
-  const bodyText = await res.text();
+  const bodyText = await resourceBody(res);
   if (res.ok) {
     const settlementHeader = res.headers.get(pending.settlementHeaderName ?? "x-payment-response");
     pending.deliveredStatus = res.status;
@@ -383,6 +424,18 @@ server.tool(
     url: z.string().url().describe("the URL to fetch"),
   },
   async ({ url }) => {
+    try {
+      // Canonical href is also the retry/idempotency map key. Fragments,
+      // default-port aliases, and host casing must not create a second pay.
+      url = (await fetchPolicy.validate(url)).href;
+    } catch (error) {
+      return text({
+        status: 0,
+        error: "fetch_target_rejected",
+        reason: error instanceof Error ? error.message : "unsafe fetch target",
+      });
+    }
+
     // Resume path (external): memory first, then the durable network record so
     // an MCP restart cannot create a second debit for the same in-flight URL.
     const extPending = pendingExternal.get(url);
@@ -407,8 +460,17 @@ server.tool(
         const resumed = await fetchWithReceipt(url, pending.challengeId, pending.receiptId);
         if (resumed.ok) {
           pendingRedemptions.delete(url);
-          const body = await resumed.text();
+          const body = await resourceBody(resumed);
           return text({ status: resumed.status, paid: "$0.00", note: "resumed with previously paid receipt", body: safeJson(body) });
+        }
+        if (resumed.status >= 300 && resumed.status < 400) {
+          await resumed.body?.cancel().catch(() => undefined);
+          return text({
+            status: resumed.status,
+            error: "paid resource attempted to redirect; receipt retained and credentials were not forwarded",
+            challengeId: pending.challengeId,
+            receiptId: pending.receiptId,
+          });
         }
         // Redemption rejected (expired/consumed) — drop it and start fresh.
         pendingRedemptions.delete(url);
@@ -428,13 +490,41 @@ server.tool(
     const waiting = pendingApprovals.get(url);
     if (waiting) return resumeInternalApproval(url, waiting);
 
-    const first = await fetch(url, { headers: { "x-agent-id": AGENT_ID! } });
+    let first: Response;
+    try {
+      first = await agentFetch(url, { headers: { "x-agent-id": AGENT_ID! } });
+    } catch (error) {
+      return text({
+        status: 0,
+        error: "fetch_failed",
+        reason: error instanceof Error ? error.message : "network error",
+      });
+    }
+    if (first.status >= 300 && first.status < 400) {
+      const location = first.headers.get("location");
+      await first.body?.cancel().catch(() => undefined);
+      if (!location) return text({ status: first.status, error: "redirect is missing Location" });
+      try {
+        const redirect = await fetchPolicy.validate(new URL(location, url).href);
+        return text({
+          status: first.status,
+          redirect: redirect.href,
+          note: "redirect was not followed automatically; call money_fetch with this validated URL",
+        });
+      } catch (error) {
+        return text({
+          status: first.status,
+          error: "unsafe_redirect",
+          reason: error instanceof Error ? error.message : "redirect target rejected",
+        });
+      }
+    }
     if (first.status !== 402) {
-      const body = await first.text();
+      const body = await resourceBody(first);
       return text({ status: first.status, paid: "$0.00", body: safeJson(body) });
     }
 
-    const challenge = (await first.json().catch(() => null)) as {
+    type ChallengeBody = {
       challengeId?: string;
       amountMicros?: number;
       payTo?: string;
@@ -442,14 +532,23 @@ server.tool(
       x402Version?: number;
       resource?: unknown;
       extensions?: unknown;
-    } | null;
+    };
+    const challengeText = await resourceBody(first);
+    let challenge: ChallengeBody | null = null;
+    try {
+      const parsed = challengeText ? JSON.parse(challengeText) as unknown : null;
+      challenge = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as ChallengeBody : null;
+    } catch {
+      challenge = null;
+    }
     if (!challenge?.challengeId) {
       // Not our network's 402. If it speaks external x402 (accepts[]), pay it
       // through the bridge. The internal challengeId flow is deliberately
       // preferred when both are present — flow choice must not be steerable
       // by a malicious body.
       const demand = parseExternalPaymentDemand(first.headers.get("payment-required"), challenge);
-      const paymentUrl = first.url || url;
+      const paymentUrl = url;
       return demand.ok
         ? externalFetch(paymentUrl, demand.demand)
         : text({ status: 402, error: demand.reason, body: challenge });

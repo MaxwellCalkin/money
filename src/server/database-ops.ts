@@ -2,11 +2,13 @@ import { serve } from "@hono/node-server";
 import { timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Hono } from "hono";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import type { TransactionalDatabase } from "../db/database.ts";
 import { PostgresLedger } from "../db/ledger.ts";
 import { runMigrations } from "../db/migrate.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
 import { PostgresTreasury } from "../db/treasury.ts";
+import { listenHost } from "./listen.ts";
 
 function sameToken(expected: string, authorization?: string): boolean {
   const presented = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
@@ -192,10 +194,11 @@ export function createDatabaseOpsApi(
 }
 
 export async function startDatabaseOpsServer(port = Number(process.env.OPS_PORT ?? 4022)) {
+  enforceProductionPreflight("database-ops");
   const db = new PostgresDatabase({ applicationName: "money-ops" });
   if (process.env.MONEY_AUTO_MIGRATE === "true") await runMigrations(db);
   const app = createDatabaseOpsApi(db);
-  const server = serve({ fetch: app.fetch, hostname: "0.0.0.0", port });
+  const server = serve({ fetch: app.fetch, hostname: listenHost("127.0.0.1"), port });
   console.log(`database health and reconciliation listening on :${port}`);
 
   let closing = false;

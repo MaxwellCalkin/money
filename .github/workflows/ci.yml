@@ -1,0 +1,133 @@
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [main, "codex/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  product:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          package-manager-cache: true
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test -- --reporter=dot
+      - run: npm run build
+      - run: npm run verify:deployment
+      - run: npm audit --audit-level=moderate
+
+  postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18.4-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres-release-test
+          POSTGRES_DB: money_live
+          POSTGRES_INITDB_ARGS: --data-checksums
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d money_live"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      MONEY_TEST_DATABASE_URL: postgresql://postgres:postgres-release-test@127.0.0.1:5432/money_live
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          package-manager-cache: true
+      - run: npm ci --no-audit --no-fund
+      - run: npm run test:postgres-live
+
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Build production image without publishing
+        id: build
+        env:
+          IMAGE_REF: money:${{ github.sha }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          mkdir -p release-evidence
+          docker build --pull --build-arg SOURCE_COMMIT="$SOURCE_COMMIT" --tag "$IMAGE_REF" .
+          docker image inspect --format='image_id={{.Id}}' "$IMAGE_REF" > release-evidence/image-identity.txt
+          printf 'source_commit=%s\nsource_repository=%s\nworkflow_ref=%s\nrun_id=%s\nrun_attempt=%s\n' \
+            "$SOURCE_COMMIT" "$SOURCE_REPOSITORY" "$WORKFLOW_REF" "$RUN_ID" "$RUN_ATTEMPT" \
+            >> release-evidence/image-identity.txt
+      - name: Generate CycloneDX image SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          cache: "false"
+          scan-type: image
+          image-ref: money:${{ github.sha }}
+          format: cyclonedx
+          output: release-evidence/money.cdx.json
+          exit-code: "0"
+          timeout: 10m
+      - name: Scan production image
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          cache: "false"
+          skip-setup-trivy: "true"
+          scan-type: image
+          image-ref: money:${{ github.sha }}
+          format: json
+          output: release-evidence/trivy-high-critical.json
+          exit-code: "1"
+          ignore-unfixed: "false"
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          scanners: vuln
+          timeout: 10m
+      - name: Hash release evidence
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        working-directory: release-evidence
+        run: |
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > SHA256SUMS
+          test -s SHA256SUMS
+      - name: Retain image identity, SBOM, and vulnerability evidence
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: money-image-evidence-${{ github.sha }}
+          path: release-evidence/
+          if-no-files-found: error
+          retention-days: 90

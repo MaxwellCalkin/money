@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Hono, type Context, type Next } from "hono";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import {
   decryptPaymentHeaderWithKeyring,
   encryptPaymentHeaderWithKeyring,
@@ -67,6 +68,7 @@ import {
   type TreasuryRoute,
 } from "../db/treasury.ts";
 import { dashboardHtml } from "./dashboard.ts";
+import { listenHost } from "./listen.ts";
 
 const AUTH_WINDOW_MS = 2 * 60_000;
 const CLOCK_SKEW_MS = 30_000;
@@ -1882,6 +1884,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
 }
 
 export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) {
+  enforceProductionPreflight("api");
   const db = new PostgresDatabase({ applicationName: "money-product-api" });
   if (process.env.MONEY_AUTO_MIGRATE === "true") await runMigrations(db);
   const mockExternal = process.env.MONEY_EXTERNAL_MOCK === "true";
@@ -1921,6 +1924,11 @@ export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) 
   let evmSigner: HttpEvmSigner | LocalEvmSigner | undefined;
   if (process.env.MONEY_EVM_SIGNER_URL) {
     if (!process.env.MONEY_EVM_SIGNER_ADDRESS) throw new Error("MONEY_EVM_SIGNER_ADDRESS is required with MONEY_EVM_SIGNER_URL");
+    if (process.env.NODE_ENV === "production"
+      && (!process.env.MONEY_EVM_SIGNER_TOKEN
+        || process.env.MONEY_EVM_SIGNER_TOKEN.length < 32)) {
+      throw new Error("production remote EVM signing requires MONEY_EVM_SIGNER_TOKEN with at least 32 characters");
+    }
     evmSigner = new HttpEvmSigner({
       url: process.env.MONEY_EVM_SIGNER_URL,
       address: process.env.MONEY_EVM_SIGNER_ADDRESS,
@@ -1969,9 +1977,10 @@ export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) 
       }),
     } : {}),
   });
-  const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port });
-  console.log(`Postgres money API listening on http://127.0.0.1:${port}`);
-  console.log(`private owner dashboard at http://127.0.0.1:${port}/dashboard`);
+  const hostname = listenHost("127.0.0.1");
+  const server = serve({ fetch: app.fetch, hostname, port });
+  console.log(`Postgres money API listening on http://${hostname}:${port}`);
+  console.log(`private owner dashboard at http://${hostname}:${port}/dashboard`);
   let closing = false;
   const close = async () => {
     if (closing) return;

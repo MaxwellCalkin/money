@@ -117,6 +117,24 @@ of concurrent purchases. If the seller declares the x402 payment-identifier exte
 the payload includes a stable identifier derived from the Money idempotency
 key so a repeated seller request can be deduplicated.
 
+`money_fetch` canonicalizes the resource URL before it becomes an idempotency
+map key, requires HTTPS for public destinations, rejects private/reserved
+literal and resolved DNS targets, pins the checked address into the request
+socket while retaining the hostname's TLS identity, and reads bounded response
+bodies. Automatic redirect following is disabled. An unauthenticated redirect
+is surfaced as a validated target for a new call; a receipt or
+`PAYMENT-SIGNATURE` is never
+forwarded to a redirect target. Trusted local CLIs require an exact-origin
+`MONEY_FETCH_PRIVATE_ORIGINS` opt-in whose addresses are all loopback,
+RFC1918, CGNAT, or IPv6 ULA. Link-local metadata and other reserved ranges
+remain unreachable even when listed.
+
+The owner, seller, and compliance login/onboarding clients apply the same
+HTTPS-or-explicit-loopback and bare-origin rule to configured control-plane
+URLs. They refuse redirects, time out stalled requests, and parse JSON only
+after enforcing a response-size ceiling so signed headers cannot be carried to
+an unexpected origin.
+
 ## What the verifier proves
 
 Seller and facilitator response fields are treated as claims, not evidence.
@@ -175,14 +193,17 @@ npm run external:worker
 
 External routes open only when all three production capabilities exist:
 
-1. a remote EVM signer address and HTTPS HSM/key-service endpoint;
+1. a nonzero remote EVM signer address, HTTPS HSM/key-service endpoint, and
+   separately rotatable bearer credential;
 2. an authorization-encryption keyring with an active key; and
 3. an independent HTTPS RPC configuration for every enabled network.
 
 The remote signer receives EIP-712 typed data plus the configured public
-address and returns `{ "signature": "0x..." }`. The API verifies that
-signature locally against the configured address before accepting it. Raw
-private keys are permitted only for local development and are refused in
+address and returns `{ "signature": "0x..." }`. The client refuses redirects,
+bounds or cancels the response, rejects URL-embedded credentials and query
+parameters, and verifies the signature locally against the configured address
+before accepting it. Production requires a 32+ character bearer credential.
+Raw private keys are permitted only for local development and are refused in
 production.
 
 Example environment shape:

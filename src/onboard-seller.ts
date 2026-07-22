@@ -11,11 +11,16 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import {
+  configuredHttpOrigin,
+  DEFAULT_CLIENT_TIMEOUT_MS,
+  readBoundedJsonResponse,
+} from "./core/api-client.ts";
 import { generateAgentKeypair, signedHeaders } from "./core/identity.ts";
 import { isValidHandle, isValidServiceSlug, normalizeHandle, normalizeServiceSlug } from "./core/network.ts";
 import { fmt, usd } from "./core/types.ts";
 
-const API = process.env.MONEY_API ?? "http://127.0.0.1:4021";
+const API = configuredHttpOrigin(process.env.MONEY_API ?? "http://127.0.0.1:4021", "MONEY_API");
 const USER_ID = process.env.MONEY_USER_ID;
 const OWNER_KEY = process.env.MONEY_OWNER_KEY;
 
@@ -74,8 +79,14 @@ async function post<T>(
       ...signedHeaders(accountId, privateKey, { method: "POST", path, body: payload }, idHeader),
     },
     body: payload,
+    redirect: "error",
+    signal: AbortSignal.timeout(DEFAULT_CLIENT_TIMEOUT_MS),
   });
-  const json = await response.json() as T & { error?: string; reason?: string };
+  const json = await readBoundedJsonResponse<T & { error?: string; reason?: string }>(
+    response,
+    undefined,
+    "money API response",
+  );
   if (!response.ok) throw new Error(`${path} -> ${response.status}: ${JSON.stringify(json)}`);
   return json;
 }

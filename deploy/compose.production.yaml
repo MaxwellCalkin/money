@@ -1,0 +1,146 @@
+name: money-production
+
+x-money-service: &money-service
+  image: ${MONEY_IMAGE:?Set MONEY_IMAGE to an immutable image reference}
+  pull_policy: always
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=16m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 128
+  stop_grace_period: 30s
+  environment:
+    NODE_ENV: production
+    MONEY_BIND_HOST: 0.0.0.0
+  networks:
+    - money-internal
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+services:
+  migrate:
+    <<: *money-service
+    profiles: [admin]
+    restart: "no"
+    command: [dist/db/migrate.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/migrate.env"]
+
+  api:
+    <<: *money-service
+    command: [dist/server/postgres-api.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/api.env"]
+    ports:
+      - ${MONEY_API_BIND:-127.0.0.1}:4021:4021
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4021/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+
+  database-ops:
+    <<: *money-service
+    command: [dist/server/database-ops.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/database-ops.env"]
+    ports:
+      - ${MONEY_OPS_BIND:-127.0.0.1}:4022:4022
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4022/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+
+  external-worker:
+    <<: *money-service
+    command: [dist/db/external-worker.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/external-worker.env"]
+
+  treasury-webhook:
+    <<: *money-service
+    command: [dist/treasury/webhook-server.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/treasury-webhook.env"]
+    ports:
+      - ${MONEY_TREASURY_WEBHOOK_BIND:-127.0.0.1}:4023:4023
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4023/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+
+  treasury-events:
+    <<: *money-service
+    command: [dist/treasury/event-worker.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/treasury-events.env"]
+
+  treasury-payouts:
+    <<: *money-service
+    command: [dist/treasury/payout-worker.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/treasury-payouts.env"]
+
+  treasury-reconciler:
+    <<: *money-service
+    command: [dist/treasury/reconciler.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/treasury-reconciler.env"]
+
+  compliance-webhook:
+    <<: *money-service
+    command: [dist/compliance/webhook-server.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/compliance-webhook.env"]
+    ports:
+      - ${MONEY_COMPLIANCE_WEBHOOK_BIND:-127.0.0.1}:4024:4024
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4024/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+
+  compliance-events:
+    <<: *money-service
+    command: [dist/compliance/event-worker.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/compliance-events.env"]
+
+  compliance-onboarding:
+    <<: *money-service
+    command: [dist/compliance/onboarding-worker.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/compliance-onboarding.env"]
+
+  compliance-reviews:
+    <<: *money-service
+    command: [dist/compliance/review-worker.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/compliance-reviews.env"]
+
+  compliance-ops:
+    <<: *money-service
+    command: [dist/compliance/ops-server.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/compliance-ops.env"]
+    ports:
+      - ${MONEY_COMPLIANCE_OPS_BIND:-127.0.0.1}:4025:4025
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4025/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+
+  compliance-console:
+    <<: *money-service
+    command: [dist/compliance/console-server.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/compliance-console.env"]
+    ports:
+      - ${MONEY_COMPLIANCE_CONSOLE_BIND:-127.0.0.1}:4026:4026
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4026/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+
+networks:
+  money-internal:
+    internal: false

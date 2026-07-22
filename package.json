@@ -1,10 +1,13 @@
 {
   "name": "money",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Venmo for agents — a closed-loop payment network where AI agents pay each other and pay APIs, under user-signed mandates.",
   "type": "module",
   "private": true,
   "scripts": {
+    "build": "node scripts/build.mjs",
+    "verify:deployment": "node scripts/verify-deployment.mjs",
+    "deploy:preflight": "tsx src/deploy/preflight.ts",
     "demo": "tsx src/demo.ts",
     "onboard": "tsx src/onboard.ts",
     "onboard:seller": "tsx src/onboard-seller.ts",
@@ -30,15 +33,16 @@
     "compliance:console": "tsx src/compliance/console-server.ts",
     "compliance:operator-setup": "tsx src/compliance/operator-setup.ts",
     "compliance:login": "tsx src/compliance/operator-login.ts",
-    "db:test": "vitest run test/postgres-ledger.test.ts test/postgres-policy.test.ts test/postgres-control-plane-db.test.ts test/postgres-api.test.ts test/postgres-marketplace.test.ts test/postgres-marketplace-api.test.ts test/postgres-external.test.ts test/postgres-external-api.test.ts test/postgres-treasury.test.ts test/postgres-treasury-api.test.ts test/postgres-compliance.test.ts test/postgres-compliance-api.test.ts test/compliance-workers.test.ts test/compliance-onboarding.test.ts test/compliance-console.test.ts test/treasury-column.test.ts test/treasury-workers.test.ts",
+    "db:test": "vitest run test/postgres-ledger.test.ts test/postgres-policy.test.ts test/postgres-control-plane-db.test.ts test/postgres-api.test.ts test/postgres-marketplace.test.ts test/postgres-marketplace-api.test.ts test/postgres-external.test.ts test/postgres-external-api.test.ts test/postgres-treasury.test.ts test/postgres-treasury-api.test.ts test/postgres-compliance.test.ts test/postgres-compliance-api.test.ts test/compliance-workers.test.ts test/compliance-onboarding.test.ts test/compliance-persona.test.ts test/compliance-console.test.ts test/treasury-column.test.ts test/treasury-workers.test.ts",
+    "test:postgres-live": "vitest run test/postgres-live.test.ts --reporter=verbose",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "dependencies": {
-    "@hono/node-server": "^1.19.14",
+    "@hono/node-server": "2.0.11",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@x402/core": "^2.19.0",
     "@x402/evm": "^2.19.0",
@@ -50,15 +54,16 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.4",
-    "@rollup/rollup-win32-x64-msvc": "^4.62.2",
     "@types/node": "^22.20.1",
     "@types/pg": "^8.20.0",
+    "esbuild": "0.25.12",
     "tsx": "^4.23.1",
     "typescript": "5.6",
     "vite": "^6.4.3",
     "vitest": "^3.2.6"
   },
   "overrides": {
+    "@hono/node-server": "$@hono/node-server",
     "esbuild": "0.25.12"
   }
 }

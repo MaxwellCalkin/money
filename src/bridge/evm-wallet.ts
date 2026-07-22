@@ -1,8 +1,11 @@
 import { getAddress, verifyTypedData } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { readBoundedResponse } from "../core/bounded-response.ts";
+import { isLoopbackHostname } from "../core/url-security.ts";
 import type { EvmTypedDataSigner } from "./x402-v2.ts";
 
 type TypedDataRequest = Parameters<EvmTypedDataSigner["signTypedData"]>[0];
+const MAX_SIGNER_RESPONSE_BYTES = 16 * 1024;
 
 function checkedSignature(value: unknown): `0x${string}` {
   if (typeof value !== "string" || !/^0x[0-9a-f]{130}$/i.test(value)) {
@@ -48,11 +51,23 @@ export class HttpEvmSigner implements EvmTypedDataSigner {
 
   constructor(options: HttpEvmSignerOptions) {
     this.url = new URL(options.url);
-    const local = this.url.hostname === "localhost" || this.url.hostname === "127.0.0.1" || this.url.hostname === "::1";
+    const local = isLoopbackHostname(this.url);
     if (this.url.protocol !== "https:" && !(local && options.allowInsecureLocalhost)) {
       throw new Error("remote EVM signer must use HTTPS (HTTP is allowed only for explicit localhost development)");
     }
+    if (local && !options.allowInsecureLocalhost) {
+      throw new Error("remote EVM signer localhost access requires explicit development mode");
+    }
+    if (this.url.username || this.url.password || this.url.search || this.url.hash) {
+      throw new Error("remote EVM signer URL must not contain credentials, query, or fragment");
+    }
     this.address = getAddress(options.address);
+    if (/^0x0{40}$/i.test(this.address)) throw new Error("remote EVM signer address must not be zero");
+    if (options.bearerToken !== undefined
+      && (!options.bearerToken || options.bearerToken.length > 2_048
+        || options.bearerToken.trim() !== options.bearerToken || /[\r\n]/.test(options.bearerToken))) {
+      throw new Error("remote EVM signer bearer token is invalid");
+    }
     this.bearerToken = options.bearerToken;
     this.timeoutMs = options.timeoutMs ?? 5_000;
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 100 || this.timeoutMs > 30_000) {
@@ -72,13 +87,29 @@ export class HttpEvmSigner implements EvmTypedDataSigner {
       // JSON has no bigint primitive. Decimal strings preserve EIP-712 integer
       // precision and are accepted by standard signing services and viem.
       body: JSON.stringify(
-        { address: this.address, ...message },
+        { ...message, address: this.address },
         (_key, value) => typeof value === "bigint" ? value.toString() : value,
       ),
+      redirect: "error",
       signal: AbortSignal.timeout(this.timeoutMs),
     });
-    if (!response.ok) throw new Error(`remote EVM signer failed with HTTP ${response.status}`);
-    const body = await response.json().catch(() => null) as { signature?: unknown } | null;
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`remote EVM signer failed with HTTP ${response.status}`);
+    }
+    const bytes = await readBoundedResponse(
+      response,
+      MAX_SIGNER_RESPONSE_BYTES,
+      "remote EVM signer response is too large",
+    );
+    let body: { signature?: unknown } | null = null;
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+      body = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as { signature?: unknown } : null;
+    } catch {
+      body = null;
+    }
     const signature = checkedSignature(body?.signature);
     const valid = await verifyTypedData({
       address: this.address,

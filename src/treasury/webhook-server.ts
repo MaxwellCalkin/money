@@ -3,8 +3,10 @@ import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
 import { PostgresTreasury } from "../db/treasury.ts";
+import { listenHost } from "../server/listen.ts";
 import { parseColumnEvent, verifyColumnWebhook } from "./column.ts";
 import { readBoundedInteger } from "./runtime.ts";
 
@@ -72,6 +74,7 @@ export function createTreasuryWebhookApp(treasury: PostgresTreasury, options: Co
 export async function startTreasuryWebhookServer(
   port = readBoundedInteger(process.env.TREASURY_WEBHOOK_PORT, 4023, 1, 65_535, "TREASURY_WEBHOOK_PORT")
 ) {
+  enforceProductionPreflight("treasury-webhook");
   const connectionString = process.env.MONEY_TREASURY_INGRESS_DATABASE_URL;
   const secret = process.env.MONEY_COLUMN_WEBHOOK_SECRET;
   const endpointId = process.env.MONEY_COLUMN_WEBHOOK_ENDPOINT_ID;
@@ -80,7 +83,7 @@ export async function startTreasuryWebhookServer(
   }
   const db = new PostgresDatabase({ connectionString, applicationName: "money-treasury-webhook", maxConnections: 5 });
   const app = createTreasuryWebhookApp(new PostgresTreasury(db), { secret, endpointId });
-  const server = serve({ fetch: app.fetch, hostname: "0.0.0.0", port });
+  const server = serve({ fetch: app.fetch, hostname: listenHost("127.0.0.1"), port });
   console.log(`treasury webhook ingress listening on :${port}`);
   let closing = false;
   const close = async () => {

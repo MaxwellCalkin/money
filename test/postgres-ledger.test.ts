@@ -78,6 +78,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0007", applied: false }),
       expect.objectContaining({ version: "0008", applied: false }),
       expect.objectContaining({ version: "0009", applied: false }),
+      expect.objectContaining({ version: "0010", applied: false }),
     ]);
     const rows = await db.query<{ version: string; checksum: string }>("select version, checksum from money.schema_migrations");
     expect(rows.rows).toEqual([
@@ -90,6 +91,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0007", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0008", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0009", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
+      expect.objectContaining({ version: "0010", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
     ]);
     await db.query("update money.schema_migrations set checksum = repeat('0', 64) where version = '0001'");
     await expect(runMigrations(db)).rejects.toThrow(/checksum changed/);
@@ -233,7 +235,7 @@ describe("Postgres ledger kernel", () => {
     expect((await app.request("/health/live")).status).toBe(200);
     const ready = await app.request("/health/ready");
     expect(ready.status).toBe(200);
-    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0009" }));
+    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0010" }));
     expect((await app.request("/ops/reconcile")).status).toBe(404);
     expect((await app.request("/ops/treasury")).status).toBe(404);
     const reconciled = await app.request("/ops/reconcile", { headers: { authorization: "Bearer ops-secret" } });
@@ -344,6 +346,7 @@ describe("Postgres ledger kernel", () => {
       compliance_admin_operator_register: boolean;
       compliance_admin_limits: boolean;
       compliance_worker_evidence: boolean;
+      compliance_worker_evidence_set: boolean;
       compliance_worker_approve: boolean;
       compliance_worker_enqueue: boolean;
       compliance_worker_table: boolean;
@@ -351,6 +354,7 @@ describe("Postgres ledger kernel", () => {
       compliance_ingress_enqueue: boolean;
       compliance_ingress_evidence: boolean;
       compliance_ingress_table: boolean;
+      compliance_complete_event_removed: boolean;
       risk_sweep: boolean;
       risk_release: boolean;
       risk_table: boolean;
@@ -463,6 +467,7 @@ describe("Postgres ledger kernel", () => {
         has_function_privilege('money_compliance_admin', 'money_private.register_compliance_operator(text,text,text,text,text,text,text)', 'EXECUTE') as compliance_admin_operator_register,
         has_function_privilege('money_compliance_admin', 'money_private.configure_risk_limits(text,bigint,bigint,bigint,bigint,bigint,text,text)', 'EXECUTE') as compliance_admin_limits,
         has_function_privilege('money_compliance_worker', 'money_private.record_compliance_evidence(text,text,text,text,text,bytea,text,timestamptz,timestamptz,jsonb)', 'EXECUTE') as compliance_worker_evidence,
+        has_function_privilege('money_compliance_worker', 'money_private.record_compliance_event_evidence_set(text,bigint,jsonb)', 'EXECUTE') as compliance_worker_evidence_set,
         has_function_privilege('money_compliance_worker', 'money_private.approve_compliance_subject(text,text,timestamptz,text,text)', 'EXECUTE') as compliance_worker_approve,
         has_function_privilege('money_compliance_worker', 'money_private.enqueue_compliance_event(text,text,text,text,bytea)', 'EXECUTE') as compliance_worker_enqueue,
         has_table_privilege('money_compliance_worker', 'money.compliance_evidence', 'SELECT') as compliance_worker_table,
@@ -470,6 +475,7 @@ describe("Postgres ledger kernel", () => {
         has_function_privilege('money_compliance_ingress', 'money_private.enqueue_compliance_event(text,text,text,text,bytea)', 'EXECUTE') as compliance_ingress_enqueue,
         has_function_privilege('money_compliance_ingress', 'money_private.record_compliance_evidence(text,text,text,text,text,bytea,text,timestamptz,timestamptz,jsonb)', 'EXECUTE') as compliance_ingress_evidence,
         has_table_privilege('money_compliance_ingress', 'money.compliance_event_inbox', 'SELECT') as compliance_ingress_table,
+        to_regprocedure('money_private.complete_compliance_event(text,bigint,uuid)') is null as compliance_complete_event_removed,
         has_function_privilege('money_risk_worker', 'money_private.sweep_expired_compliance(integer)', 'EXECUTE') as risk_sweep,
         has_function_privilege('money_risk_worker', 'money_private.release_compliance_restriction(text,text,text)', 'EXECUTE') as risk_release,
         has_table_privilege('money_risk_worker', 'money.risk_decisions', 'SELECT') as risk_table,
@@ -581,7 +587,8 @@ describe("Postgres ledger kernel", () => {
       compliance_admin_evidence: false,
       compliance_admin_operator_register: true,
       compliance_admin_limits: false,
-      compliance_worker_evidence: true,
+      compliance_worker_evidence: false,
+      compliance_worker_evidence_set: true,
       compliance_worker_approve: false,
       compliance_worker_enqueue: false,
       compliance_worker_table: false,
@@ -589,6 +596,7 @@ describe("Postgres ledger kernel", () => {
       compliance_ingress_enqueue: true,
       compliance_ingress_evidence: false,
       compliance_ingress_table: false,
+      compliance_complete_event_removed: true,
       risk_sweep: true,
       risk_release: false,
       risk_table: false,
@@ -629,7 +637,7 @@ describe("Postgres ledger kernel", () => {
       );
       expect((await db.query("select * from money_private.account_state('usr_role0001', 'USD')")).rows).toHaveLength(1);
       expect((await db.query("select * from money_private.list_public_services(10, null, null)")).rows).toEqual([]);
-      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0009" });
+      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0010" });
       await expect(db.query(
         "select * from money_private.register_account('usr_bypass01', 'user', 'Bypass', null, null, $1)",
         [`bypass-public-key-${"x".repeat(40)}`]

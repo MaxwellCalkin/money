@@ -8,10 +8,15 @@
  *   npx tsx src/onboard.ts [--name scout] [--fund 20] [--budget 10]
  */
 import { randomUUID } from "node:crypto";
+import {
+  configuredHttpOrigin,
+  DEFAULT_CLIENT_TIMEOUT_MS,
+  readBoundedJsonResponse,
+} from "./core/api-client.ts";
 import { generateAgentKeypair, signedHeaders } from "./core/identity.ts";
 import { fmt, usd } from "./core/types.ts";
 
-const API = process.env.MONEY_API ?? "http://127.0.0.1:4021";
+const API = configuredHttpOrigin(process.env.MONEY_API ?? "http://127.0.0.1:4021", "MONEY_API");
 
 function arg(flag: string, fallback: string): string {
   const i = process.argv.indexOf(`--${flag}`);
@@ -25,8 +30,14 @@ async function post<T>(path: string, payload: string, extraHeaders: Record<strin
     method: "POST",
     headers: { "content-type": "application/json", ...extraHeaders },
     body: payload,
+    redirect: "error",
+    signal: AbortSignal.timeout(DEFAULT_CLIENT_TIMEOUT_MS),
   });
-  const json = (await res.json()) as T & { error?: string };
+  const json = await readBoundedJsonResponse<T & { error?: string }>(
+    res,
+    undefined,
+    "money API response",
+  );
   if (!res.ok) throw new Error(`${path} → ${res.status}: ${JSON.stringify(json)}`);
   return json;
 }

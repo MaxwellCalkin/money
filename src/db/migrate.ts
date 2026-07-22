@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import type { SqlExecutor, TransactionalDatabase } from "./database.ts";
 import { PostgresDatabase } from "./postgres.ts";
 
@@ -78,6 +79,7 @@ export async function runMigrations(
 }
 
 async function main() {
+  enforceProductionPreflight("migrate");
   const db = new PostgresDatabase({ applicationName: "money-migrate", maxConnections: 1, statementTimeoutMs: 60_000 });
   try {
     const result = await runMigrations(db, process.env.MONEY_MIGRATIONS);

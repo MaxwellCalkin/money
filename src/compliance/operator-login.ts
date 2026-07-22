@@ -1,6 +1,14 @@
+import {
+  configuredHttpOrigin,
+  DEFAULT_CLIENT_TIMEOUT_MS,
+  readBoundedJsonResponse,
+} from "../core/api-client.ts";
 import { signedHeaders } from "../core/identity.ts";
 
-const API = (process.env.MONEY_COMPLIANCE_CONSOLE_URL ?? "http://127.0.0.1:4026").replace(/\/$/, "");
+const API = configuredHttpOrigin(
+  process.env.MONEY_COMPLIANCE_CONSOLE_URL ?? "http://127.0.0.1:4026",
+  "MONEY_COMPLIANCE_CONSOLE_URL",
+);
 const OPERATOR_ID = process.env.MONEY_COMPLIANCE_OPERATOR_ID;
 const OPERATOR_KEY = process.env.MONEY_COMPLIANCE_OPERATOR_KEY;
 
@@ -17,13 +25,15 @@ async function main() {
       ...signedHeaders(OPERATOR_ID, OPERATOR_KEY, { method: "POST", path, body }, "x-operator-id"),
     },
     body,
+    redirect: "error",
+    signal: AbortSignal.timeout(DEFAULT_CLIENT_TIMEOUT_MS),
   });
-  const result = await response.json() as {
+  const result = await readBoundedJsonResponse<{
     consolePath?: string;
     expiresAt?: number;
     error?: string;
     reason?: string;
-  };
+  }>(response, undefined, "compliance console response");
   if (!response.ok || !result.consolePath) {
     throw new Error(`operator session creation failed (${response.status}): ${JSON.stringify(result)}`);
   }

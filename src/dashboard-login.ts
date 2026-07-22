@@ -1,9 +1,14 @@
 /** Mint a short-lived owner browser session without putting the long-lived
  * owner key in browser storage. The returned token lives in the URL fragment,
  * which browsers do not send in HTTP requests or server access logs. */
+import {
+  configuredHttpOrigin,
+  DEFAULT_CLIENT_TIMEOUT_MS,
+  readBoundedJsonResponse,
+} from "./core/api-client.ts";
 import { signedHeaders } from "./core/identity.ts";
 
-const API = (process.env.MONEY_API ?? "http://127.0.0.1:4021").replace(/\/$/, "");
+const API = configuredHttpOrigin(process.env.MONEY_API ?? "http://127.0.0.1:4021", "MONEY_API");
 const USER_ID = process.env.MONEY_USER_ID;
 const OWNER_KEY = process.env.MONEY_OWNER_KEY;
 
@@ -20,8 +25,15 @@ async function main() {
       ...signedHeaders(USER_ID, OWNER_KEY, { method: "POST", path, body }, "x-user-id"),
     },
     body,
+    redirect: "error",
+    signal: AbortSignal.timeout(DEFAULT_CLIENT_TIMEOUT_MS),
   });
-  const result = await response.json() as { dashboardPath?: string; expiresAt?: number; error?: string; reason?: string };
+  const result = await readBoundedJsonResponse<{
+    dashboardPath?: string;
+    expiresAt?: number;
+    error?: string;
+    reason?: string;
+  }>(response, undefined, "money API response");
   if (!response.ok || !result.dashboardPath) {
     throw new Error(`session creation failed (${response.status}): ${JSON.stringify(result)}`);
   }

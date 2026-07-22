@@ -1,5 +1,12 @@
 import type { Context, Next } from "hono";
+import {
+  configuredHttpOrigin,
+  DEFAULT_CLIENT_TIMEOUT_MS,
+} from "../core/api-client.ts";
+import { readBoundedResponseText } from "../core/bounded-response.ts";
 import { signedHeaders } from "../core/identity.ts";
+
+const MAX_NETWORK_RESPONSE_BYTES = 256 * 1024;
 
 export interface MoneySellerClientOptions {
   /** Hosted money-network API, e.g. https://api.money.example. */
@@ -7,6 +14,8 @@ export interface MoneySellerClientOptions {
   providerId: string;
   /** Base64 PKCS#8 Ed25519 key registered on the provider account. */
   providerKey: string;
+  /** Request deadline for calls to the payment network. */
+  timeoutMs?: number;
   /** Injectable for tests and non-standard runtimes. */
   fetch?: typeof globalThis.fetch;
 }
@@ -25,8 +34,12 @@ export interface SellerNetworkResponse {
 /** Small provider-side SDK. It keeps signing out of route handlers and gives
  * sellers one authenticated client for challenges, redemptions, and refunds. */
 export function createMoneySellerClient(options: MoneySellerClientOptions) {
-  const networkUrl = options.networkUrl.replace(/\/$/, "");
+  const networkUrl = configuredHttpOrigin(options.networkUrl, "seller payment network URL");
   const doFetch = options.fetch ?? globalThis.fetch;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CLIENT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) {
+    throw new Error("seller payment network timeout must be 100-60000ms");
+  }
 
   const post = async (
     path: string,
@@ -46,9 +59,20 @@ export function createMoneySellerClient(options: MoneySellerClientOptions) {
           ),
         },
         body,
+        redirect: "error",
+        signal: AbortSignal.timeout(timeoutMs),
       });
       try {
-        return { status: response.status, body: await response.json() as NetworkJson };
+        const responseBody = await readBoundedResponseText(
+          response,
+          MAX_NETWORK_RESPONSE_BYTES,
+          "payment network response is too large",
+        );
+        const parsed = JSON.parse(responseBody) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("payment network response must be an object");
+        }
+        return { status: response.status, body: parsed as NetworkJson };
       } catch {
         return { status: 502, body: { error: "invalid_network_response" } };
       }

@@ -4,7 +4,10 @@ import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runComplianceEventBatch } from "../src/compliance/event-worker.ts";
 import { createComplianceOpsApi } from "../src/compliance/ops-server.ts";
-import { ComplianceProviderClient } from "../src/compliance/provider.ts";
+import {
+  ComplianceProviderClient,
+  GenericComplianceWebhookCodec,
+} from "../src/compliance/provider.ts";
 import { createComplianceWebhookApp } from "../src/compliance/webhook-server.ts";
 import { PostgresCompliance } from "../src/db/compliance.ts";
 import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/database.ts";
@@ -42,6 +45,19 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 const sign = (body: string) => createHmac("sha256", SECRET).update(body).digest("hex");
 
 describe("compliance provider boundary and workers", () => {
+  it("rejects ambiguous privileged provider configuration", () => {
+    expect(() => new ComplianceProviderClient({
+      provider: "fixture",
+      apiKey: "provider-secret",
+      baseUrl: "https://compliance.example/v1",
+    })).toThrow(/bare origin/);
+    expect(() => new ComplianceProviderClient({
+      provider: "fixture",
+      apiKey: " provider-secret ",
+      baseUrl: "https://compliance.example",
+    })).toThrow(/API key/);
+  });
+
   let db: EmbeddedPostgres;
   let compliance: PostgresCompliance;
   let ledger: PostgresLedger;
@@ -68,9 +84,11 @@ describe("compliance provider boundary and workers", () => {
 
   it("authenticates exact webhook bytes and stores only a retry-safe result reference", async () => {
     const app = createComplianceWebhookApp(compliance, {
-      provider: "fixture",
-      secret: SECRET,
-      endpointId: ENDPOINT,
+      codec: new GenericComplianceWebhookCodec({
+        provider: "fixture",
+        secret: SECRET,
+        endpointId: ENDPOINT,
+      }),
       maxBodyBytes: 1_024,
     });
     const body = JSON.stringify({ id: "event-001", resultRef: "result-001" });
@@ -255,6 +273,126 @@ describe("compliance provider boundary and workers", () => {
       activeOperators: 0,
       recentNonAllowDecisions: [expect.objectContaining({ amountMicros: "1" })],
     }));
+  });
+
+  it("rolls back the whole provider evidence set when any item is invalid", async () => {
+    const userId = "usr_workeratomic01";
+    await pendingSubject(userId);
+    await compliance.enqueueEvent({
+      provider: "fixture",
+      providerEventId: "event-atomic",
+      providerResultRef: "result-atomic",
+      endpointId: ENDPOINT,
+      deliveryHash: Buffer.from(sha256("event-atomic"), "hex"),
+    });
+    const claim = (await compliance.claimEvents("worker-atomic", 1))[0]!;
+    const observedAt = new Date(Date.now() - 1_000);
+    const expiresAt = new Date(Date.now() + 86_400_000);
+
+    await expect(compliance.recordEventEvidenceSet({
+      workerId: "worker-atomic",
+      inboxId: claim.inboxId,
+      items: [
+        {
+          subjectAccountId: userId,
+          kind: "identity",
+          providerResultRef: "result-atomic",
+          decision: "clear",
+          evidenceHash: Buffer.from(sha256("result-atomic"), "hex"),
+          observedAt,
+          expiresAt,
+          normalized: { verified: true },
+        },
+        {
+          subjectAccountId: userId,
+          kind: "sanctions",
+          providerResultRef: "result-atomic:sanctions",
+          decision: "clear",
+          evidenceHash: Buffer.from(sha256("result-atomic:sanctions"), "hex"),
+          observedAt,
+          expiresAt,
+          normalized: { fullName: "must roll back the first item" },
+        },
+      ],
+    })).rejects.toThrow(/invalid compliance evidence/);
+
+    expect((await db.query<{ evidence_count: number; link_count: number }>(`
+      select
+        (select count(*)::integer from money.compliance_evidence) as evidence_count,
+        (select count(*)::integer from money.compliance_event_evidence) as link_count
+    `)).rows).toEqual([{ evidence_count: 0, link_count: 0 }]);
+    expect((await db.query<{ state: string; evidence_id: string | null }>(
+      "select state, evidence_id from money.compliance_event_inbox",
+    )).rows).toEqual([{ state: "processing", evidence_id: null }]);
+  });
+
+  it("requires an exact evidence-set replay, including the provider list version", async () => {
+    const userId = "usr_workerreplay01";
+    await pendingSubject(userId);
+    await compliance.enqueueEvent({
+      provider: "fixture",
+      providerEventId: "event-replay",
+      providerResultRef: "result-replay",
+      endpointId: ENDPOINT,
+      deliveryHash: Buffer.from(sha256("event-replay"), "hex"),
+    });
+    const claim = (await compliance.claimEvents("worker-replay", 1))[0]!;
+    const item = {
+      subjectAccountId: userId,
+      providerSubjectRef: "provider-subject-replay-01",
+      kind: "sanctions" as const,
+      providerResultRef: "result-replay",
+      decision: "clear" as const,
+      evidenceHash: Buffer.from(sha256("result-replay"), "hex"),
+      listVersion: "watchlist-v1",
+      observedAt: new Date(Date.now() - 1_000),
+      expiresAt: new Date(Date.now() + 86_400_000),
+      normalized: { matches: 0 },
+    };
+
+    const recorded = await compliance.recordEventEvidenceSet({
+      workerId: "worker-replay", inboxId: claim.inboxId, items: [item],
+    });
+    expect(recorded.replayed).toBe(false);
+    await expect(compliance.recordEventEvidenceSet({
+      workerId: "worker-replay", inboxId: claim.inboxId, items: [item],
+    })).resolves.toEqual(expect.objectContaining({
+      primaryEvidenceId: recorded.primaryEvidenceId,
+      evidenceIds: [recorded.primaryEvidenceId],
+      replayed: true,
+    }));
+    await expect(compliance.recordEventEvidenceSet({
+      workerId: "worker-replay",
+      inboxId: claim.inboxId,
+      items: [{ ...item, listVersion: "watchlist-v2" }],
+    })).rejects.toThrow(/reused with different evidence/);
+    await expect(compliance.recordEventEvidenceSet({
+      workerId: "worker-replay",
+      inboxId: claim.inboxId,
+      items: [{ ...item, providerSubjectRef: "provider-subject-replay-02" }],
+    })).rejects.toThrow(/provider subject/);
+    await expect(compliance.recordEventEvidenceSet({
+      workerId: "worker-replay",
+      inboxId: claim.inboxId,
+      items: [
+        item,
+        {
+          ...item,
+          kind: "pep",
+          providerResultRef: "result-replay:extra",
+          evidenceHash: Buffer.from(sha256("result-replay:extra"), "hex"),
+        },
+      ],
+    })).rejects.toThrow(/evidence set changed on replay/);
+
+    expect((await db.query<{ list_version: string; evidence_count: number; link_count: number }>(`
+      select evidence.list_version,
+        (select count(*)::integer from money.compliance_evidence) as evidence_count,
+        (select count(*)::integer from money.compliance_event_evidence) as link_count
+      from money.compliance_evidence evidence
+    `)).rows).toEqual([{
+      list_version: "watchlist-v1", evidence_count: 1, link_count: 1,
+    }]);
   });
 
   it("rejects oversized or identity-mismatched provider responses", async () => {

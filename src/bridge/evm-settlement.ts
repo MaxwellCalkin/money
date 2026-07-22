@@ -7,6 +7,7 @@ import {
   verifyTypedData,
   type PublicClient,
 } from "viem";
+import { isLoopbackHostname } from "../core/url-security.ts";
 import type { Eip3009Authorization, SettlementResponse } from "./x402.ts";
 import type { X402V2Requirement } from "./x402-v2.ts";
 
@@ -71,11 +72,20 @@ export class EvmRpcSettlementVerifier {
       transport: http(config.rpcUrl, { timeout: 7_500, retryCount: 1 }),
     }),
   ) {
-    if (configs.length === 0) throw new Error("at least one EVM RPC network is required");
+    if (configs.length < 1 || configs.length > 16) {
+      throw new Error("one to sixteen EVM RPC networks are required");
+    }
     for (const config of configs) {
+      chainIdOf(config.network);
+      if (this.networks.has(config.network)) {
+        throw new Error(`duplicate EVM RPC network ${config.network}`);
+      }
       const url = new URL(config.rpcUrl);
-      if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+      if (url.protocol !== "https:" && !isLoopbackHostname(url)) {
         throw new Error("EVM RPC endpoints must use HTTPS outside localhost");
+      }
+      if (url.username || url.password || url.hash) {
+        throw new Error("EVM RPC endpoints must not contain credentials or a fragment");
       }
       const confirmations = config.confirmations ?? 1;
       if (!Number.isSafeInteger(confirmations) || confirmations < 1 || confirmations > 100) {
@@ -205,14 +215,29 @@ export function parseEvmRpcNetworks(value: string): EvmRpcNetwork[] {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("MONEY_EVM_RPC_URLS must be a JSON object keyed by CAIP-2 network");
   }
-  return Object.entries(parsed as Record<string, unknown>).map(([network, raw]) => {
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  if (entries.length < 1 || entries.length > 16) {
+    throw new Error("MONEY_EVM_RPC_URLS must contain one to sixteen networks");
+  }
+  return entries.map(([network, raw]) => {
     if (!/^eip155:[1-9][0-9]*$/.test(network)) throw new Error(`invalid EVM RPC network ${network}`);
-    if (typeof raw === "string") return { network: network as `eip155:${number}`, rpcUrl: raw };
-    if (!raw || typeof raw !== "object" || typeof (raw as { url?: unknown }).url !== "string") {
+    if (typeof raw === "string") {
+      if (!raw || raw.trim() !== raw) throw new Error(`invalid EVM RPC URL for ${network}`);
+      return { network: network as `eip155:${number}`, rpcUrl: raw };
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)
+      || typeof (raw as { url?: unknown }).url !== "string") {
       throw new Error(`EVM RPC config for ${network} must be a URL or {url, confirmations}`);
     }
     const entry = raw as { url: string; confirmations?: unknown };
-    if (entry.confirmations !== undefined && (!Number.isSafeInteger(entry.confirmations) || Number(entry.confirmations) < 1)) {
+    if (Object.keys(raw).some((key) => !["url", "confirmations"].includes(key))) {
+      throw new Error(`EVM RPC config for ${network} contains an unsupported field`);
+    }
+    if (!entry.url || entry.url.trim() !== entry.url) {
+      throw new Error(`invalid EVM RPC URL for ${network}`);
+    }
+    if (entry.confirmations !== undefined && (!Number.isSafeInteger(entry.confirmations)
+      || Number(entry.confirmations) < 1 || Number(entry.confirmations) > 100)) {
       throw new Error(`invalid confirmation count for ${network}`);
     }
     return {

@@ -4,6 +4,11 @@
 with `npm run db:migrate` against `DATABASE_URL`; use a PgBouncer transaction
 pool in deployed environments.
 
+Checksums cover the raw UTF-8 migration text. The repository's
+`.gitattributes` forces all text files to LF so a migration has the same bytes
+on Windows development machines and Linux production hosts. Never bypass that
+checkout policy or rewrite an applied migration.
+
 The ledger has two representations, committed in one transaction:
 
 - `money.ledger_entries` is the immutable source of truth. Every transfer has
@@ -112,6 +117,17 @@ immediately against an open case. Subject approval, restriction release,
 terminal case resolution, and risk-limit changes enter a maker/checker queue
 that forbids self-approval and executes the checked action atomically with its
 append-only audit event.
+
+Migration `0010_compliance_evidence_sets.sql` closes the provider-worker crash
+window. One authenticated event can produce a bounded ordered set such as
+identity plus sanctions; all rows, event-to-evidence links, subject state
+changes, restrictions, and inbox completion now commit or roll back together.
+Persona evidence additionally binds the opaque provider Account ID established
+by the inquiry; later monitoring reports must match it, and the ordered link
+keeps that reference immutable across replay.
+The worker role receives only this atomic command, not the older independent
+evidence function, and migration `0010` removes the obsolete split-phase inbox
+completion function entirely.
 
 `money_private.post_transfer_kernel(...)` is the generalized posting kernel
 under the current schema. It is not granted to the application role. The old

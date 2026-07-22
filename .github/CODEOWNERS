@@ -1,0 +1,26 @@
+# Default ownership. Branch rules must require code-owner review for this file
+# to become an enforcement control; CODEOWNERS alone only routes reviewers.
+* @MaxwellCalkin
+
+# Explicit authority and release boundaries. These repetitions are intentional:
+# future ownership expansion must assign each boundary deliberately rather than
+# inheriting a broad product-team default.
+/.github/ @MaxwellCalkin
+/Dockerfile @MaxwellCalkin
+/package.json @MaxwellCalkin
+/package-lock.json @MaxwellCalkin
+/db/ @MaxwellCalkin
+/deploy/ @MaxwellCalkin
+/src/bridge/ @MaxwellCalkin
+/src/compliance/ @MaxwellCalkin
+/src/db/ @MaxwellCalkin
+/src/deploy/ @MaxwellCalkin
+/src/mcp/ @MaxwellCalkin
+/src/server/ @MaxwellCalkin
+/src/treasury/ @MaxwellCalkin
+/SECURITY.md @MaxwellCalkin
+/docs/COMPLIANCE.md @MaxwellCalkin
+/docs/EXTERNAL_SETTLEMENT.md @MaxwellCalkin
+/docs/RELEASES.md @MaxwellCalkin
+/docs/THREAT_MODEL.md @MaxwellCalkin
+/docs/TREASURY.md @MaxwellCalkin

@@ -1,6 +1,11 @@
 node_modules/
 dist/
 data/
+release-evidence/
 *.log
 .env
+*.env
+deploy/runtime/
+runtime/
+.secrets/
 .money/

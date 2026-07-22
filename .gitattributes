@@ -1,0 +1,3 @@
+# Production runs on Linux and migration checksums are calculated from raw
+# UTF-8 text. Keep every detected text file byte-stable across platforms.
+* text=auto eol=lf

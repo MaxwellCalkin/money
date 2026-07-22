@@ -1,0 +1,15 @@
+.git
+.github
+.env
+*.env
+.secrets
+deploy/runtime
+runtime
+.money
+data
+dist
+node_modules
+release-evidence
+*.log
+*.tgz
+test

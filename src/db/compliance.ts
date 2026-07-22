@@ -59,6 +59,14 @@ interface EvidenceResultRow extends Record<string, unknown> {
   screening_state: ScreeningState;
 }
 
+interface EventEvidenceSetRow extends Record<string, unknown> {
+  primary_evidence_id: string;
+  evidence_ids: string[];
+  subject_state: ComplianceSubjectState;
+  screening_state: ScreeningState;
+  replayed: boolean;
+}
+
 interface CounterpartyRow extends Record<string, unknown> {
   id: string;
   kind: "wallet" | "bank_destination" | "merchant" | "domain";
@@ -275,6 +283,19 @@ export interface ComplianceEventClaim {
   providerEventId: string;
   providerResultRef: string;
   attempts: number;
+}
+
+export interface ComplianceEvidenceInput {
+  subjectAccountId: string;
+  providerSubjectRef?: string;
+  kind: "identity" | "business" | "beneficial_owner" | "sanctions" | "pep" | "adverse_media";
+  providerResultRef: string;
+  decision: "clear" | "review" | "blocked" | "error";
+  evidenceHash: Buffer;
+  listVersion?: string;
+  observedAt: Date;
+  expiresAt: Date;
+  normalized?: Record<string, unknown>;
 }
 
 export interface ComplianceOperator {
@@ -627,6 +648,44 @@ export class PostgresCompliance {
     };
   }
 
+  async recordEventEvidenceSet(input: {
+    workerId: string;
+    inboxId: bigint;
+    items: readonly ComplianceEvidenceInput[];
+  }): Promise<{
+    primaryEvidenceId: string;
+    evidenceIds: string[];
+    subjectState: ComplianceSubjectState;
+    screeningState: ScreeningState;
+    replayed: boolean;
+  }> {
+    const payload = input.items.map((item) => ({
+      subjectAccountId: item.subjectAccountId,
+      providerSubjectRef: item.providerSubjectRef ?? null,
+      kind: item.kind,
+      providerResultRef: item.providerResultRef,
+      decision: item.decision,
+      evidenceHash: item.evidenceHash.toString("hex"),
+      listVersion: item.listVersion ?? null,
+      observedAt: item.observedAt.toISOString(),
+      expiresAt: item.expiresAt.toISOString(),
+      normalized: item.normalized ?? {},
+    }));
+    const result = await this.db.query<EventEvidenceSetRow>(
+      "select * from money_private.record_compliance_event_evidence_set($1,$2,$3::jsonb)",
+      [input.workerId, input.inboxId, JSON.stringify(payload)],
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error("compliance event evidence set returned no result");
+    return {
+      primaryEvidenceId: row.primary_evidence_id,
+      evidenceIds: row.evidence_ids,
+      subjectState: row.subject_state,
+      screeningState: row.screening_state,
+      replayed: row.replayed,
+    };
+  }
+
   async enqueueEvent(input: {
     provider: string;
     providerEventId: string;
@@ -653,14 +712,6 @@ export class PostgresCompliance {
       providerEventId: row.provider_event_id, providerResultRef: row.provider_result_ref,
       attempts: row.attempts,
     }));
-  }
-
-  async completeEvent(workerId: string, inboxId: bigint, evidenceId: string): Promise<boolean> {
-    const result = await this.db.query<{ complete_compliance_event: boolean }>(
-      "select money_private.complete_compliance_event($1,$2,$3) as complete_compliance_event",
-      [workerId, inboxId, evidenceId]
-    );
-    return result.rows[0]?.complete_compliance_event ?? false;
   }
 
   async failEvent(

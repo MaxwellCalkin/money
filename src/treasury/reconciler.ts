@@ -1,9 +1,14 @@
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { readBoundedResponseText } from "../core/bounded-response.ts";
+import { isLoopbackHostname } from "../core/url-security.ts";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
 import { PostgresTreasury } from "../db/treasury.ts";
 import { ColumnClient, columnBankSnapshot } from "./column.ts";
 import { readBoundedInteger } from "./runtime.ts";
+
+const MAX_EVM_RPC_BODY_BYTES = 128 * 1024;
 
 export interface TreasuryAssetObservation {
   provider: string;
@@ -62,9 +67,15 @@ export class EvmUsdcAssetSource implements TreasuryAssetSource {
 
   constructor(readonly options: EvmUsdcSourceOptions) {
     this.rpcUrl = new URL(options.rpcUrl);
-    const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(this.rpcUrl.hostname);
+    const loopback = isLoopbackHostname(this.rpcUrl);
     if (this.rpcUrl.protocol !== "https:" && !(options.allowInsecureLocalhost && loopback)) {
       throw new Error("treasury EVM RPC must use HTTPS");
+    }
+    if (loopback && !options.allowInsecureLocalhost) {
+      throw new Error("treasury EVM RPC localhost access requires explicit development mode");
+    }
+    if (this.rpcUrl.username || this.rpcUrl.password || this.rpcUrl.hash) {
+      throw new Error("treasury EVM RPC URL must not contain credentials or a fragment");
     }
     this.wallet = evmAddress(options.walletAddress, "walletAddress");
     this.token = evmAddress(options.tokenAddress, "tokenAddress");
@@ -79,8 +90,18 @@ export class EvmUsdcAssetSource implements TreasuryAssetSource {
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
       signal: AbortSignal.timeout(10_000),
     });
+    const body = await readBoundedResponseText(
+      response,
+      MAX_EVM_RPC_BODY_BYTES,
+      "treasury EVM RPC response is too large",
+    );
     if (!response.ok) throw new Error(`treasury EVM RPC returned HTTP ${response.status}`);
-    const result = await response.json() as JsonRpcEnvelope;
+    let result: JsonRpcEnvelope;
+    try {
+      result = JSON.parse(body) as JsonRpcEnvelope;
+    } catch {
+      throw new Error("treasury EVM RPC returned invalid JSON");
+    }
     if (result.error || typeof result.result !== "string") {
       throw new Error(`treasury EVM RPC failed${result.error?.message ? `: ${result.error.message}` : ""}`);
     }
@@ -164,6 +185,7 @@ function evmSources(value: string | undefined): EvmConfig[] {
 }
 
 export async function startTreasuryReconciler() {
+  enforceProductionPreflight("treasury-reconciler");
   const connectionString = process.env.MONEY_RECONCILER_DATABASE_URL;
   if (!connectionString) throw new Error("MONEY_RECONCILER_DATABASE_URL is required");
   const db = new PostgresDatabase({ connectionString, applicationName: "money-treasury-reconciler", maxConnections: 2 });

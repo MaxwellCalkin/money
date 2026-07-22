@@ -169,9 +169,8 @@ grant execute on function
 -- cases, change limits, or move money.
 grant usage on schema money_private to money_compliance_worker;
 grant execute on function
-  money_private.record_compliance_evidence(text,text,text,text,text,bytea,text,timestamptz,timestamptz,jsonb),
+  money_private.record_compliance_event_evidence_set(text,bigint,jsonb),
   money_private.claim_compliance_events(text,integer),
-  money_private.complete_compliance_event(text,bigint,uuid),
   money_private.fail_compliance_event(text,bigint,text,integer,boolean),
   money_private.register_compliance_counterparty(text,text,text,text,text),
   money_private.record_counterparty_screening(uuid,text,bytea,text,timestamptz,timestamptz)
@@ -319,7 +318,8 @@ grant execute on function money_private.ledger_health(), money_private.treasury_
 -- status or disclose it to the subject.
 grant usage on schema money, money_private to money_compliance_ops;
 grant select on money.compliance_subjects, money.compliance_evidence,
-  money.compliance_event_inbox, money.compliance_counterparties, money.compliance_cases,
+  money.compliance_event_inbox, money.compliance_event_evidence,
+  money.compliance_counterparties, money.compliance_cases,
   money.compliance_case_actions, money.compliance_restrictions,
   money.compliance_subject_events, money.risk_limits, money.risk_limit_events,
   money.risk_velocity_buckets, money.risk_decisions, money.risk_transfer_links

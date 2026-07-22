@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { createHash, randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Hono, type Context, type Next } from "hono";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import { isValidPublicKey, verifyRequest } from "../core/identity.ts";
 import {
   PostgresCompliance,
@@ -14,6 +15,7 @@ import {
 } from "../db/compliance.ts";
 import type { TransactionalDatabase } from "../db/database.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
+import { listenHost } from "../server/listen.ts";
 import { complianceConsoleHtml } from "./console-dashboard.ts";
 
 const MAX_BODY_BYTES = 32 * 1024;
@@ -401,6 +403,7 @@ function port(value: string | undefined): number {
 export async function startComplianceConsoleServer(
   listenPort = port(process.env.COMPLIANCE_CONSOLE_PORT),
 ) {
+  enforceProductionPreflight("compliance-console");
   const connectionString = process.env.MONEY_COMPLIANCE_CONSOLE_DATABASE_URL;
   if (!connectionString) throw new Error("MONEY_COMPLIANCE_CONSOLE_DATABASE_URL is required");
   const db = new PostgresDatabase({
@@ -409,8 +412,9 @@ export async function startComplianceConsoleServer(
     maxConnections: 5,
   });
   const app = createComplianceConsoleApi(db);
-  const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: listenPort });
-  console.log(`compliance console listening on http://127.0.0.1:${listenPort}/console`);
+  const hostname = listenHost("127.0.0.1");
+  const server = serve({ fetch: app.fetch, hostname, port: listenPort });
+  console.log(`compliance console listening on http://${hostname}:${listenPort}/console`);
   let closing = false;
   const close = async () => {
     if (closing) return;

@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import { pathToFileURL } from "node:url";
+import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import { PostgresCompliance } from "../db/compliance.ts";
 import { PostgresDatabase } from "../db/postgres.ts";
 
@@ -29,6 +30,7 @@ export async function runComplianceReviewSweep(
 }
 
 export async function startComplianceReviewWorker() {
+  enforceProductionPreflight("compliance-reviews");
   const connectionString = process.env.MONEY_RISK_WORKER_DATABASE_URL;
   if (!connectionString) throw new Error("MONEY_RISK_WORKER_DATABASE_URL is required");
   const db = new PostgresDatabase({
