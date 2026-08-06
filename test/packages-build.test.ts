@@ -95,9 +95,18 @@ describe("publishable packages", () => {
     const server = readFileSync(join(ROOT, "src/mcp/server.ts"), "utf8");
     expect(server).toContain(`version: "${root.version}"`);
     for (const pkg of ["packages/wallet-mcp/package.json", "packages/seller-sdk/package.json"]) {
-      const manifest = JSON.parse(readFileSync(join(ROOT, pkg), "utf8")) as { version: string; private?: boolean };
+      const manifest = JSON.parse(readFileSync(join(ROOT, pkg), "utf8")) as {
+        version: string;
+        private?: boolean;
+        license: string;
+        scripts: Record<string, string>;
+      };
       expect(manifest.version, `${pkg} version`).toBe(root.version);
       expect(manifest.private, `${pkg} must be publishable`).toBeUndefined();
+      expect(manifest.license, `${pkg} license`).toBe("Apache-2.0");
+      // prepack rebuilds from src/ so stale or missing dist can never publish.
+      expect(manifest.scripts.prepack).toBe("node ../../scripts/build-packages.mjs");
+      expect(existsSync(join(ROOT, pkg, "..", "LICENSE")), `${pkg} LICENSE file`).toBe(true);
     }
   });
 });

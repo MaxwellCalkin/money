@@ -63,4 +63,4 @@ await seller.refund({
 
 ## License
 
-License not yet finalized — do not redistribute until a LICENSE file lands.
+Apache-2.0 — see [LICENSE](./LICENSE).

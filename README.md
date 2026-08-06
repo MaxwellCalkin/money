@@ -336,9 +336,10 @@ source tree (no duplication) into `packages/`:
   types-only peer) and hand-written declarations.
 
 `test/packages-build.test.ts` builds both in CI and pins the bin shebang, the
-dependency guards, and the declaration surface. Publishing is manual
-(`npm publish` from each package directory) and still requires the scope,
-license, and version decisions tracked in the package manifests.
+dependency guards, the declaration surface, and the Apache-2.0 license.
+Publishing is manual: `npm publish` from each package directory (the prepack
+hook rebuilds first); the `@agentmoney` npm org and an authenticated
+`npm login` are the only prerequisites outside the repo.
 
 ### Publish a paid API
 

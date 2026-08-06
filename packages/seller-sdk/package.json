@@ -41,5 +41,9 @@
     "url": "git+https://github.com/MaxwellCalkin/money.git",
     "directory": "packages/seller-sdk"
   },
-  "license": "UNLICENSED"
+  "license": "Apache-2.0",
+  "author": "Maxwell Calkin",
+  "publishConfig": {
+    "access": "public"
+  }
 }
