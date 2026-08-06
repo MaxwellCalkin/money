@@ -194,7 +194,7 @@ async function main() {
         mcpServers: {
           money: {
             command: "npx",
-            args: ["tsx", `${process.cwd().replace(/\\/g, "/")}/src/mcp/server.ts`],
+            args: ["-y", "@agentmoney/wallet-mcp"],
             env: {
               MONEY_API: API,
               MONEY_AGENT_ID: agent.id,
@@ -207,6 +207,8 @@ async function main() {
       2
     )
   );
+  console.log();
+  console.log("(repo developers can swap args for [\"tsx\", \"src/mcp/server.ts\"] to run the wallet from source)");
 }
 
 main().catch((err) => {

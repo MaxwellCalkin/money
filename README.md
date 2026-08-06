@@ -291,14 +291,17 @@ works against it too, but it lacks the durable external-payment recovery and
 escalation endpoints — the MCP warns on stderr when it detects that.)
 
 Or wire it manually — add to `.mcp.json` (the key stays in the gitignored
-`.money/` file; `MONEY_AGENT_KEY` with an inline key is still accepted):
+`.money/` file; `MONEY_AGENT_KEY` with an inline key is still accepted). The
+wallet is published, so any machine can run it with npx — no repo clone
+needed (repo developers can substitute `["tsx", "src/mcp/server.ts"]` to run
+from source):
 
 ```json
 {
   "mcpServers": {
     "money": {
       "command": "npx",
-      "args": ["tsx", "C:/Users/mcalk/code/money/src/mcp/server.ts"],
+      "args": ["-y", "@agentmoney/wallet-mcp"],
       "env": {
         "MONEY_API": "http://127.0.0.1:4021",
         "MONEY_AGENT_ID": "agt_xxxxxxxx",
@@ -322,10 +325,14 @@ enabled by default. Opt-ins must resolve entirely to loopback, RFC1918, CGNAT,
 or IPv6 ULA addresses. Link-local metadata, multicast, documentation, and
 other reserved ranges cannot be enabled through this escape hatch.
 
-### Publishable packages
+### Published packages
 
-`npm run build:packages` assembles two publish-ready packages from this same
-source tree (no duplication) into `packages/`:
+Live on the public registry:
+[`@agentmoney/wallet-mcp`](https://www.npmjs.com/package/@agentmoney/wallet-mcp)
+and
+[`@agentmoney/seller-sdk`](https://www.npmjs.com/package/@agentmoney/seller-sdk)
+(Apache-2.0). `npm run build:packages` assembles both from this same source
+tree (no duplication) into `packages/`:
 
 - **`packages/wallet-mcp`** — the agent wallet MCP server as an npx-runnable
   bin. Ships with only `@modelcontextprotocol/sdk` and `zod`; the x402 wire
