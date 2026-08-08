@@ -1,0 +1,131 @@
+npm notice run money@0.13.0 npx
+npm notice run tsx C:/Users/mcalk/AppData/Local/Temp/claude/C--Users-mcalk-code-money/8b45398d-1bad-487b-9a4b-740d39845606/scratchpad/strategy-assets/teardown-caps/capture-demo.ts
+
+### allowlist: pay a payee NOT on the mandate allowlist
+{
+  "status": "denied",
+  "code": "payee_not_allowed",
+  "reason": "payee prv_e4f0b6c7 is not on this mandate's allowlist"
+}
+
+### allowlist: same amount to the allowlisted payee
+{
+  "status": "paid",
+  "transfer": {
+    "from": "agt_d66b5f63",
+    "to": "prv_e2c2fbf3",
+    "amount": 50000,
+    "memo": "same amount, allowlisted payee",
+    "idempotencyKey": "teardown-allowlist-2",
+    "permitId": "pmt_b31ad4ea-231c-4690-b4fd-c0d62410f7ec",
+    "id": "tr_1a31bb82-2030-4ec7-8535-9f94b1196370",
+    "ts": 1786218344796
+  },
+  "receipt": {
+    "seq": 0,
+    "id": "rcp_250dd20a-0b0b-401d-98af-5475279fc1bd",
+    "ts": 1786218344796,
+    "transferId": "tr_1a31bb82-2030-4ec7-8535-9f94b1196370",
+    "from": "agt_d66b5f63",
+    "to": "prv_e2c2fbf3",
+    "amount": 50000,
+    "memo": "same amount, allowlisted payee",
+    "mandateId": "mdt_f35113e8-e747-4d5b-af29-69f36dc7aded",
+    "permitId": "pmt_b31ad4ea-231c-4690-b4fd-c0d62410f7ec",
+    "prevHash": "genesis",
+    "hash": "cb821b9c1dbeb28d2684f90050c55b3e9c562c6e943f40539ad84acef7f422f7"
+  },
+  "replayed": false
+}
+
+### budget: spend $0.90 of a $1.00 budget
+{
+  "status": "paid",
+  "transfer": {
+    "from": "agt_d66b5f63",
+    "to": "prv_e2c2fbf3",
+    "amount": 900000,
+    "memo": "bulk purchase",
+    "idempotencyKey": "teardown-budget-1",
+    "permitId": "pmt_e8636104-cddc-4de9-87ab-f9278210b8de",
+    "id": "tr_83f9f322-8b5d-4eaa-a122-a1941a34ed42",
+    "ts": 1786218344797
+  },
+  "receipt": {
+    "seq": 1,
+    "id": "rcp_c85b83e7-de3b-4344-9a03-5f4078c4d5fe",
+    "ts": 1786218344797,
+    "transferId": "tr_83f9f322-8b5d-4eaa-a122-a1941a34ed42",
+    "from": "agt_d66b5f63",
+    "to": "prv_e2c2fbf3",
+    "amount": 900000,
+    "memo": "bulk purchase",
+    "mandateId": "mdt_65b5d5ae-0daa-48cf-8fbd-f8c5c21c3c8c",
+    "permitId": "pmt_e8636104-cddc-4de9-87ab-f9278210b8de",
+    "prevHash": "cb821b9c1dbeb28d2684f90050c55b3e9c562c6e943f40539ad84acef7f422f7",
+    "hash": "8cd2990227eeccff865bf7946914b75ba93e54efcc4f5b9a926bcbc1960a5bd1"
+  },
+  "replayed": false
+}
+
+### budget: try $0.20 more (would exceed $1.00 total budget)
+{
+  "status": "denied",
+  "code": "budget",
+  "reason": "would exceed total budget: spent $0.90 of $1.00, requested $0.20"
+}
+
+### refund: provider refunds the full $0.90
+{
+  "status": "refunded",
+  "transfer": {
+    "from": "prv_e2c2fbf3",
+    "to": "agt_d66b5f63",
+    "amount": 900000,
+    "memo": "full refund",
+    "idempotencyKey": "teardown-refund-1",
+    "refundOf": "rcp_c85b83e7-de3b-4344-9a03-5f4078c4d5fe",
+    "id": "tr_85d8a8ac-c5d0-482f-b7aa-ca0b205396df",
+    "ts": 1786218344798
+  },
+  "receipt": {
+    "seq": 2,
+    "id": "rcp_d42b1eda-da6c-4e36-bf05-cfab901de7e2",
+    "ts": 1786218344798,
+    "transferId": "tr_85d8a8ac-c5d0-482f-b7aa-ca0b205396df",
+    "from": "prv_e2c2fbf3",
+    "to": "agt_d66b5f63",
+    "amount": 900000,
+    "memo": "full refund",
+    "refundOf": "rcp_c85b83e7-de3b-4344-9a03-5f4078c4d5fe",
+    "prevHash": "8cd2990227eeccff865bf7946914b75ba93e54efcc4f5b9a926bcbc1960a5bd1",
+    "hash": "f7998063111fdede622802a55f3746f30f0d32a03b6bfe623f09785c0432c53e"
+  },
+  "replayed": false,
+  "remaining": 0
+}
+
+### mandate counters AFTER the refund (spent is unchanged)
+{
+  "budget": "$1.00",
+  "spent": "$0.90",
+  "agentBalanceAfterRefund": "$9.95"
+}
+
+### budget: retry the $0.20 payment after the refund (still denied)
+{
+  "status": "denied",
+  "code": "budget",
+  "reason": "would exceed total budget: spent $0.90 of $1.00, requested $0.20"
+}
+
+### verify the receipt chain (untampered)
+{
+  "ok": true
+}
+
+### verify after mutating receipt seq 0's amount by one micro
+{
+  "ok": false,
+  "brokenAt": 0
+}

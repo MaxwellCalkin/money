@@ -1,0 +1,116 @@
+/**
+ * Capture REAL outputs from the repo's code paths for the teardown post:
+ *   1. allowlist denial
+ *   2. budget denial (total budget, not per-tx)
+ *   3. refund does NOT restore mandate budget (spent counter unchanged; next
+ *      over-budget pay still denied)
+ *   4. tamper detection on the hash-chained receipts
+ * Runs against the in-process MoneyNetwork (same engine `npm run demo` uses).
+ */
+import { rmSync } from "node:fs";
+import { MoneyNetwork } from "../../../../../../../../../code/money/src/core/network.ts";
+import { fmt, usd } from "../../../../../../../../../code/money/src/core/types.ts";
+
+const LOG = "data/teardown-capture.jsonl";
+rmSync(LOG, { force: true });
+const net = MoneyNetwork.open(LOG);
+
+const show = (label: string, value: unknown) => {
+  console.log(`\n### ${label}`);
+  console.log(JSON.stringify(value, null, 2));
+};
+
+// setup: one owner, one agent, two providers
+const owner = net.createUser("Max");
+net.fund(owner.id, usd(20), "seed-fund");
+const agent = net.createAgent("scout", owner.id);
+net.allocate(owner.id, agent.id, usd(10), "seed-alloc");
+const approvedApi = net.createProvider("approved-api");
+const otherApi = net.createProvider("unlisted-api");
+
+// ── 1. allowlist ──────────────────────────────────────────────────────────
+const allowlisted = net.grantMandate({
+  userId: owner.id,
+  agentId: agent.id,
+  budget: usd(10),
+  perTxCap: usd(1),
+  dailyCap: usd(5),
+  escalateAbove: usd(2),
+  newPayeeCap: usd(0.1),
+  payeeAllowlist: [approvedApi.id],
+  idempotencyKey: "teardown-allowlist-mandate",
+});
+show("allowlist: pay a payee NOT on the mandate allowlist", net.requestPayment({
+  from: agent.id,
+  to: otherApi.id,
+  amount: usd(0.05),
+  memo: "attempt to pay unlisted payee",
+  idempotencyKey: "teardown-allowlist-1",
+}));
+show("allowlist: same amount to the allowlisted payee", net.requestPayment({
+  from: agent.id,
+  to: approvedApi.id,
+  amount: usd(0.05),
+  memo: "same amount, allowlisted payee",
+  idempotencyKey: "teardown-allowlist-2",
+}));
+
+// ── 2 + 3. budget, refund, budget again ──────────────────────────────────
+// Fresh mandate without allowlist; small budget so we can exhaust it.
+net.grantMandate({
+  userId: owner.id,
+  agentId: agent.id,
+  budget: usd(1),
+  perTxCap: usd(1),
+  dailyCap: usd(1),
+  escalateAbove: usd(1),
+  newPayeeCap: usd(1),
+  idempotencyKey: "teardown-budget-mandate",
+});
+show("budget: spend $0.90 of a $1.00 budget", net.requestPayment({
+  from: agent.id,
+  to: approvedApi.id,
+  amount: usd(0.9),
+  memo: "bulk purchase",
+  idempotencyKey: "teardown-budget-1",
+}));
+show("budget: try $0.20 more (would exceed $1.00 total budget)", net.requestPayment({
+  from: agent.id,
+  to: approvedApi.id,
+  amount: usd(0.2),
+  memo: "one more",
+  idempotencyKey: "teardown-budget-2",
+}));
+
+// find the receipt of the $0.90 purchase to refund it
+const purchase = net.feed(10).find((r) => r.memo === "bulk purchase")!;
+show("refund: provider refunds the full $0.90", net.refund({
+  providerId: approvedApi.id,
+  receiptId: purchase.id,
+  amount: usd(0.9),
+  memo: "full refund",
+  idempotencyKey: "teardown-refund-1",
+}));
+
+const mandate = net.listMandates().find((m) => m.idempotencyKey === "teardown-budget-mandate")!;
+show("mandate counters AFTER the refund (spent is unchanged)", {
+  budget: fmt(mandate.budget),
+  spent: fmt(mandate.spent),
+  agentBalanceAfterRefund: fmt(net.balanceOf(agent.id)),
+});
+show("budget: retry the $0.20 payment after the refund (still denied)", net.requestPayment({
+  from: agent.id,
+  to: approvedApi.id,
+  amount: usd(0.2),
+  memo: "one more, after refund",
+  idempotencyKey: "teardown-budget-3",
+}));
+
+// ── 4. tamper detection ──────────────────────────────────────────────────
+show("verify the receipt chain (untampered)", net.verifyReceipts());
+// mutate a historical receipt in memory, then re-verify
+const receipts = net.feed(100);
+(receipts[0] as { amount: number }).amount += 1;
+show("verify after mutating receipt seq 0's amount by one micro", net.verifyReceipts());
+
+rmSync(LOG, { force: true });
