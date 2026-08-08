@@ -1,0 +1,109 @@
+# Hosted beta topology — see deploy/beta/README.md for posture and setup.
+# Runs the beta image (no production marker; development posture) with
+# invite-gated signup and play-dollar funding. Sized for 2 OCPU / 12 GB.
+services:
+  postgres:
+    image: postgres:18.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: money
+      POSTGRES_PASSWORD: ${BETA_DB_PASSWORD:?set in beta.env}
+      POSTGRES_DB: money
+      POSTGRES_INITDB_ARGS: --data-checksums
+    command: ["postgres", "-c", "shared_buffers=1GB", "-c", "max_connections=80"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U money -d money"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  pgbouncer:
+    image: percona/percona-pgbouncer:1.25.2
+    restart: unless-stopped
+    environment:
+      DB_HOST: postgres
+      DB_USER: money
+      DB_PASSWORD: ${BETA_DB_PASSWORD:?set in beta.env}
+      POOL_MODE: transaction
+      LISTEN_PORT: "6432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/beta/Dockerfile.beta
+    restart: "no"
+    command: ["dist/db/migrate.js"]
+    environment:
+      DATABASE_URL: postgres://money:${BETA_DB_PASSWORD}@postgres:5432/money
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/beta/Dockerfile.beta
+    restart: unless-stopped
+    command: ["dist/server/postgres-api.js"]
+    env_file: beta.env
+    environment:
+      DATABASE_URL: postgres://money:${BETA_DB_PASSWORD}@pgbouncer:6432/money
+      MONEY_BIND_HOST: 0.0.0.0
+      MONEY_ALLOW_DEV_FUNDING: "true"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4021/health/live').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  external-worker:
+    build:
+      context: ../..
+      dockerfile: deploy/beta/Dockerfile.beta
+    restart: unless-stopped
+    command: ["dist/db/external-worker.js"]
+    environment:
+      MONEY_WORKER_DATABASE_URL: postgres://money:${BETA_DB_PASSWORD}@pgbouncer:6432/money
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  database-ops:
+    build:
+      context: ../..
+      dockerfile: deploy/beta/Dockerfile.beta
+    restart: unless-stopped
+    command: ["dist/server/database-ops.js"]
+    environment:
+      DATABASE_URL: postgres://money:${BETA_DB_PASSWORD}@postgres:5432/money
+      MONEY_OPS_TOKEN: ${MONEY_OPS_TOKEN:?set in beta.env}
+      MONEY_BIND_HOST: 0.0.0.0
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    environment:
+      BETA_HOSTNAME: ${BETA_HOSTNAME:?set in beta.env}
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  caddy_data:

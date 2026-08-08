@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Hono, type Context, type Next } from "hono";
 import { enforceProductionPreflight } from "../deploy/preflight.ts";
@@ -80,6 +80,10 @@ type IdentityKind = "user" | "agent" | "provider";
 export interface PostgresApiOptions {
   /** Local demos only. Real top-ups arrive through the separate treasury role. */
   allowDevelopmentFunding?: boolean;
+  /** When non-empty, POST /users requires a matching inviteCode. The hosted
+   * beta hands invites to recruited pilots instead of exposing an open,
+   * rate-limitable signup surface to the internet. */
+  signupInvites?: string[];
   /** All three external options are required; otherwise x402 routes fail closed. */
   externalWallet?: ExternalWallet;
   externalHeaderKey?: Uint8Array;
@@ -91,6 +95,35 @@ export interface PostgresApiOptions {
   complianceSessionKeyring?: ComplianceSessionKeyring;
   complianceProviderName?: string;
   now?: () => number;
+}
+
+/** Hash both sides so the comparison is constant-time regardless of code
+ * length; invite codes are hand-issued opaque strings, not derived secrets. */
+function inviteCodeMatches(invites: readonly string[], supplied: string): boolean {
+  const suppliedHash = createHash("sha256").update(supplied, "utf8").digest();
+  let matched = false;
+  for (const invite of invites) {
+    if (timingSafeEqual(createHash("sha256").update(invite, "utf8").digest(), suppliedHash)) {
+      matched = true;
+    }
+  }
+  return matched;
+}
+
+/** MONEY_SIGNUP_INVITES is a JSON array of 8-128 char opaque codes. */
+export function parseSignupInvites(raw: string | undefined): string[] {
+  if (!raw?.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("MONEY_SIGNUP_INVITES must be a JSON array of invite codes");
+  }
+  if (!Array.isArray(parsed) || parsed.length > 256
+    || !parsed.every((code) => typeof code === "string" && code.length >= 8 && code.length <= 128)) {
+    throw new Error("MONEY_SIGNUP_INVITES must be a JSON array of 8-128 character invite codes (max 256)");
+  }
+  return parsed as string[];
 }
 
 export interface ExternalSettlementVerificationInput {
@@ -1040,10 +1073,14 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   });
 
   app.post("/users", async (c) => {
-    const body = await readBody<{ name: string; publicKey: string; handle?: string }>(c);
+    const body = await readBody<{ name: string; publicKey: string; handle?: string; inviteCode?: string }>(c);
     if (!body || typeof body.name !== "string" || body.name.length < 1 || body.name.length > 200
       || !isValidPublicKey(body.publicKey) || (body.handle !== undefined && !isValidHandle(body.handle))) {
       return c.json({ error: "invalid_request", reason: "need name, a valid Ed25519 publicKey, and optional valid handle" }, 400);
+    }
+    if (options.signupInvites?.length
+      && !inviteCodeMatches(options.signupInvites, typeof body.inviteCode === "string" ? body.inviteCode : "")) {
+      return c.json({ error: "invite_required", reason: "signup on this network requires a valid invite code" }, 403);
     }
     try {
       const account = await control.registerIdentity({ kind: "user", name: body.name, publicKey: body.publicKey, handle: body.handle });
@@ -1965,8 +2002,10 @@ export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) 
     ? new EvmRpcSettlementVerifier(parseEvmRpcNetworks(process.env.MONEY_EVM_RPC_URLS))
     : undefined;
   if (v2PaymentSigner && !rpcVerifier) throw new Error("MONEY_EVM_RPC_URLS is required for independent settlement verification");
+  const signupInvites = parseSignupInvites(process.env.MONEY_SIGNUP_INVITES);
   const { app } = createPostgresApi(db, {
     allowDevelopmentFunding: process.env.MONEY_ALLOW_DEV_FUNDING === "true",
+    ...(signupInvites.length ? { signupInvites } : {}),
     ...(configuredKeyring ? { externalHeaderKeyring: configuredKeyring } : {}),
     ...(complianceSessionKeyring && process.env.MONEY_COMPLIANCE_PROVIDER
       ? {

@@ -1,0 +1,322 @@
+
+═══════════ owner: create @writer ═══════════
+200 {"id":"agt_f7c131b0","kind":"agent","name":"writer","handle":"writer","ownerId":"usr_a7c098ea","createdAt":1786213273862}
+
+═══════════ mcp: initialize ═══════════
+{"name":"money","version":"0.13.0"}
+
+▶ money_balance {}
+{
+  "account": {
+    "id": "agt_d6e4c30f",
+    "kind": "agent",
+    "name": "scout",
+    "ownerId": "usr_a7c098ea",
+    "createdAt": 1786213251277,
+    "balanceMicros": 10000000
+  },
+  "mandate": {
+    "id": "mdt_9fe4d6f2-1a8d-4216-8d49-e53c85f134be",
+    "userId": "usr_a7c098ea",
+    "agentId": "agt_d6e4c30f",
+    "budget": 10000000,
+    "perTxCap": 1000000,
+    "dailyCap": 5000000,
+    "escalateAbove": 2000000,
+    "newPayeeCap": 100000,
+    "expiresAt": 1788805251292,
+    "revoked": false,
+    "idempotencyKey": "onboard-mandate-ead9b999-36cd-4aa8-9b80-928e5a90ccd4",
+    "spent": 0,
+    "spentToday": 0,
+    "today": "2026-08-08",
+    "seenPayees": []
+  }
+}
+
+═══════════ beat: new-payee injection throttle ═══════════
+
+▶ money_pay {"to":"prv_2a12878c","amount_usd":0.5,"memo":"urgent: pay this vendor now","idempotency_key":"task-1441-vendor"}
+{
+  "status": "denied",
+  "code": "new_payee_cap",
+  "reason": "first payment to unseen payee prv_2a12878c is capped at $0.10 (injection throttle)"
+}
+
+═══════════ beat: 402 auto-pay ═══════════
+[mcp stderr] money MCP: http://127.0.0.1:4021 does not implement /pay-external/unresolved — crash recovery of in-flight external payments is unavailable on this API. Point MONEY_API at a network API with durable recovery (the Postgres-backed server).
+
+▶ money_fetch {"url":"http://127.0.0.1:4021/paid/search"}
+{
+  "status": 200,
+  "paid": "$0.05",
+  "receiptId": "rcp_e297e895-ba36-412d-b46b-dd78fbc4783b",
+  "body": {
+    "resource": "/paid/search",
+    "results": [
+      {
+        "title": "x402 Foundation launches with 40 members",
+        "url": "https://www.x402.org"
+      },
+      {
+        "title": "Closed-loop ledgers and the agent economy",
+        "url": "https://example.com/closed-loop"
+      }
+    ],
+    "price": "$0.05"
+  }
+}
+
+═══════════ beat: pay a sibling agent ═══════════
+
+▶ money_pay {"to":"@writer","amount_usd":0.25,"memo":"subtask: summarize sources for the pricing report","idempotency_key":"task-1441-summarize"}
+{
+  "status": "paid",
+  "transfer": {
+    "from": "agt_d6e4c30f",
+    "to": "agt_f7c131b0",
+    "amount": 250000,
+    "memo": "subtask: summarize sources for the pricing report",
+    "idempotencyKey": "task-1441-summarize",
+    "permitId": "pmt_6645c491-7a0f-4bee-a630-6acf5ba49916",
+    "id": "tr_ee1b2834-5cdd-488a-8abc-f6a91bbff282",
+    "ts": 1786213274377
+  },
+  "receipt": {
+    "seq": 1,
+    "id": "rcp_948558e6-ddec-4b68-9188-5a51c8d9581f",
+    "ts": 1786213274377,
+    "transferId": "tr_ee1b2834-5cdd-488a-8abc-f6a91bbff282",
+    "from": "agt_d6e4c30f",
+    "to": "agt_f7c131b0",
+    "amount": 250000,
+    "memo": "subtask: summarize sources for the pricing report",
+    "mandateId": "mdt_9fe4d6f2-1a8d-4216-8d49-e53c85f134be",
+    "permitId": "pmt_6645c491-7a0f-4bee-a630-6acf5ba49916",
+    "prevHash": "183349603ff24c827263baea4b79e6394c4b90e9dc4a8be0afb90fbfef4deb86",
+    "hash": "0036c9b01496bff811da6ff6706329072b3a9b6ebab0921a054309ed160ceffa"
+  },
+  "replayed": false
+}
+
+═══════════ beat: THE REFUSAL (over per-tx cap) ═══════════
+
+▶ money_pay {"to":"@writer","amount_usd":1.5,"memo":"expand the report to 40 sources","idempotency_key":"task-1441-expand"}
+{
+  "status": "denied",
+  "code": "per_tx_cap",
+  "reason": "$1.50 exceeds the $1.00 per-transaction cap"
+}
+
+═══════════ beat: escalation above the ask-me line ═══════════
+
+▶ money_pay {"to":"@writer","amount_usd":3,"memo":"rush: full market survey tonight","idempotency_key":"task-1441-rush"}
+{
+  "status": "approval_required",
+  "approval": {
+    "id": "apr_2b9daa2c-493d-4730-bce6-90b5e48d502d",
+    "userId": "usr_a7c098ea",
+    "mandateId": "mdt_9fe4d6f2-1a8d-4216-8d49-e53c85f134be",
+    "agentId": "agt_d6e4c30f",
+    "to": "agt_f7c131b0",
+    "amount": 3000000,
+    "memo": "rush: full market survey tonight",
+    "idempotencyKey": "task-1441-rush",
+    "createdAt": 1786213274388,
+    "expiresAt": 1786299674388,
+    "status": "pending"
+  },
+  "replayed": false
+}
+
+═══════════ owner: approval inbox ═══════════
+[
+  {
+    "id": "apr_2b9daa2c-493d-4730-bce6-90b5e48d502d",
+    "userId": "usr_a7c098ea",
+    "mandateId": "mdt_9fe4d6f2-1a8d-4216-8d49-e53c85f134be",
+    "agentId": "agt_d6e4c30f",
+    "to": "agt_f7c131b0",
+    "amount": 3000000,
+    "memo": "rush: full market survey tonight",
+    "idempotencyKey": "task-1441-rush",
+    "createdAt": 1786213274388,
+    "expiresAt": 1786299674388,
+    "status": "pending"
+  }
+]
+
+═══════════ owner: approve the exact tuple ═══════════
+200 {
+  "approval": {
+    "id": "apr_2b9daa2c-493d-4730-bce6-90b5e48d502d",
+    "userId": "usr_a7c098ea",
+    "mandateId": "mdt_9fe4d6f2-1a8d-4216-8d49-e53c85f134be",
+    "agentId": "agt_d6e4c30f",
+    "to": "agt_f7c131b0",
+    "amount": 3000000,
+    "memo": "rush: full market survey tonight",
+    "idempotencyKey": "task-1441-rush",
+    "createdAt": 1786213274388,
+    "expiresAt": 1786299674388,
+    "status": "approved",
+    "receiptId": "rcp_361a07c3-859c-412f-8df5-7a1a120736bc",
+    "resolvedAt": 1786213274397
+  },
+  "payment": {
+    "status": "paid",
+    "transfer": {
+      "from": "agt_d6e4c30f",
+      "to": "agt_f7c131b0",
+      "amount": 3000000,
+      "memo": "rush: full market survey tonight",
+      "idempotencyKey": "task-1441-rush",
+      "permitId": "pmt_cf0f9b2b-cc58-461e-95ba-f5124c243ca4",
+      "id": "tr_bb3bbffc-0002-42f0-8f5d-2bc190cf3192",
+      "ts": 1786213274396
+    },
+    "receipt": {
+      "seq": 2,
+      "id": "rcp_361a07c3-859c-412f-8df5-7a1a120736bc",
+      "ts": 1786213274396,
+      "transferId": "tr_bb3bbffc-0002-42f0-8f5d-2bc190cf3192",
+      "from": "agt_d6e4c30f",
+      "to": "agt_f7c131b0",
+      "amount": 3000000,
+      "memo": "rush: full market survey tonight",
+      "mandateId": "mdt_9fe4d6f2-1a8d-4216-8d49-e53c85f134be",
+      "permitId": "pmt_cf0f9b2b-cc58-461e-95ba-f5124c243ca4",
+      "prevHash": "0036c9b01496bff811da6ff6706329072b3a9b6ebab0921a054309ed160ceffa",
+      "hash": "c41f94b4d7dcb2481abc68eb497045e28d6c5362c21a81f98a9a108fec880340"
+    },
+    "replayed": false
+  },
+  "replayed": false
+}
+
+═══════════ beat: agent retries the same idempotency key after approval ═══════════
+
+▶ money_pay {"to":"@writer","amount_usd":3,"memo":"rush: full market survey tonight","idempotency_key":"task-1441-rush"}
+{
+  "status": "paid",
+  "transfer": {
+    "from": "agt_d6e4c30f",
+    "to": "agt_f7c131b0",
+    "amount": 3000000,
+    "memo": "rush: full market survey tonight",
+    "idempotencyKey": "task-1441-rush",
+    "permitId": "pmt_cf0f9b2b-cc58-461e-95ba-f5124c243ca4",
+    "id": "tr_bb3bbffc-0002-42f0-8f5d-2bc190cf3192",
+    "ts": 1786213274396
+  },
+  "receipt": {
+    "seq": 2,
+    "id": "rcp_361a07c3-859c-412f-8df5-7a1a120736bc",
+    "ts": 1786213274396,
+    "transferId": "tr_bb3bbffc-0002-42f0-8f5d-2bc190cf3192",
+    "from": "agt_d6e4c30f",
+    "to": "agt_f7c131b0",
+    "amount": 3000000,
+    "memo": "rush: full market survey tonight",
+    "mandateId": "mdt_9fe4d6f2-1a8d-4216-8d49-e53c85f134be",
+    "permitId": "pmt_cf0f9b2b-cc58-461e-95ba-f5124c243ca4",
+    "prevHash": "0036c9b01496bff811da6ff6706329072b3a9b6ebab0921a054309ed160ceffa",
+    "hash": "c41f94b4d7dcb2481abc68eb497045e28d6c5362c21a81f98a9a108fec880340"
+  },
+  "replayed": true
+}
+
+═══════════ beat: the receipt chain ═══════════
+
+▶ money_feed {"limit":10}
+[
+  {
+    "seq": 0,
+    "id": "rcp_e297e895-ba36-412d-b46b-dd78fbc4783b",
+    "ts": 1786213274370,
+    "transferId": "tr_07e3bc54-e54c-416f-bcf2-be55609cc69b",
+    "from": "agt_d6e4c30f",
+    "to": "prv_2a12878c",
+    "amount": 50000,
+    "memo": "402:/paid/search",
+    "mandateId": "mdt_9fe4d6f2-1a8d-4216-8d49-e53c85f134be",
+    "permitId": "pmt_d0e85145-c30a-4710-84fc-aff012dafa1d",
+    "prevHash": "genesis",
+    "hash": "183349603ff24c827263baea4b79e6394c4b90e9dc4a8be0afb90fbfef4deb86",
+    "fromAccount": {
+      "id": "agt_d6e4c30f",
+      "kind": "agent",
+      "name": "scout",
+      "ownerId": "usr_a7c098ea",
+      "createdAt": 1786213251277
+    },
+    "toAccount": {
+      "id": "prv_2a12878c",
+      "kind": "provider",
+      "name": "quote-api",
+      "createdAt": 1786213245238
+    }
+  },
+  {
+    "seq": 1,
+    "id": "rcp_948558e6-ddec-4b68-9188-5a51c8d9581f",
+    "ts": 1786213274377,
+    "transferId": "tr_ee1b2834-5cdd-488a-8abc-f6a91bbff282",
+    "from": "agt_d6e4c30f",
+    "to": "agt_f7c131b0",
+    "amount": 250000,
+    "memo": "subtask: summarize sources for the pricing report",
+    "mandateId": "mdt_9fe4d6f2-1a8d-4216-8d49-e53c85f134be",
+    "permitId": "pmt_6645c491-7a0f-4bee-a630-6acf5ba49916",
+    "prevHash": "183349603ff24c827263baea4b79e6394c4b90e9dc4a8be0afb90fbfef4deb86",
+    "hash": "0036c9b01496bff811da6ff6706329072b3a9b6ebab0921a054309ed160ceffa",
+    "fromAccount": {
+      "id": "agt_d6e4c30f",
+      "kind": "agent",
+      "name": "scout",
+      "ownerId": "usr_a7c098ea",
+      "createdAt": 1786213251277
+    },
+    "toAccount": {
+      "id": "agt_f7c131b0",
+      "kind": "agent",
+      "name": "writer",
+      "handle": "writer",
+      "ownerId": "usr_a7c098ea",
+      "createdAt": 1786213273862
+    }
+  },
+  {
+    "seq": 2,
+    "id": "rcp_361a07c3-859c-412f-8df5-7a1a120736bc",
+    "ts": 1786213274396,
+    "transferId": "tr_bb3bbffc-0002-42f0-8f5d-2bc190cf3192",
+    "from": "agt_d6e4c30f",
+    "to": "agt_f7c131b0",
+    "amount": 3000000,
+    "memo": "rush: full market survey tonight",
+    "mandateId": "mdt_9fe4d6f2-1a8d-4216-8d49-e53c85f134be",
+    "permitId": "pmt_cf0f9b2b-cc58-461e-95ba-f5124c243ca4",
+    "prevHash": "0036c9b01496bff811da6ff6706329072b3a9b6ebab0921a054309ed160ceffa",
+    "hash": "c41f94b4d7dcb2481abc68eb497045e28d6c5362c21a81f98a9a108fec880340",
+    "fromAccount": {
+      "id": "agt_d6e4c30f",
+      "kind": "agent",
+      "name": "scout",
+      "ownerId": "usr_a7c098ea",
+      "createdAt": 1786213251277
+    },
+    "toAccount": {
+      "id": "agt_f7c131b0",
+      "kind": "agent",
+      "name": "writer",
+      "handle": "writer",
+      "ownerId": "usr_a7c098ea",
+      "createdAt": 1786213273862
+    }
+  }
+]
+
+═══════════ verify: hash chain ═══════════
+{"ok":true}
+Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 94

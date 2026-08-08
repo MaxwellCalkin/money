@@ -1,0 +1,24 @@
+# Beta image: same build as production but WITHOUT the production marker and
+# without NODE_ENV=production — the hosted beta is honestly a development-
+# posture deployment (invite-only, testnet money, no Persona/Column), and the
+# production image's baked marker would (correctly) refuse to run this way.
+FROM node:24.19.0-bookworm-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY tsconfig.json ./
+COPY scripts ./scripts
+COPY src ./src
+RUN npm run build
+RUN npm prune --omit=dev --no-audit --no-fund
+
+FROM node:24.19.0-bookworm-slim AS runtime
+WORKDIR /app
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY package.json package-lock.json ./
+COPY db ./db
+USER node
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["node", "--enable-source-maps"]
+CMD ["dist/server/postgres-api.js"]

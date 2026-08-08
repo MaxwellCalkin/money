@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateAgentKeypair, signRequest, signedHeaders } from "../src/core/identity.ts";
 import type { QueryRows, SqlExecutor, TransactionalDatabase } from "../src/db/database.ts";
 import { runMigrations } from "../src/db/migrate.ts";
-import { createPostgresApi } from "../src/server/postgres-api.ts";
+import { createPostgresApi, parseSignupInvites } from "../src/server/postgres-api.ts";
 import { approveComplianceFixture } from "./helpers/compliance-fixture.ts";
 
 class EmbeddedPostgres implements TransactionalDatabase {
@@ -332,6 +332,33 @@ describe("Postgres signed product API", () => {
     const childJson = await child.json() as any;
     const childReplay = await signedRequest(api.app, "/agents", "POST", childBody, firstUser.id, keys.privateKey, "x-user-id");
     expect(await childReplay.json()).toEqual({ ...childJson, replayed: true });
+  });
+
+  it("gates signup behind invite codes when the hosted beta configures them", async () => {
+    const gated = createPostgresApi(db, { signupInvites: ["pilot-invite-001", "pilot-invite-002"] });
+    const keys = generateAgentKeypair();
+    const attempt = (inviteCode?: string) => gated.app.request("/users", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "pilot", publicKey: keys.publicKey, ...(inviteCode ? { inviteCode } : {}) }),
+    });
+    expect((await attempt()).status).toBe(403);
+    expect(await (await attempt("wrong-code-entirely")).json()).toEqual(
+      expect.objectContaining({ error: "invite_required" }),
+    );
+    expect((await attempt("pilot-invite-002")).status).toBe(200);
+    // The default api (no invites configured) stays open for local development.
+    const open = await api.app.request("/users", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "local", publicKey: generateAgentKeypair().publicKey }),
+    });
+    expect(open.status).toBe(200);
+    // Env parsing is strict: fail loudly rather than silently opening signup.
+    expect(parseSignupInvites(undefined)).toEqual([]);
+    expect(parseSignupInvites('["pilot-invite-001"]')).toEqual(["pilot-invite-001"]);
+    expect(() => parseSignupInvites("not-json")).toThrow(/JSON array/);
+    expect(() => parseSignupInvites('["short"]')).toThrow(/8-128/);
   });
 
   it("keeps owner-signed development funding disabled by default", async () => {

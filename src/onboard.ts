@@ -116,7 +116,18 @@ async function main() {
     ownerPrivateKey = readKeyFile(ownerKeyPath);
   } else {
     const ownerKeys = generateAgentKeypair();
-    const created = await post<{ id: string }>("/users", JSON.stringify({ name: "owner", publicKey: ownerKeys.publicKey }));
+    // Invite-gated networks (the hosted beta) hand codes to recruited pilots.
+    const inviteCode = process.argv.includes("--invite") ? arg("invite", "") : undefined;
+    const created = await post<{ id: string }>("/users", JSON.stringify({
+      name: "owner",
+      publicKey: ownerKeys.publicKey,
+      ...(inviteCode ? { inviteCode } : {}),
+    })).catch((error) => {
+      if (error instanceof Error && error.message.includes("invite_required")) {
+        throw new Error("this network is invite-only — rerun with: npm run onboard -- --invite <code>");
+      }
+      throw error;
+    });
     user = { id: assertAccountId(created.id) };
     // Saved before any money moves: a crash after funding must not orphan the
     // only key that can administer the funded account.

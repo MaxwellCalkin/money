@@ -1,0 +1,17 @@
+{$BETA_HOSTNAME} {
+	encode gzip
+
+	# Ops endpoints are proxied on distinct paths so UptimeRobot can watch
+	# both services; the bearer token still gates anything sensitive.
+	handle_path /ops-health* {
+		reverse_proxy database-ops:4022
+	}
+	handle_path /ops-reconcile* {
+		rewrite * /ops/reconcile
+		reverse_proxy database-ops:4022
+	}
+
+	handle {
+		reverse_proxy api:4021
+	}
+}

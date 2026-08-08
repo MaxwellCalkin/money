@@ -1,0 +1,228 @@
+# Publishes @agentmoney/wallet-mcp and @agentmoney/seller-sdk to npm with
+# provenance, authenticated via OIDC trusted publishing — no long-lived npm
+# token exists anywhere in this repository or its secrets.
+#
+# Triggers:
+#   - Tag push `wallet-mcp-v<version>`  -> publishes @agentmoney/wallet-mcp
+#   - Tag push `seller-sdk-v<version>`  -> publishes @agentmoney/seller-sdk
+#   - workflow_dispatch                 -> DRY RUN ONLY (never publishes);
+#     builds, gates, runs `npm publish --dry-run`, uploads the tarball(s)
+#     as artifacts for inspection.
+#
+# One-time npmjs.com setup (per package) is documented in
+# docs/RELEASING-PACKAGES.md. Summary: package Settings -> Trusted publisher
+# -> GitHub Actions -> user `MaxwellCalkin`, repository `money`, workflow
+# filename `publish-packages.yml`, environment `npm-publish`. Trusted
+# publishing requires npm >= 11.5.1 (asserted below) and a GitHub-hosted
+# runner; provenance additionally requires this repository to be public.
+#
+# File destination in the repo: .github/workflows/publish-packages.yml
+# (the filename is load-bearing — it must match the npm trusted-publisher
+# configuration exactly, case-sensitive).
+
+name: publish-packages
+
+on:
+  push:
+    tags:
+      - "wallet-mcp-v*"
+      - "seller-sdk-v*"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Package to DRY-RUN (manual runs never publish)"
+        type: choice
+        options:
+          - both
+          - wallet-mcp
+          - seller-sdk
+        default: both
+
+permissions:
+  contents: read
+
+# Never cancel a publish mid-flight; queue instead.
+concurrency:
+  group: publish-packages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      packages: ${{ steps.resolve.outputs.packages }}
+      version: ${{ steps.resolve.outputs.version }}
+      mode: ${{ steps.resolve.outputs.mode }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          # Full history so the not-on-main tag guard can run merge-base.
+          fetch-depth: 0
+
+      - name: Refuse tags that do not point at main history
+        if: github.event_name == 'push'
+        env:
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::tag $TAG points at $SHA which is not an ancestor of origin/main — refusing to publish" >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          package-manager-cache: true
+
+      - name: Resolve release target from tag (or dispatch input)
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+          PACKAGE_INPUT: ${{ inputs.package }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            mode=dry-run
+            case "$PACKAGE_INPUT" in
+              wallet-mcp) packages='["wallet-mcp"]' ;;
+              seller-sdk) packages='["seller-sdk"]' ;;
+              both)       packages='["wallet-mcp","seller-sdk"]' ;;
+              *) echo "::error::unknown package input: $PACKAGE_INPUT"; exit 1 ;;
+            esac
+            version="$(node -p 'require("./package.json").version')"
+          else
+            mode=publish
+            case "$TAG" in
+              wallet-mcp-v*|seller-sdk-v*) ;;
+              *) echo "::error::unexpected tag: $TAG"; exit 1 ;;
+            esac
+            pkg="${TAG%-v*}"
+            version="${TAG##*-v}"
+            manifest_version="$(node -p "require('./packages/$pkg/package.json').version")"
+            if [ "$version" != "$manifest_version" ]; then
+              echo "::error::tag says $version but packages/$pkg/package.json says $manifest_version — fix the version lockstep before tagging" >&2
+              exit 1
+            fi
+            packages="[\"$pkg\"]"
+          fi
+          {
+            printf 'packages=%s\n' "$packages"
+            printf 'version=%s\n' "$version"
+            printf 'mode=%s\n' "$mode"
+          } >> "$GITHUB_OUTPUT"
+          echo "mode=$mode packages=$packages version=$version"
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Build both publishable packages from src/
+        run: npm run build:packages
+
+      # The release gate: shebang + dependency-closure guards, manifest
+      # agreement, seller d.ts alignment, and version lockstep with the MCP
+      # server's advertised version (test/packages-build.test.ts).
+      - name: Run the packages-build gate
+        run: npm test -- test/packages-build.test.ts --reporter=dot
+
+  dry-run:
+    needs: gate
+    if: needs.gate.outputs.mode == 'dry-run'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        package: ${{ fromJSON(needs.gate.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          package-manager-cache: true
+      - run: npm ci --no-audit --no-fund
+      - name: Dry-run publish (prepack rebuilds dist from src/)
+        working-directory: packages/${{ matrix.package }}
+        run: npm publish --dry-run --access public
+      - name: Pack tarball for inspection
+        working-directory: packages/${{ matrix.package }}
+        run: npm pack
+      - name: Retain tarball
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.package }}-${{ needs.gate.outputs.version }}-tarball
+          path: packages/${{ matrix.package }}/*.tgz
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: gate
+    if: needs.gate.outputs.mode == 'publish'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Must match the "Environment name" field in the npm trusted-publisher
+    # configuration (case-sensitive). Add required reviewers to this
+    # environment in repo Settings -> Environments for a manual approval
+    # gate before every publish.
+    environment: npm-publish
+    permissions:
+      contents: read
+      # Required: lets npm mint a short-lived OIDC credential and generate
+      # the provenance attestation. There is no NODE_AUTH_TOKEN anywhere.
+      id-token: write
+    strategy:
+      matrix:
+        package: ${{ fromJSON(needs.gate.outputs.packages) }}
+      max-parallel: 1
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      # Deliberately no `registry-url` input: it writes an .npmrc that
+      # expects NODE_AUTH_TOKEN. Trusted publishing needs neither.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          package-manager-cache: true
+
+      - name: Assert npm supports trusted publishing (>= 11.5.1)
+        run: |
+          required="11.5.1"
+          current="$(npm --version)"
+          echo "npm $current (need >= $required)"
+          if [ "$(printf '%s\n%s\n' "$required" "$current" | sort -V | head -n1)" != "$required" ]; then
+            echo "::error::npm $current is older than $required; bump setup-node's node-version to a release that bundles a newer npm" >&2
+            exit 1
+          fi
+
+      - run: npm ci --no-audit --no-fund
+
+      # prepack (node ../../scripts/build-packages.mjs) rebuilds dist/ from
+      # src/ during publish, so a stale checkout can never ship. Auth is the
+      # OIDC exchange; --provenance is explicit belt-and-braces (trusted
+      # publishing generates attestations automatically, but the flag makes
+      # the intent auditable and fails loudly if provenance is impossible).
+      - name: Publish ${{ matrix.package }} to npm with provenance
+        working-directory: packages/${{ matrix.package }}
+        run: npm publish --provenance --access public
+
+      - name: Verify the registry serves the new version
+        env:
+          PKG: ${{ matrix.package }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          for attempt in $(seq 1 12); do
+            if [ "$(npm view "@agentmoney/${PKG}@${VERSION}" version 2>/dev/null)" = "$VERSION" ]; then
+              echo "registry serves @agentmoney/${PKG}@${VERSION}"
+              exit 0
+            fi
+            echo "attempt ${attempt}: not visible yet, retrying in 10s"
+            sleep 10
+          done
+          echo "::error::@agentmoney/${PKG}@${VERSION} not visible on the registry after 2 minutes" >&2
+          exit 1
