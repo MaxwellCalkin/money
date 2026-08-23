@@ -1,11 +1,9 @@
 # Releasing @agentmoney/wallet-mcp and @agentmoney/seller-sdk
 
-> **Activation required:** the workflow ships as
-> `docs/publish-packages.workflow.yml` because automated pushes from agent
-> sessions lack the GitHub `workflow` scope. Move it into place from your own
-> terminal — `git mv docs/publish-packages.workflow.yml
-> .github/workflows/publish-packages.yml` — then commit and push. The
-> filename is load-bearing for the npm trusted-publisher binding below.
+> **Activated 2026-08-23:** the workflow lives at
+> `.github/workflows/publish-packages.yml` (moved once agent pushes gained
+> SSH authority; the OAuth `workflow`-scope restriction no longer applies).
+> The filename is load-bearing for the npm trusted-publisher binding below.
 
 How the two published packages get from `src/` to npm with provenance, using
 OIDC trusted publishing. There is **no long-lived npm token** in this
