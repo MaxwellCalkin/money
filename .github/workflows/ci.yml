@@ -97,6 +97,7 @@ jobs:
               "dist/compliance/webhook-server.js", "dist/compliance/event-worker.js",
               "dist/compliance/onboarding-worker.js", "dist/compliance/review-worker.js",
               "dist/compliance/ops-server.js", "dist/compliance/console-server.js",
+              "dist/cards/authorization-server.js", "dist/cards/event-worker.js",
               "/app/.money-production-image"
             ];
             const forbidden = [
