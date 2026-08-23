@@ -28,6 +28,8 @@ const entryPoints = [
   "src/compliance/console-server.ts",
   "src/compliance/operator-setup.ts",
   "src/compliance/operator-login.ts",
+  "src/cards/authorization-server.ts",
+  "src/cards/event-worker.ts",
   "src/deploy/preflight.ts",
   "src/dashboard-login.ts",
   "src/onboard.ts",

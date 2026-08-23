@@ -90,6 +90,54 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # Card authorization ingress (sandbox). Answers issuer authorization
+  # webhooks on /webhooks/<provider>/authorization via the Caddy /webhooks/*
+  # route. Under MONEY_CARD_PROVIDER=mock (set in beta.env) no real issuer
+  # ever calls this; the route exists so the hosted topology matches
+  # production and so a later stripe-issuing test-mode flip is one env edit.
+  card-authorization:
+    build:
+      context: ../..
+      dockerfile: deploy/beta/Dockerfile.beta
+    restart: unless-stopped
+    command: ["dist/cards/authorization-server.js"]
+    env_file: beta.env
+    environment:
+      MONEY_CARD_INGRESS_DATABASE_URL: postgres://money:${BETA_DB_PASSWORD}@pgbouncer:6432/money
+      MONEY_BIND_HOST: 0.0.0.0
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4027/health/live').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Card event worker (sandbox). CAVEAT, stated plainly: under provider
+  # `mock` this standalone process boots a fresh, empty in-process mock
+  # issuer that shares no state with the API's mock issuer, so any event
+  # that does land in the card inbox will fail its issuer re-fetch, retry,
+  # and eventually dead-letter — which trips the treasury breaker by design
+  # (fail closed on evidence we cannot re-fetch). In the beta nothing
+  # enqueues card events (the mock purchase network exists only in tests and
+  # `npm run demo:card`), so the inbox stays empty; the full mock card loop
+  # is only meaningful in one process. This service is here so the sandbox
+  # topology and env contract match production, and it becomes load-bearing
+  # the moment the profile flips to Stripe test mode.
+  card-events:
+    build:
+      context: ../..
+      dockerfile: deploy/beta/Dockerfile.beta
+    restart: unless-stopped
+    command: ["dist/cards/event-worker.js"]
+    env_file: beta.env
+    environment:
+      MONEY_CARD_WORKER_DATABASE_URL: postgres://money:${BETA_DB_PASSWORD}@pgbouncer:6432/money
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   caddy:
     image: caddy:2
     restart: unless-stopped

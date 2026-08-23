@@ -85,6 +85,7 @@ interface ControlRow extends Record<string, unknown> {
   funding_enabled: boolean;
   payouts_enabled: boolean;
   external_spend_enabled: boolean;
+  card_spend_enabled?: boolean;
   max_payout_micros: Micros;
   max_pending_payout_micros: Micros;
   max_open_exposure_micros?: Micros;
@@ -169,6 +170,10 @@ export interface TreasuryControls {
   fundingEnabled: boolean;
   payoutsEnabled: boolean;
   externalSpendEnabled: boolean;
+  /** Card-rail breaker flag. Always present on `controlState()`; configure and
+   * restore return the historical treasury shape without it (they never touch
+   * the flag: tripping clears it, restore leaves it false). */
+  cardSpendEnabled?: boolean;
   maxPayoutMicros: bigint;
   maxPendingPayoutMicros: bigint;
   maxOpenExposureMicros?: bigint;
@@ -548,6 +553,31 @@ export class PostgresTreasury {
     await this.db.query("select money_private.trip_treasury_breaker($1)", [reason]);
   }
 
+  /** Enables or disables new card reserves and authorizations. Tripping the
+   * breaker clears the flag; restore leaves it false until an operator calls
+   * this explicitly. Returns whether the flag changed. */
+  async setCardSpendEnabled(enabled: boolean, reason: string): Promise<boolean> {
+    const result = await this.db.query<{ changed: boolean }>(
+      "select money_private.set_card_spend_enabled($1, $2) as changed", [enabled, reason]
+    );
+    return result.rows[0]?.changed ?? false;
+  }
+
+  /** Operator resolution of a dead-lettered issuer card event. Card spend must
+   * stay disabled while the review happens; every resolution is audited in
+   * money.card_event_reviews. */
+  async resolveCardEventReview(input: {
+    inboxId: bigint; resolution: "retry" | "ignore"; reviewReference: string; reason: string;
+  }): Promise<"queued" | "ignored"> {
+    const result = await this.db.query<{ state: "queued" | "ignored" }>(
+      "select money_private.resolve_card_provider_event($1::bigint,$2,$3,$4) as state",
+      [input.inboxId.toString(), input.resolution, input.reviewReference, input.reason]
+    );
+    const state = result.rows[0]?.state;
+    if (!state) throw new Error("card event review resolution returned no result");
+    return state;
+  }
+
   async restoreControls(reason: string): Promise<TreasuryControls> {
     const result = await this.db.query<ControlRow>(
       "select * from money_private.restore_treasury_controls($1)", [reason]
@@ -608,6 +638,7 @@ export class PostgresTreasury {
     return {
       fundingEnabled: row.funding_enabled, payoutsEnabled: row.payouts_enabled,
       externalSpendEnabled: row.external_spend_enabled,
+      ...(row.card_spend_enabled !== undefined ? { cardSpendEnabled: row.card_spend_enabled } : {}),
       maxPayoutMicros: BigInt(row.max_payout_micros),
       maxPendingPayoutMicros: BigInt(row.max_pending_payout_micros),
       ...(optionalBigInt(row.max_open_exposure_micros) !== undefined
@@ -619,10 +650,28 @@ export class PostgresTreasury {
     };
   }
 
+  /** Treasury controls plus the card-rail flag. The card flag lives behind its
+   * own function (migration 0012 leaves treasury_control_state() and its
+   * grants untouched); a caller whose role has not yet been re-granted by
+   * db/roles.sql reads it as disabled rather than losing the whole state. */
   async controlState(): Promise<TreasuryControls> {
     const result = await this.db.query<ControlRow>("select * from money_private.treasury_control_state()");
     if (!result.rows[0]) throw new Error("treasury control state returned no result");
-    return this.controlFromRow(result.rows[0]);
+    return { ...this.controlFromRow(result.rows[0]), cardSpendEnabled: await this.cardSpendEnabled() };
+  }
+
+  private async cardSpendEnabled(): Promise<boolean> {
+    try {
+      const result = await this.db.query<{ enabled: boolean }>(
+        "select money_private.card_spend_control_state() as enabled"
+      );
+      return result.rows[0]?.enabled === true;
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      // 42501: role not yet re-granted; 42883: migration 0012 not applied. Fail closed.
+      if (code === "42501" || code === "42883") return false;
+      throw error;
+    }
   }
 
   async health(): Promise<TreasuryHealth[]> {

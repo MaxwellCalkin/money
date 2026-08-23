@@ -55,7 +55,7 @@ Record exit status, UTC time, exact command, and retained output for every row.
 | `npm run typecheck` | `<evidence>` |
 | `npm test -- --reporter=dot` complete suite | `<test count, duration, output>` |
 | `npm run build` with every production entry | `<evidence>` |
-| `npm run verify:deployment` | `<must report 14 positive and 14 negative>` |
+| `npm run verify:deployment` | `<must report 16 positive and 16 negative>` |
 | `npm audit --audit-level=moderate` | `<evidence>` |
 | All workflow actions resolve to reviewed full commits | `<six refs and source review>` |
 | Base image digest resolves to the reviewed official image | `<registry evidence>` |
@@ -68,7 +68,7 @@ backup process. In-memory and PGlite tests cannot substitute for these rows.
 
 | Gate | Result and evidence |
 |---|---|
-| Fresh migrations apply through `0011` | `<database ID, output, migration rows/checksums>` |
+| Fresh migrations apply through `0012` | `<database ID, output, migration rows/checksums>` |
 | Rerun is a no-op and altered checksum is rejected | `<evidence>` |
 | `db/roles.sql` applies from the administrative identity | `<evidence>` |
 | Effective roles allow only the documented commands | `<positive and negative assertions>` |
@@ -76,6 +76,7 @@ backup process. In-memory and PGlite tests cannot substitute for these rows.
 | Ledger conservation and cached-balance reconciliation | `<reconciliation output>` |
 | Concurrent debit, mandate, approval, refund, reversal, and replay tests | `<test output>` |
 | Treasury and compliance atomicity/recovery tests | `<test output>` |
+| Card rail: reserve accounting, decline ladder, 20-way authorization race, role matrix, and no-PAN regression | `<test output>` |
 | `npm run test:postgres-live` on checksummed PostgreSQL 18 | `<server/database identity and four-test output>` |
 | Backup restore and forward-repair drill | `<restore ID and result>` |
 
@@ -85,7 +86,7 @@ backup process. In-memory and PGlite tests cannot substitute for these rows.
 |---|---|
 | Image built with candidate commit as `SOURCE_COMMIT` | `<build output>` |
 | Image revision label equals candidate commit | `<inspect output>` |
-| Runtime contract proves UID 65532, all 14 commands, and no shell/npm/Yarn | `<runtime-contract.json>` |
+| Runtime contract proves UID 65532, all 16 commands, and no shell/npm/Yarn | `<runtime-contract.json>` |
 | CycloneDX metadata image ID equals recorded image ID | `<bounded comparison output>` |
 | HIGH/CRITICAL report targets that same image | `<report target and result>` |
 | `SHA256SUMS` verifies after artifact download | `<verification output>` |
@@ -114,6 +115,8 @@ backup process. In-memory and PGlite tests cannot substitute for these rows.
 | `compliance-reviews` | | | |
 | `compliance-ops` | | | |
 | `compliance-console` | | | |
+| `card-authorization` | | | |
+| `card-events` | | | |
 
 ## Persona sandbox contract
 

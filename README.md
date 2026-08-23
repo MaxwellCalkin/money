@@ -13,7 +13,7 @@ When both sides of a transaction are on the same ledger, a payment is a database
 3. **Prefunding buys the speed.** Authorization is a local policy + balance check — no external round-trip on the hot path.
 4. **Exactly-once by construction.** Idempotency keys on every transfer; 402 challenges pay-once/redeem-once. Agents retry by default — the network must shrug.
 
-## What's here (v0.13)
+## What's here (v0.14)
 
 | Piece | File | What it does |
 |---|---|---|
@@ -31,20 +31,64 @@ When both sides of a transaction are on the same ledger, a payment is a database
 | Owner control plane | `src/server/dashboard.ts` | Private, session-gated balances, activity, services, mandates, and an exact-payment approval inbox |
 | Database operations | `src/server/database-ops.ts` | Liveness, schema readiness, and token-gated ledger reconciliation on **:4022**; deliberately no ungoverned payment route |
 | x402 boundary | `src/bridge/`, `src/db/external.ts` | Official x402 v2 exact/EVM signing, HTTPS HSM adapter, pinned Base USDC, rotatable AES-256-GCM custody, exact external approvals, independent calldata/log verification, restart recovery, and automatic journal reversal |
+| Card rail | `db/migrations/0012_card_rail.sql`, `src/cards/`, `src/db/cards.ts` | Reserved virtual cards under the same mandates: issuing reserves the full cap from the agent's funds, a segregated ingress answers the issuer's synchronous authorization webhook against a fixed decline ladder, an inbox worker re-fetches clearings/voids/refunds from the issuer before any ledger command, and the card number never enters model context (reveal defaults to `none`) |
 | Treasury boundary | `db/migrations/0007_treasury.sql`, `src/treasury/` | Real Column ACH funding and payouts, raw-body webhook HMAC, authenticated event re-fetch, out-of-order recovery, exact returns, exposure freezes, reserve-first payout workers, bank/stablecoin reconciliation, and global circuit breakers |
 | Compliance and risk perimeter | `db/migrations/0008_compliance_risk.sql`, `db/migrations/0010_compliance_evidence_sets.sql`, `src/compliance/`, `src/db/compliance.ts` | KYC/KYB and sanctions evidence, atomic event-to-evidence sets, customer/counterparty lifecycle, whole-family restrictions, case evidence, atomic transfer decisions, exact velocity limits, isolated webhook/workers, expiry sweeps, and a segregated operations service |
 | Hosted verification and review desk | `db/migrations/0009_compliance_operations.sql`, `src/compliance/onboarding-worker.ts`, `src/compliance/console-server.ts` | Replay-safe hosted inquiries, encrypted redirect custody, named Ed25519 reviewers, a private case console, append-only operator evidence, and database-enforced maker/checker approval |
 | Persona production adapter | `src/compliance/persona.ts`, `src/compliance/runtime.ts` | Pinned Persona `2025-12-08` inquiry/report API, account-bound one-time links, database-enforced provider-subject continuity, sparse identity and sanctions refetch, timestamped raw-body HMAC with rotating secrets, and fail-closed KYC/KYB mapping without persisted provider PII |
 | Production artifact | `Dockerfile`, `deploy/compose.production.yaml`, `src/deploy/preflight.ts` | Reproducible Node 24 build, source-revision-labeled non-root read-only container, segregated service credentials, readiness probes, startup-enforced production configuration, byte-stable migrations, and SHA-pinned test/image gates that retain the image identity, CycloneDX SBOM, and high/critical vulnerability report |
-| MCP server | `src/mcp/server.ts`, `src/mcp/outbound.ts` | `money_balance`, `money_pay`, bounded `money_fetch` with internal/external 402 auto-pay, exact private-origin opt-ins, DNS/private-target rejection, and no credential-forwarding redirects, plus `money_feed` |
-| Demo | `src/demo.ts` | The full story end-to-end (10 sections), including a separately authenticated seller joining and earning through the network |
+| MCP server | `src/mcp/server.ts`, `src/mcp/outbound.ts` | `money_balance`, `money_pay`, bounded `money_fetch` with internal/external 402 auto-pay, exact private-origin opt-ins, DNS/private-target rejection, and no credential-forwarding redirects, plus `money_card_create`/`money_card_status`/`money_card_close` (last4 only, never the card number) and `money_feed` |
+| Demo | `src/demo.ts`, `src/demo-card.ts` | The full story end-to-end (10 sections), including a separately authenticated seller joining and earning through the network; `demo:card` runs the reserved-card loop against the in-process mock issuer (dev-only) |
 
 The verification and non-code launch gates for this candidate are tracked in
 `docs/RELEASES.md`; copy `docs/RELEASE_EVIDENCE_TEMPLATE.md` to retain the
 exact-commit proof for each candidate. The repository-specific adversarial model, protected
 invariants, trust boundaries, residual risks, and incident containment order
 are in `docs/THREAT_MODEL.md`; private vulnerability reporting and initial
-response rules are in `SECURITY.md`.
+response rules are in `SECURITY.md`. Rail-specific contracts: the card rail is
+`docs/CARD_RAIL.md`, external x402 settlement is `docs/EXTERNAL_SETTLEMENT.md`,
+bank funding/payouts are `docs/TREASURY.md`, and the compliance perimeter is
+`docs/COMPLIANCE.md`.
+
+## Your agent never sees the card number
+
+v0.14 makes the founder sentence literally true in sandbox: *I put $100 in, my
+agent spends it at normal websites like a card, and it can pay another agent
+for a service.* The agent asks for a **reserved card** — a single-merchant
+virtual card under the owner's spend mandate. Issuing the card reserves its
+full cap from the agent's funds up front; every network authorization is
+answered synchronously by the policy engine (merchant category, allowlist,
+merchant lock, single-use, first-merchant throttle, cap — a fixed decline
+ladder in `decide_card_authorization`); the unspent remainder returns to the
+agent's funds when the card closes, and mandate authority is never restored.
+The MCP tools return only the last4 — reveal mode defaults to `none`, and in
+`token` mode the host runtime (never the model) redeems a single-use checkout
+token outside model context.
+
+Run the whole loop deterministically against the in-process Stripe-shaped mock
+issuer (dev-only — it boots the Postgres API on PGlite, no deployment, no real
+funds):
+
+```bash
+npm run demo:card
+```
+
+The committed transcript is `docs/marketing/demo/agent-card-transcript.md`:
+fund $100 → grant the mandate → a $29 purchase at `mock-shop.example`
+authorizes in under two seconds and clears → a $400 attempt at an unseen
+gift-card merchant is visibly **DECLINED** (`new_payee_cap`) → the same agent
+pays `@writer-agent` $5 through the closed loop → one hash-chained feed,
+`ledger_health` true. Sandbox, no real funds;
+nothing here is a bank, card, or deposit account.
+
+Positioning, briefly: standing mandates with policy at the authorization hop —
+not approve-every-purchase dialogs (Stripe Link-style agent checkout); built
+for individuals and solo builders on any MCP runtime, not a corporate banking
+perimeter (Mercury/Ramp-style agent cards); and the prefunded mandate plus
+closed-loop agent-to-agent payments in one receipt chain, not a
+bring-your-own-card vault (Crossmint-style). The card borrows every merchant
+on earth as supply; the mandate engine is the moat. Details and the full
+deployment contract: `docs/CARD_RAIL.md`.
 
 ## Run it
 
@@ -53,7 +97,7 @@ npm ci                    # install the exact reviewed dependency tree
 npm run typecheck
 npm test                  # complete product and invariant suite
 npm run build             # compile every production entry point into dist/
-npm run verify:deployment # exercise all 14 compiled service preflights, positive and negative
+npm run verify:deployment # exercise all 16 compiled service preflights, positive and negative
 npm audit --audit-level=moderate
 npm run demo              # the whole story in one script
 npm run api               # the HTTP server on :4021 (durable: data/events.jsonl)
@@ -82,6 +126,8 @@ npm run compliance:onboarding
 npm run compliance:reviews
 npm run compliance:ops
 npm run compliance:console
+npm run cards:authorization
+npm run cards:events
 ```
 
 The ordinary suite safely skips its destructive real-server gate. Before a
@@ -148,6 +194,7 @@ durable replay-safe authentication, owner sessions, allocation, mandates,
 agent payments, exact owner approvals, key rotation, provider service
 publishing, public discovery, registry-priced 402 challenges, single-use
 redemption, cumulative-capped refunds, durable external x402 settlement,
+reserved-card issue/resume/close under the mandate (`docs/CARD_RAIL.md`),
 sanitized owner compliance status, replay-safe hosted verification sessions,
 scoped balances/activity, and the private dashboard. The ops service
 intentionally exposes no payment endpoint.

@@ -23,11 +23,30 @@ configured, and every payment still clears the mandate kernel.
 | api (`dist/server/postgres-api.js`) | the signed product API |
 | external-worker | x402 sweep/reversal loop |
 | database-ops | health probes, reconcile, ledger-health recorder |
+| card-authorization (`dist/cards/authorization-server.js`) | issuer webhook ingress on `/webhooks/*` (sandbox: mock issuer, no real card network) |
+| card-events (`dist/cards/event-worker.js`) | card event inbox worker + issuer close drain |
 | caddy | TLS on a free DuckDNS subdomain |
 
 Treasury and compliance workers are intentionally absent; their routes fail
 closed. Do not add them to this profile — going real-money is a different
 milestone with its own gates.
+
+## Reserved cards in the beta (sandbox, no real funds)
+
+The beta runs the card rail with `MONEY_CARD_PROVIDER=mock` and
+`MONEY_CARD_REVEAL_MODE=none`: agents can request reserved cards under a
+spend mandate and owners see the approvals and receipts, but nothing here is
+a bank, card, or deposit account, and no PAN surface exists. Known mock
+limitation: the standalone `card-events` worker boots its own empty mock
+issuer, so it shares no state with the API's mock issuer. Nothing in the
+hosted beta enqueues card events (the mock purchase network lives only in
+tests and `npm run demo:card`), so its inbox stays empty; if an event ever
+does land there it will fail its issuer re-fetch and dead-letter, tripping
+the treasury breaker — fail closed, by design. The full mock authorization
+loop is demonstrated by `npm run demo:card` in one process. The services and
+the `/webhooks/*` Caddy route exist so the hosted topology matches
+production and the flip to Stripe Issuing test mode is an env-file edit, not
+a topology change.
 
 ## One-time setup
 

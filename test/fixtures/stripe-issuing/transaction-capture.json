@@ -1,0 +1,39 @@
+{
+  "id": "ipi_1QfFixture0000000000001",
+  "object": "issuing.transaction",
+  "amount": -2900,
+  "amount_details": {
+    "atm_fee": null,
+    "cashback_amount": null
+  },
+  "authorization": "iauth_1QfFixture000000000001",
+  "balance_transaction": "txn_1QfFixture0000000000001",
+  "card": "ic_1QfFixture0000000000001",
+  "cardholder": "ich_1QfFixtureCardholder001",
+  "created": 1755907320,
+  "currency": "usd",
+  "dispute": null,
+  "livemode": false,
+  "merchant_amount": -2900,
+  "merchant_currency": "usd",
+  "merchant_data": {
+    "category": "computer_software_stores",
+    "category_code": "5734",
+    "city": "San Francisco",
+    "country": "US",
+    "name": "MOCK-SHOP.EXAMPLE",
+    "network_id": "1234567890",
+    "postal_code": "94103",
+    "state": "CA",
+    "terminal_id": null,
+    "url": "https://mock-shop.example"
+  },
+  "metadata": {},
+  "network_data": {
+    "authorization_code": "005930",
+    "processing_date": "2026-08-23",
+    "transaction_id": "534306711000001"
+  },
+  "type": "capture",
+  "wallets": null
+}

@@ -1,7 +1,9 @@
 import { serve } from "@hono/node-server";
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Hono, type Context, type Next } from "hono";
+import { CardIssuerApiError, type CardIssuer } from "../cards/issuer.ts";
+import { createCardIssuerFromEnv, readCardAuthTtlSeconds, readCardRevealMode } from "../cards/runtime.ts";
 import { enforceProductionPreflight } from "../deploy/preflight.ts";
 import {
   decryptPaymentHeaderWithKeyring,
@@ -43,6 +45,12 @@ import {
   type ComplianceSessionKeyring,
 } from "../compliance/session-cipher.ts";
 import { isValidHandle, isValidServiceSlug, normalizeServiceSlug } from "../core/network.ts";
+import {
+  PostgresCards,
+  type CardCommandResult,
+  type DatabaseCard,
+  type DatabaseCardAuthorization,
+} from "../db/cards.ts";
 import type { DatabaseAccount } from "../db/ledger.ts";
 import { PostgresLedger, type DatabaseTransferResult } from "../db/ledger.ts";
 import { PostgresControlPlane, type AccountBalance, type DatabaseService, type PaymentEvidence } from "../db/control-plane.ts";
@@ -94,6 +102,15 @@ export interface PostgresApiOptions {
   /** Product-side decryption only; provider credentials remain in the worker. */
   complianceSessionKeyring?: ComplianceSessionKeyring;
   complianceProviderName?: string;
+  /** Card rail: the issuer adapter held by the API process (the create/close/
+   * reveal credential). Card issuance fails closed with 503 without it. */
+  cardIssuer?: CardIssuer;
+  /** PAN custody. `none` (default) exposes no reveal surface at all; `token`
+   * enables the single-use checkout-token reveal for host-side fill. */
+  cardRevealMode?: "none" | "token";
+  /** Required in `token` mode: keys the at-rest hash of checkout tokens. */
+  cardRevealTokenKey?: Uint8Array;
+  cardAuthTtlSeconds?: number;
   now?: () => number;
 }
 
@@ -277,6 +294,64 @@ function externalView(payment: DatabaseExternalPayment) {
     ...(payment.reversalTransferId ? { reversalTransferId: payment.reversalTransferId } : {}),
     createdAt: payment.createdAt.getTime(),
     updatedAt: payment.updatedAt.getTime(),
+  };
+}
+
+const CARD_MERCHANT_HINT_PATTERN = /^[a-z0-9][a-z0-9.-]{0,99}$/;
+const MAX_CARD_CAP_MICROS = 10_000_000_000n;
+const DEFAULT_CARD_LIFETIME_SECONDS = 3_600;
+const MAX_CARD_LIFETIME_SECONDS = 30 * 86_400;
+const CHECKOUT_TOKEN_TTL_SECONDS = 600;
+
+/** Owner- and agent-facing card view. Deliberately excludes the issuer's
+ * provider card reference and transfer seqs; the PAN itself never reaches this
+ * process outside the single-use reveal path. */
+function cardView(card: DatabaseCard) {
+  return {
+    id: card.id,
+    agentId: card.agentId,
+    mandateId: card.mandateId,
+    state: card.state,
+    capMicros: jsonInteger(card.capMicros),
+    capDisplay: formatMicros(card.capMicros),
+    heldMicros: jsonInteger(card.heldMicros),
+    settledMicros: jsonInteger(card.settledMicros),
+    singleUse: card.singleUse,
+    merchantHint: card.merchantHint,
+    policyPayee: card.policyPayee,
+    ...(card.lockedPayee ? { lockedPayee: card.lockedPayee } : {}),
+    ...(card.mccAllowlist ? { mccAllowlist: card.mccAllowlist } : {}),
+    ...(card.last4 ? { last4: card.last4 } : {}),
+    ...(card.expMonth !== undefined ? { expMonth: card.expMonth } : {}),
+    ...(card.expYear !== undefined ? { expYear: card.expYear } : {}),
+    expiresAt: card.expiresAt.getTime(),
+    ...(card.approvalId ? { approvalId: card.approvalId } : {}),
+    ...(card.receiptId ? { receiptId: card.receiptId } : {}),
+    revealCount: card.revealCount,
+    ...(card.closeRequestedAt ? { closeRequestedAt: card.closeRequestedAt.getTime() } : {}),
+    ...(card.closeReason ? { closeReason: card.closeReason } : {}),
+    createdAt: card.createdAt.getTime(),
+    updatedAt: card.updatedAt.getTime(),
+  };
+}
+
+function cardAuthorizationView(item: DatabaseCardAuthorization) {
+  return {
+    id: item.id,
+    cardId: item.cardId,
+    state: item.state,
+    policyPayee: item.policyPayee,
+    merchantDescriptor: item.merchantDescriptor,
+    merchantMcc: item.merchantMcc,
+    ...(item.merchantNetworkId ? { merchantNetworkId: item.merchantNetworkId } : {}),
+    ...(item.merchantCountry ? { merchantCountry: item.merchantCountry } : {}),
+    amountMicros: jsonInteger(item.amountMicros),
+    amountDisplay: formatMicros(item.amountMicros),
+    isVerification: item.isVerification,
+    ...(item.settledMicros !== undefined ? { settledMicros: jsonInteger(item.settledMicros) } : {}),
+    ...(item.declineCode ? { declineCode: item.declineCode } : {}),
+    createdAt: item.createdAt.getTime(),
+    updatedAt: item.updatedAt.getTime(),
   };
 }
 
@@ -469,7 +544,22 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   const external = new PostgresExternal(db);
   const treasury = new PostgresTreasury(db);
   const compliance = new PostgresCompliance(db);
+  const cards = new PostgresCards(db);
   const clock = options.now ?? Date.now;
+  const cardIssuer = options.cardIssuer;
+  const cardBridgeReady = Boolean(cardIssuer);
+  const cardRevealMode = options.cardRevealMode ?? "none";
+  const cardRevealTokenKey = options.cardRevealTokenKey ? Buffer.from(options.cardRevealTokenKey) : undefined;
+  if (cardRevealTokenKey && cardRevealTokenKey.length < 32) {
+    throw new Error("cardRevealTokenKey must contain at least 32 bytes");
+  }
+  if (cardRevealMode === "token" && !cardRevealTokenKey) {
+    throw new Error("cardRevealTokenKey is required when cardRevealMode is token");
+  }
+  const cardAuthTtlSeconds = options.cardAuthTtlSeconds ?? 604_800;
+  if (!Number.isSafeInteger(cardAuthTtlSeconds) || cardAuthTtlSeconds < 60 || cardAuthTtlSeconds > 2_592_000) {
+    throw new Error("cardAuthTtlSeconds must be an integer between 60 and 2592000");
+  }
   const externalHeaderKey = options.externalHeaderKey ? Buffer.from(options.externalHeaderKey) : undefined;
   if (externalHeaderKey && externalHeaderKey.length !== 32) {
     throw new Error("externalHeaderKey must contain exactly 32 bytes");
@@ -499,6 +589,8 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   app.use("/provider/*", noStore);
   app.use("/pay-external", noStore);
   app.use("/pay-external/*", noStore);
+  app.use("/cards", noStore);
+  app.use("/cards/*", noStore);
   app.use("/dashboard/state", noStore);
 
   const readBody = async <T>(c: Context): Promise<T | null> => c.req.json<T>().catch(() => null);
@@ -992,13 +1084,14 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   };
 
   const ownerSnapshot = async (userId: string) => {
-    const [accounts, mandates, approvals, feed, services, externalPayments, treasuryState, complianceState, integrityView] = await Promise.all([
+    const [accounts, mandates, approvals, feed, services, externalPayments, cardList, treasuryState, complianceState, integrityView] = await Promise.all([
       control.accountState(userId),
       policy.listMandates(userId, 100),
       policy.listApprovals(userId, undefined, 100),
       stateFeed(userId, 25),
       servicesView(userId),
       external.list(userId, 100),
+      cards.list(userId, 20),
       treasurySnapshot(userId, true),
       compliance.state(userId),
       ledgerIntegrityView(),
@@ -1013,19 +1106,21 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       approvals: renderedApprovals,
       feed,
       external: externalPayments.map(externalView),
+      cards: cardList.map(cardView),
       treasury: treasuryState,
       ...(complianceState ? { compliance: complianceView(complianceState) } : {}),
     };
   };
 
   const childSnapshot = async (accountId: string, limit = 25) => {
-    const [accounts, mandates, approvals, feed, services, externalPayments, treasuryState, complianceState] = await Promise.all([
+    const [accounts, mandates, approvals, feed, services, externalPayments, cardList, treasuryState, complianceState] = await Promise.all([
       control.accountState(accountId),
       policy.listMandates(accountId, 100),
       policy.listApprovals(accountId, undefined, 100),
       stateFeed(accountId, limit),
       servicesView(accountId),
       external.list(accountId, Math.min(limit, 100)),
+      cards.list(accountId, Math.min(limit, 20)),
       treasurySnapshot(accountId, false),
       compliance.state(accountId),
     ]);
@@ -1039,6 +1134,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       feed,
       services,
       external: externalPayments.map(externalView),
+      cards: cardList.map(cardView),
       treasury: treasuryState,
       ...(complianceState ? { compliance: complianceView(complianceState) } : {}),
     };
@@ -1674,6 +1770,342 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // Card rail. A card is a reserved, capped, merchant-lockable permit under one
+  // mandate: issuing it reserves the full cap from the agent's funds. The
+  // issuer create happens OUTSIDE the database transaction with
+  // Idempotency-Key = card id, so a same-key retry can never mint a second
+  // issuer card, and a database denial afterwards closes the issuer card
+  // best-effort (the worker's awaiting-close drain is the durable path).
+  // ---------------------------------------------------------------------------
+
+  const checkoutTokenHash = (token: string): Buffer =>
+    createHmac("sha256", cardRevealTokenKey!).update(token, "utf8").digest();
+
+  const issueCheckoutToken = async (agentId: string, cardId: string) => {
+    const token = randomBytes(32).toString("base64url");
+    const issued = await cards.issueRevealToken({
+      agentId, cardId, tokenHash: checkoutTokenHash(token), ttlSeconds: CHECKOUT_TOKEN_TTL_SECONDS,
+    });
+    return { checkoutToken: token, checkoutTokenExpiresAt: issued.expiresAt.getTime() };
+  };
+
+  const cardApprovalNote = async (card: DatabaseCard): Promise<string> => {
+    const agentName = (await control.publicAccounts([card.agentId]))[0]?.name ?? card.agentId;
+    const minutes = Math.max(1, Math.round((card.expiresAt.getTime() - clock()) / 60_000));
+    return `${agentName} wants a card for up to ${formatMicros(card.capMicros)} at ${card.merchantHint}, expires in ${minutes} min`;
+  };
+
+  /**
+   * A `55000` card-spend pause raised during activation is retryable: the same
+   * idempotency key must be able to resume this card once the operator
+   * re-enables spend, and the issuer replays this card's create call
+   * (Idempotency-Key = card id), so closing the issuer card here would hand
+   * every later retry canceled card material that activates against a dead
+   * card. A prepared card can never be approved by decide_card_authorization,
+   * so the open issuer card is spend-inert until activation succeeds.
+   */
+  const isRetryableCardSpendPause = (error: unknown): boolean => {
+    if (databaseCode(error) !== "55000") return false;
+    let cursor: unknown = error;
+    for (let depth = 0; depth < 4 && cursor instanceof Error; depth += 1) {
+      if (cursor.message.includes("card-spend circuit breaker is open")) return true;
+      cursor = cursor.cause;
+    }
+    return false;
+  };
+
+  const cardFailure = (c: Context, error: unknown, fallback: string) => {
+    if (error instanceof CardIssuerApiError) {
+      // Never echo an issuer response body: reveal-adjacent errors must not
+      // carry card material into any agent- or owner-facing response.
+      console.error("card issuer request failed", error.status, error.retryable);
+      return c.json({ error: "card_issuer_unavailable", reason: "The card issuer request could not be completed." }, 502);
+    }
+    return databaseFailure(c, error, fallback);
+  };
+
+  /** Issuer create then atomic activation for a card in state `prepared`. */
+  const activatePreparedCard = async (agentId: string, card: DatabaseCard): Promise<CardCommandResult> => {
+    if (!cardIssuer) throw new Error("card issuer is not configured");
+    const material = await cardIssuer.createCard({
+      cardId: card.id,
+      capMicros: card.capMicros,
+      expiresAt: card.expiresAt,
+      merchantHint: card.merchantHint,
+      singleUse: card.singleUse,
+      agentId,
+      ownerId: (await control.publicAccounts([agentId]))[0]?.ownerId ?? "",
+    });
+    let result: CardCommandResult;
+    try {
+      result = await cards.activate({
+        agentId,
+        cardId: card.id,
+        provider: cardIssuer.provider,
+        providerCardRef: material.providerCardRef,
+        last4: material.last4,
+        expMonth: material.expMonth,
+        expYear: material.expYear,
+        authTtlSeconds: cardAuthTtlSeconds,
+      });
+    } catch (error) {
+      // Best-effort close only on terminal denials and unexpected errors; a
+      // retryable card-spend pause keeps the issuer card open so the same-key
+      // retry replays live material (see isRetryableCardSpendPause).
+      if (!isRetryableCardSpendPause(error)) {
+        await cardIssuer.closeCard(material.providerCardRef).catch(() => undefined);
+      }
+      throw error;
+    }
+    if (result.status === "denied") {
+      await cardIssuer.closeCard(material.providerCardRef).catch(() => undefined);
+    }
+    return result;
+  };
+
+  const cardCommandResponse = async (c: Context<ApiEnv>, agentId: string, result: CardCommandResult) => {
+    if (result.status === "denied") {
+      return c.json({
+        status: "denied" as const,
+        code: result.code ?? "denied",
+        reason: result.reason ?? "card request denied",
+        replayed: result.replayed,
+        ...(result.cardId ? { cardId: result.cardId } : {}),
+      }, result.code === "idempotency_conflict" ? 409 : 402);
+    }
+    if (!result.cardId) throw new Error("card command is missing durable identity");
+    const card = await cards.get(agentId, result.cardId);
+    if (!card) throw new Error("card command result is not visible to its agent");
+    if (result.status === "approval_required") {
+      if (!result.approvalId) throw new Error("card approval result is missing its approval id");
+      const approval = await policy.approval(agentId, result.approvalId);
+      if (!approval) throw new Error("card approval is not visible to its requester");
+      return c.json({
+        status: "approval_required" as const,
+        cardId: result.cardId,
+        approval: approvalView(approval),
+        note: await cardApprovalNote(card),
+        replayed: result.replayed,
+      }, 202);
+    }
+    if (result.status === "posted") {
+      // Fresh activations in token mode carry one checkout token; replays do
+      // not burn the bounded reveal budget — POST /cards/:id/resume is the
+      // sanctioned path to a fresh token.
+      const token = cardRevealMode === "token" && !result.replayed
+        ? await issueCheckoutToken(agentId, card.id)
+        : undefined;
+      return c.json({
+        status: "active" as const,
+        card: cardView(card),
+        ...(result.receiptId ? { receiptId: result.receiptId } : {}),
+        ...(token ?? {}),
+        replayed: result.replayed,
+      }, 200);
+    }
+    return c.json({ error: "card_activation_incomplete" }, 503);
+  };
+
+  app.post("/cards", requireAgentSig, async (c) => {
+    if (!cardBridgeReady) {
+      return c.json({
+        error: "card_bridge_unavailable",
+        reason: "a card issuer adapter must be configured",
+      }, 503);
+    }
+    const agentId = c.get("agentId");
+    const body = await readBody<{
+      idempotencyKey: string;
+      capMicros?: number | string;
+      capUsd?: number;
+      merchantHint: string;
+      singleUse?: boolean;
+      expiresInSeconds?: number;
+      mccAllowlist?: string[];
+    }>(c);
+    const capFromUsd = body && typeof body.capUsd === "number" && Number.isFinite(body.capUsd) && body.capUsd > 0
+      ? BigInt(Math.round(body.capUsd * 1_000_000))
+      : undefined;
+    const cap = body?.capMicros !== undefined ? positiveMicros(body.capMicros) : capFromUsd;
+    const expiresInSeconds = body?.expiresInSeconds === undefined ? DEFAULT_CARD_LIFETIME_SECONDS : body.expiresInSeconds;
+    if (!body || (body.capMicros !== undefined && body.capUsd !== undefined)
+      || cap === undefined || cap <= 0n || cap > MAX_CARD_CAP_MICROS
+      || typeof body.merchantHint !== "string" || !CARD_MERCHANT_HINT_PATTERN.test(body.merchantHint)
+      || (body.singleUse !== undefined && typeof body.singleUse !== "boolean")
+      || !Number.isSafeInteger(expiresInSeconds) || expiresInSeconds < 60 || expiresInSeconds > MAX_CARD_LIFETIME_SECONDS
+      || (body.mccAllowlist !== undefined && (!Array.isArray(body.mccAllowlist)
+        || body.mccAllowlist.length < 1 || body.mccAllowlist.length > 32
+        || body.mccAllowlist.some((mcc) => typeof mcc !== "string" || !/^[0-9]{4}$/.test(mcc))))
+      || !validClientKey(body.idempotencyKey)) {
+      return c.json({
+        error: "invalid_request",
+        reason: "need idempotencyKey, capUsd or capMicros (up to $10,000), a lowercase merchantHint host, optional singleUse, expiresInSeconds (60s to 30d), and an optional mccAllowlist of 4-digit codes",
+      }, 400);
+    }
+    try {
+      const prior = await cards.byKey(agentId, body.idempotencyKey);
+      if (!prior && !(await treasury.controlState()).cardSpendEnabled) {
+        return c.json({ error: "treasury_unavailable", reason: "card spending is paused by the operator" }, 503);
+      }
+      let result = await cards.prepare({
+        cardId: randomUUID(),
+        agentId,
+        idempotencyKey: body.idempotencyKey,
+        capMicros: cap,
+        singleUse: body.singleUse ?? true,
+        merchantHint: body.merchantHint,
+        ...(body.mccAllowlist ? { mccAllowlist: body.mccAllowlist } : {}),
+        expiresAt: new Date(clock() + expiresInSeconds * 1_000),
+      });
+      if (result.status === "prepared" && result.cardId) {
+        const prepared = await cards.get(agentId, result.cardId);
+        if (!prepared) throw new Error("prepared card is not visible to its agent");
+        result = await activatePreparedCard(agentId, prepared);
+      }
+      return await cardCommandResponse(c, agentId, result);
+    } catch (error) {
+      return cardFailure(c, error, "card_request_failed");
+    }
+  });
+
+  app.post("/cards/:id/resume", requireAgentSig, async (c) => {
+    const agentId = c.get("agentId");
+    const cardId = c.req.param("id") ?? "";
+    if (!validUuid(cardId)) return c.json({ error: "card_not_found" }, 404);
+    try {
+      const card = await cards.get(agentId, cardId);
+      if (!card || card.agentId !== agentId) return c.json({ error: "card_not_found" }, 404);
+      if (card.state === "prepared") {
+        if (!cardBridgeReady) return c.json({ error: "card_bridge_unavailable" }, 503);
+        if (!(await treasury.controlState()).cardSpendEnabled) {
+          return c.json({ error: "treasury_unavailable", reason: "card spending is paused by the operator" }, 503);
+        }
+        return await cardCommandResponse(c, agentId, await activatePreparedCard(agentId, card));
+      }
+      if (card.state === "approval_required" && card.approvalId) {
+        const approval = await policy.approval(agentId, card.approvalId);
+        return c.json({
+          status: "approval_required",
+          cardId: card.id,
+          ...(approval ? { approval: approvalView(approval) } : {}),
+          note: await cardApprovalNote(card),
+          replayed: true,
+        }, 202);
+      }
+      if (card.state === "pending") {
+        let token: { checkoutToken: string; checkoutTokenExpiresAt: number } | undefined;
+        if (cardRevealMode === "token") {
+          try {
+            token = await issueCheckoutToken(agentId, card.id);
+          } catch (error) {
+            if (databaseCode(error) === "55000") {
+              return c.json({ error: "reveal_limit", reason: errorMessage(error) }, 409);
+            }
+            throw error;
+          }
+        }
+        return c.json({ status: "active", card: cardView(card), ...(token ?? {}), replayed: true });
+      }
+      return c.json({ status: card.state, card: cardView(card), replayed: true });
+    } catch (error) {
+      return cardFailure(c, error, "card_resume_failed");
+    }
+  });
+
+  app.get("/cards/:id", requireAgentSig, async (c) => {
+    const agentId = c.get("agentId");
+    const cardId = c.req.param("id") ?? "";
+    if (!validUuid(cardId)) return c.json({ error: "card_not_found" }, 404);
+    try {
+      const card = await cards.get(agentId, cardId);
+      if (!card) return c.json({ error: "card_not_found" }, 404);
+      const authorizations = await cards.listAuthorizations(agentId, cardId, 20);
+      return c.json({ card: cardView(card), authorizations: authorizations.map(cardAuthorizationView) });
+    } catch (error) {
+      return databaseFailure(c, error, "card_lookup_failed");
+    }
+  });
+
+  const closeCardRoute = async (c: Context<ApiEnv>, requesterId: string) => {
+    const cardId = c.req.param("id") ?? "";
+    if (!validUuid(cardId)) return c.json({ error: "card_not_found" }, 404);
+    const body = await readBody<{ reason?: string }>(c);
+    if (body?.reason !== undefined && typeof body.reason !== "string") {
+      return c.json({ error: "invalid_request", reason: "reason must be a string" }, 400);
+    }
+    try {
+      const result = await cards.closeCard(requesterId, cardId, body?.reason?.slice(0, 500));
+      return c.json({
+        cardId: result.cardId,
+        state: result.state,
+        replayed: result.replayed,
+        ...(result.closeRequestedAt ? { closeRequestedAt: result.closeRequestedAt.getTime() } : {}),
+        ...(result.releaseTransferId ? { releaseTransferId: result.releaseTransferId } : {}),
+      });
+    } catch (error) {
+      return databaseFailure(c, error, "card_close_failed");
+    }
+  };
+
+  app.post("/cards/:id/close", requireAgentSig, (c) => closeCardRoute(c, c.get("agentId")));
+
+  // The single reveal surface, and only in `token` mode. The checkout token is
+  // single-use, hashed at rest, bound by the kernel to the signing agent and a
+  // card that is still pending; the PAN is returned exactly once with no-store
+  // and is never logged or persisted.
+  app.post("/cards/:id/reveal", requireAgentSig, async (c) => {
+    if (cardRevealMode !== "token") return c.json({ error: "card_reveal_unavailable" }, 404);
+    if (!cardIssuer) return c.json({ error: "card_bridge_unavailable" }, 503);
+    const agentId = c.get("agentId");
+    const cardId = c.req.param("id") ?? "";
+    const body = await readBody<{ checkoutToken: string }>(c);
+    if (!validUuid(cardId) || !body || typeof body.checkoutToken !== "string"
+      || body.checkoutToken.length < 16 || body.checkoutToken.length > 512) {
+      return c.json({ error: "invalid_request", reason: "need the card id and its single-use checkoutToken" }, 400);
+    }
+    try {
+      // The kernel binds the consume to both the signer and the card id from
+      // the URL, and refuses BEFORE marking the token consumed on a mismatch,
+      // so posting a token to the wrong card never burns a bounded reveal.
+      const grant = await cards.consumeRevealToken(checkoutTokenHash(body.checkoutToken), agentId, cardId);
+      if (grant.cardId !== cardId || grant.agentId !== agentId) {
+        // Defense in depth only: the kernel has already enforced both bindings.
+        return c.json({ error: "conflict", reason: "checkout token does not belong to this card" }, 409);
+      }
+      let secrets;
+      try {
+        secrets = await cardIssuer.revealCard(grant.providerCardRef);
+      } catch {
+        // Deliberately detail-free: a failed issuer reveal must never leak a
+        // response body that could carry card material.
+        return c.json({ error: "card_reveal_failed", reason: "The issuer reveal request could not be completed." }, 502);
+      }
+      c.header("cache-control", "no-store");
+      return c.json({
+        cardId,
+        pan: secrets.pan,
+        cvc: secrets.cvc,
+        expMonth: secrets.expMonth,
+        expYear: secrets.expYear,
+      });
+    } catch (error) {
+      const code = databaseCode(error);
+      if (code === "55000") return c.json({ error: "conflict", reason: errorMessage(error) }, 409);
+      if (code === "P0002") return c.json({ error: "checkout_token_not_found" }, 404);
+      return databaseFailure(c, error, "card_reveal_failed");
+    }
+  });
+
+  app.get("/owner/cards", requireOwnerAccess, async (c) => {
+    try {
+      return c.json((await cards.list(c.get("userId"), 100)).map(cardView));
+    } catch (error) {
+      return databaseFailure(c, error, "card_list_failed");
+    }
+  });
+  app.post("/owner/cards/:id/close", requireOwnerAccess, (c) => closeCardRoute(c, c.get("userId")));
+
   app.get("/agent/state", requireAgentSig, async (c) => {
     const requested = Number(c.req.query("limit") ?? 25);
     const limit = Number.isSafeInteger(requested) ? Math.max(1, Math.min(100, requested)) : 25;
@@ -1874,6 +2306,63 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     const approval = await policy.approval(userId, approvalId);
     if (!approval) return c.json({ error: "approval_not_found" }, 404);
     try {
+      if (await cards.isCardApproval(userId, approvalId)) {
+        const intent = await cards.byApproval(userId, approvalId);
+        if (!intent) throw new Error("card approval intent could not be read");
+        let result: CardCommandResult;
+        if (approval.status === "pending") {
+          if (!cardIssuer) {
+            return c.json({
+              error: "card_bridge_unavailable",
+              reason: "a card issuer adapter must be configured",
+            }, 503);
+          }
+          const material = await cardIssuer.createCard({
+            cardId: intent.id,
+            capMicros: intent.capMicros,
+            expiresAt: intent.expiresAt,
+            merchantHint: intent.merchantHint,
+            singleUse: intent.singleUse,
+            agentId: intent.agentId,
+            ownerId: userId,
+          });
+          try {
+            result = await cards.resolveApproval(userId, approvalId, "approve", undefined, {
+              provider: cardIssuer.provider,
+              providerCardRef: material.providerCardRef,
+              last4: material.last4,
+              expMonth: material.expMonth,
+              expYear: material.expYear,
+              authTtlSeconds: cardAuthTtlSeconds,
+            });
+          } catch (error) {
+            // Same retry contract as activatePreparedCard: a card-spend pause
+            // keeps the issuer card open so a later owner approve replays
+            // live material instead of a canceled card.
+            if (!isRetryableCardSpendPause(error)) {
+              await cardIssuer.closeCard(material.providerCardRef).catch(() => undefined);
+            }
+            throw error;
+          }
+          if (result.status === "denied") {
+            await cardIssuer.closeCard(material.providerCardRef).catch(() => undefined);
+          }
+        } else {
+          result = await cards.resolveApproval(userId, approvalId, "approve");
+        }
+        const updated = await policy.approval(userId, approvalId);
+        if (!updated) throw new Error("resolved card approval could not be read back");
+        const after = await cards.get(userId, intent.id);
+        return c.json({
+          approval: approvalView(updated),
+          status: result.status === "posted" ? "active" : "denied",
+          ...(result.code ? { code: result.code } : {}),
+          ...(result.reason ? { reason: result.reason } : {}),
+          ...(result.receiptId ? { receiptId: result.receiptId } : {}),
+          ...(after ? { card: cardView(after) } : {}),
+          replayed: result.replayed,
+        }, result.status === "posted" ? 200 : 409);
+      }
       if (await external.isExternalApproval(userId, approvalId)) {
         const intent = await external.secretByApproval(userId, approvalId);
         if (!intent) throw new Error("external approval intent could not be read");
@@ -1899,7 +2388,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
       const payment = await paymentView(userId, result);
       return c.json({ approval: approvalView(updated), payment, replayed: result.replayed }, payment.status === "paid" ? 200 : 409);
     } catch (error) {
-      return databaseFailure(c, error, "approval_failed");
+      return cardFailure(c, error, "approval_failed");
     }
   });
 
@@ -1912,6 +2401,19 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     const body = await readBody<{ reason?: string }>(c);
     const reason = typeof body?.reason === "string" ? body.reason.slice(0, 500) : "rejected by owner";
     try {
+      if (await cards.isCardApproval(userId, approvalId)) {
+        const result = await cards.resolveApproval(userId, approvalId, "reject", reason);
+        const updated = await policy.approval(userId, approvalId);
+        if (!updated) throw new Error("rejected card approval could not be read back");
+        const intent = await cards.byApproval(userId, approvalId);
+        return c.json({
+          approval: approvalView(updated),
+          status: "rejected",
+          ...(result.code ? { code: result.code } : {}),
+          ...(intent ? { card: cardView(intent) } : {}),
+          replayed: result.replayed,
+        });
+      }
       if (await external.isExternalApproval(userId, approvalId)) {
         const result = await external.resolveApproval(userId, approvalId, "reject", reason);
         const updated = await policy.approval(userId, approvalId);
@@ -1939,7 +2441,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   });
   app.get("/dashboard/state", requireOwnerAccess, async (c) => c.json(await ownerSnapshot(c.get("userId"))));
 
-  return { app, control, ledger, policy, marketplace, external, treasury, compliance };
+  return { app, control, ledger, policy, marketplace, external, treasury, compliance, cards };
 }
 
 export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) {
@@ -2003,6 +2505,16 @@ export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) 
     : undefined;
   if (v2PaymentSigner && !rpcVerifier) throw new Error("MONEY_EVM_RPC_URLS is required for independent settlement verification");
   const signupInvites = parseSignupInvites(process.env.MONEY_SIGNUP_INVITES);
+  // Card rail: this process holds the create/close/reveal issuer credential
+  // and never the webhook secrets; preflight enforces the same split.
+  const cardIssuer = process.env.MONEY_CARD_PROVIDER?.trim()
+    ? createCardIssuerFromEnv(process.env, { role: "api" })
+    : undefined;
+  const cardRevealMode = readCardRevealMode(process.env);
+  const cardRevealTokenKey = process.env.MONEY_CARD_REVEAL_TOKEN_KEY;
+  if (cardRevealMode === "token" && (cardRevealTokenKey ?? "").length < 32) {
+    throw new Error("MONEY_CARD_REVEAL_TOKEN_KEY with at least 32 characters is required when MONEY_CARD_REVEAL_MODE=token");
+  }
   const { app } = createPostgresApi(db, {
     allowDevelopmentFunding: process.env.MONEY_ALLOW_DEV_FUNDING === "true",
     ...(signupInvites.length ? { signupInvites } : {}),
@@ -2013,6 +2525,10 @@ export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) 
         complianceProviderName: process.env.MONEY_COMPLIANCE_PROVIDER,
       }
       : {}),
+    ...(cardIssuer ? { cardIssuer } : {}),
+    cardRevealMode,
+    ...(cardRevealTokenKey ? { cardRevealTokenKey: Buffer.from(cardRevealTokenKey, "utf8") } : {}),
+    cardAuthTtlSeconds: readCardAuthTtlSeconds(process.env),
     ...(v2PaymentSigner ? { externalPaymentSigner: v2PaymentSigner } : {}),
     ...(rpcVerifier ? {
       verifyExternalSettlement: ({ authorization, settlement }: ExternalSettlementVerificationInput) => {

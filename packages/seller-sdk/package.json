@@ -1,6 +1,6 @@
 {
   "name": "@agentmoney/seller-sdk",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Seller SDK for the money agent-payment network: a Hono paywall middleware plus a signed client for challenges, receipt redemption, and refunds.",
   "type": "module",
   "scripts": {

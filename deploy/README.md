@@ -25,7 +25,7 @@ The CI build supplies the source commit as the OCI
 `org.opencontainers.image.revision` label. For every successful image build it
 retains one 90-day GitHub Actions artifact named with that commit. The artifact
 contains the local image ID and workflow identity, a runtime contract proving
-numeric non-root execution, all 14 compiled commands, and the absence of a
+numeric non-root execution, all 16 compiled commands, and the absence of a
 shell/npm/Yarn, a CycloneDX inventory, and the machine-readable HIGH/CRITICAL
 scan report, covered by a sorted `SHA256SUMS` manifest. The upload step runs
 even when the vulnerability gate fails, so the blocking evidence is not lost.
@@ -83,6 +83,8 @@ needs:
 | `compliance-reviews.env` | `money_risk_worker` | none |
 | `compliance-ops.env` | `money_compliance_ops` | random 32+ character ops token |
 | `compliance-console.env` | `money_compliance_console` | none; operators authenticate with their own Ed25519 keys |
+| `card-authorization.env` | `money_card_ingress` | card issuer webhook secrets and endpoint ID only; never an issuer API key |
+| `card-events.env` | `money_card_worker` | read-only card issuer event key and issuer base URL |
 
 Every file needs `NODE_ENV=production`; HTTP services also need
 `MONEY_BIND_HOST=0.0.0.0`. Service PostgreSQL URLs must use a passworded
@@ -100,7 +102,7 @@ docker run --rm --env-file <runtime>/api.env <image-digest> dist/deploy/prefligh
 docker run --rm --env-file <runtime>/compliance-webhook.env <image-digest> dist/deploy/preflight.js compliance-webhook
 ```
 
-The repository verifier first proves that all 14 Compose commands exist in the
+The repository verifier first proves that all 16 Compose commands exist in the
 compiled artifact, that each service accepts a synthetic least-authority
 environment, and that each rejects one representative leaked authority. Then
 repeat the image command for every service name in the Compose file using its
@@ -126,8 +128,8 @@ change production schema.
    both inquiry templates and all three required report templates; screening
    expiry is a separately reviewed parameter.
 4. Start the API and webhook ingresses behind TLS. Expose only ports 4021,
-   4023, and 4024 through the edge; keep ops and the reviewer console on the
-   administrative network with SSO/VPN access controls.
+   4023, 4024, and 4027 through the edge; keep ops and the reviewer console
+   on the administrative network with SSO/VPN access controls.
 5. Configure Persona to deliver `inquiry.approved`, `inquiry.declined`,
    `inquiry.marked-for-review`, plus `ready`, `matched`, `dismissed`, and
    `errored` events for individual and business watchlist reports. Keep its

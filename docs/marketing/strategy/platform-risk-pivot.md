@@ -107,6 +107,11 @@ What differs per trigger is which leg leads the argument.
 
 ## Monthly tripwire checklist (first Monday; log date + verdict per row)
 
+Last re-score 2026-08-23 (v0.14 card-rail panel; verdicts unverified, best
+score 2.5/5 — no trigger). **Next scheduled re-score: 2026-10-22.** Rows to
+watch since the card rail shipped: Stripe Link standing rules, the Coinbase
+policy engine, Crossmint guardrails, and the Mercury API.
+
 Verdict per row: `caps-only` / `partial` / `MANDATE-GRADE` (three+ criteria
 above, shipped and documented). Any MANDATE-GRADE verdict starts the one-week
 clock.

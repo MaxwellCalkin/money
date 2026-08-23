@@ -50,6 +50,20 @@ release gate), published SDKs: `@agentmoney/wallet-mcp`,
 `@agentmoney/seller-sdk` (Apache-2.0, npm, verified cold-install).
 
 ### M1 — The network exists and is findable (weeks 0–4)
+
+**Amendment (2026-08-23): the M1 headline becomes the card.** "Fund → mandate
+→ agent buys at an ordinary merchant → visibly declined off-mandate → pays
+another agent → one feed" replaces the x402-only demo as the funnel asset; the
+x402 mainnet payment remains the M1 gate's real-money evidence.
+**Engineering-cap exception:** one week, justified because the product could
+not do the headline sentence at all; the exception ships with its distribution
+artifacts (demo transcript, README cast, Stripe readiness kit, launch post) in
+the same change and does not renew without a gate. Copy is commercial-use and
+sandbox-labeled until Stripe approves the platform track. Unit economics
+noted: Connect's ~2.9% + $0.30 per hop makes sub-$5 agent-to-agent
+uneconomic, so x402 stays the micro rail and cards/Connect carry $5–$500
+flows.
+
 The funnel ships here, not at M3 — these are acquisition instruments:
 
 - **Hosted beta deploy profile** (agent): postgres + pgbouncer + api:db +
@@ -129,6 +143,68 @@ Primary: ≥$25k external check or accelerator acceptance (incorporation
 trigger fires here). Secondary: $1–2k MRR. Tertiary: $1M cumulative mainnet
 GMV. **Standing review at week 16:** if the M2 gate has never been touched,
 this ladder gets a kill/pivot decision, not another engineering sprint.
+
+## The long sequence (adopted 2026-08-23)
+
+Moves and gates from the card rail to the network. Each move has an explicit
+gate; nothing advances on green tests alone.
+
+1. **Rail in repo, headline true in sandbox (v0.14 session).** Gate: `0012`
+   merged, suite green, `npm run demo:card` transcript committed, no card
+   number in any agent-facing output, role matrix proven.
+2. **Real issuer traffic in test mode (week 1–2, founder ask: Stripe
+   test-mode Issuing).** Gate: a Stripe test authorization whose
+   `request_history` shows our webhook decision, a declined $400 MCC 6051
+   attempt, fixtures recorded, the Stripe adapter green against them,
+   wallet-mcp 0.14 published, launch post and transcript posted in founder
+   voice.
+3. **Founder-entity commercial beta (weeks 2–8, after entity + own-business
+   Issuing approval; founder's own money, ≤ $500 exposure).** The founder's
+   agents buy APIs, data, and compute at ordinary merchants under mandates;
+   strangers use the hosted sandbox (no real funds) via invite; zero customer
+   funds touch agentmoney. Gate: 20 real authorizations at ordinary merchants
+   with zero out-of-mandate captures and a reconciled `ledger_health` report;
+   10 strangers complete the sandbox loop in under 10 minutes; the M2
+   retention gate unchanged (≥ 8 external wallets active in ≥ 3 distinct
+   weeks on x402/sandbox).
+4. **Platform program: per-owner connected accounts (months 2–5, gated on
+   Stripe approval).** Owners fund their own Issuing balances from their own
+   banks; the Persona perimeter feeds requirement collection; agent-to-agent
+   across owners settles as a Connect PaymentIntent with the receipt hash;
+   this is the first M3 "letter with a number" candidate. Gate: approval
+   letter, 100 funded owner accounts, $10k/month card GMV, interchange share
+   negotiated. Kill/pivot: no approval by month 5 → switch the live adapter
+   to Lithic's sponsor-bank program (second adapter) or stay commercial-only.
+5. **Zero-exposure fill becomes the standard (months 3–8).**
+   `@agentmoney/checkout-fill` (host-invoked, never the model), seller-sdk
+   checkout-token acceptance, browser-extension fill, Visa Trusted Agent
+   Protocol signatures, owner push as the 3DS/OTP step-up surface. Gate: a
+   second runtime (not Claude) ships the skill; sellers accepting checkout
+   tokens outnumber raw-reveal users (raw reveal still off by default).
+6. **Mandate as the standard, agentmoney as neutral enabler (months 6–12).**
+   Publish the mandate/receipt spec (AP2 vocabulary, interop test vectors),
+   join the cross-issuer agent-payments alliances, surface network agent
+   tokens behind the same card id, Lithic live as second issuer. Gate: one
+   external wallet or runtime verifying agentmoney receipts; > 50% of card
+   GMV through adapters we do not exclusively control; M4 crossed (≥ $25k
+   external check or accelerator, or $1–2k MRR, or $1M cumulative GMV).
+7. **Own the float economics (years 1–2).** Treasury-for-platforms financial
+   accounts for true wallet-to-wallet ledgers under the provider's licenses;
+   revenue = interchange share + take-rate on agent-to-agent + hosted control
+   plane; raise on retention data. Gate: $10M/month GMV, contribution-margin
+   positive per funded agent, Series A.
+8. **The bank for agents (years 2–5).** Agent-to-agent volume exceeds
+   agent-to-merchant volume by count; international via stablecoin-settled
+   cards and MiCA-compliant self-custody x402; charter or bank partnership so
+   agentmoney issues BINs and becomes the identity + policy + settlement
+   layer agents default to. Gate: billions in annual GMV, license portfolio,
+   default spend account in the top agent runtimes.
+
+Standing tripwire (unchanged in substance, date reset to **2026-10-22**):
+re-score Stripe Link standing rules, the Coinbase policy engine, Crossmint
+guardrails, and the Mercury API against the 5-criteria mandate test in
+`docs/marketing/strategy/platform-risk-pivot.md`; pivot if any platform
+reaches 3/5.
 
 ## Operating principles
 

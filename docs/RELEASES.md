@@ -1,9 +1,66 @@
 # Release milestones
 
+## v0.14 — the card rail
+
+Status: release candidate (supersedes v0.13 as the current candidate; the
+verification-gate procedure below is shared and its migration/service counts
+now reflect v0.14). Publish only after every gate is recorded green for the
+exact commit and production image digest.
+
+### Product changes
+
+- Adds migration `0012` and the reserved-card rail (`src/cards/*`,
+  `src/db/cards.ts`): virtual cards under existing mandates whose full cap is
+  reserved from the agent's funds at issue with one `card_reserve` transfer,
+  one receipt, an atomic risk decision, and at most one exact-tuple owner
+  approval; a fixed twelve-step decline ladder decided synchronously by a
+  dedicated `money_card_ingress` role that locks one card row and can post no
+  transfer; durable issuer-event ingestion (`money_card_worker`) that
+  re-fetches every clearing, void, refund, and card-close from the issuer
+  before any ledger command; bounded overcapture tolerance; refunds capped by
+  settled amounts that never restore mandate authority; and reserve release
+  on close/expiry. `ledger_health()` gains a card clause and the treasury
+  breaker family gains an explicitly operator-enabled `card_spend_enabled`
+  control that every breaker trip clears.
+- The card number never enters model context: no MCP reveal tool, issuer
+  parsers strip secret fields, reveal mode defaults to `none`, and `token`
+  mode uses single-use hashed checkout tokens (10-minute TTL, 3 per card)
+  bound to the signing agent and card. Compliance fails closed per
+  `card:hint:<host>` merchant counterparty.
+- Two new production services (`card-authorization` on :4027, `card-events`)
+  with segregated credentials: the ingress holds only webhook secrets, the
+  worker only a read-only issuer key, the API only the create/close/reveal
+  key. Preflight, the 16-service deployment verifier, the beta profile, and
+  `db/roles.sql` enforce the split; the mock issuer is refused in production.
+- A Stripe Issuing adapter tested against recorded fixtures only (live
+  sandbox never called in CI; wire details listed as unverified in
+  `docs/CARD_RAIL.md` must be recorded before go-live), plus a Stripe-shaped
+  mock issuer network for the deterministic `npm run demo:card` transcript.
+- Distribution artifacts shipped with the code: `docs/CARD_RAIL.md`, the demo
+  transcript, the README cast, the Stripe readiness kit, the launch-post
+  draft, and an enforced vocabulary lint (`npm run lint:vocabulary`) for the
+  reserved-card lexicon.
+
+### v0.14-specific gates (in addition to the shared gates below)
+
+- `npx vitest run` green including `test/postgres-cards.test.ts`,
+  `test/postgres-cards-api.test.ts`, `test/card-issuer-mock.test.ts`,
+  `test/card-workers.test.ts`, and `test/vocabulary.test.ts`; the live gate
+  (`npm run test:postgres-live`) additionally races 20 independent
+  authorization decisions against one card cap.
+- No 13-19 digit run in any captured agent/owner body, MCP text, or log line
+  during the full card loop (asserted by the cards API suite).
+- The role matrix proves `money_card_ingress` can only decide/enqueue,
+  `money_card_worker` cannot decide or prepare, and `money_app` can do
+  neither; direct `post_card_transfer` from application roles fails.
+- `npm run demo:card` exits 0 and its committed transcript
+  (`docs/marketing/demo/agent-card-transcript.md`) carries the sandbox label.
+
 ## v0.13 — Persona and production deployment perimeter
 
-Status: release candidate. Publish only after every verification gate below is
-recorded green for the exact commit and production image digest.
+Status: shipped candidate, superseded by v0.14. Publish only after every
+verification gate below is recorded green for the exact commit and production
+image digest.
 Copy `docs/RELEASE_EVIDENCE_TEMPLATE.md` for the candidate and attach a command
 result, workflow/provider reference, live configuration export, or artifact
 hash to every applicable row. A checked box or committed config file is not
@@ -97,13 +154,13 @@ Additionally:
    manifest digest; do not substitute the local image ID for that digest.
 3. Run `npm run test:postgres-live` against an explicitly disposable loopback
    PostgreSQL 18 database with data checksums enabled. The gate applies all
-   migrations through `0011`, proves a no-op replay, applies `db/roles.sql`
+   migrations through `0012`, proves a no-op replay, applies `db/roles.sql`
    twice, checks effective roles and removed bypasses, races independent
    connections against one spending cap, and reconciles the journal. Repeat on
    an isolated production-shaped restore for the backup/forward-repair drill.
 4. Run `npm run verify:deployment`, render `deploy/compose.production.yaml`,
    and confirm every compiled command is present in the image. The deterministic
-   verifier must report 14 positive and 14 leaked-authority negative preflights;
+   verifier must report 16 positive and 16 leaked-authority negative preflights;
    repeat inside the candidate image with the real service credential files.
 5. Exercise Persona sandbox approval, decline, review, pending-report retry,
    duplicate and reordered delivery, current/old webhook-secret overlap,

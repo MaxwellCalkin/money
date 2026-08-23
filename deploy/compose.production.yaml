@@ -141,6 +141,30 @@ services:
       timeout: 3s
       retries: 4
 
+  # Card authorization ingress: answers the issuer's synchronous
+  # issuing_authorization.request inside the network deadline. It holds only
+  # the webhook secrets and the money_card_ingress database login; expose
+  # :4027 to the issuer exclusively through the authenticated TLS edge.
+  card-authorization:
+    <<: *money-service
+    command: [dist/cards/authorization-server.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/card-authorization.env"]
+    ports:
+      - ${MONEY_CARD_AUTHORIZATION_BIND:-127.0.0.1}:4027:4027
+    healthcheck:
+      test: [CMD, /nodejs/bin/node, -e, "fetch('http://127.0.0.1:4027/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+
+  # Card event worker: drains the durable card event inbox, re-fetching every
+  # event and object from the issuer with a read-only key before any ledger
+  # command. Internal network only; no listening socket.
+  card-events:
+    <<: *money-service
+    command: [dist/cards/event-worker.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/card-events.env"]
+
 networks:
   money-internal:
     internal: false

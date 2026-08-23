@@ -1,7 +1,7 @@
 {
   "name": "@agentmoney/wallet-mcp",
-  "version": "0.13.0",
-  "description": "MCP wallet for AI agents on the money network: check balance, pay accounts, and auto-pay 402-gated URLs under an owner-signed mandate.",
+  "version": "0.14.0",
+  "description": "MCP wallet for AI agents on the money network: check what the mandate allows, pay accounts, auto-pay 402-gated URLs, and request reserved virtual cards under an owner-signed spend mandate.",
   "type": "module",
   "scripts": {
     "prepack": "node ../../scripts/build-packages.mjs"

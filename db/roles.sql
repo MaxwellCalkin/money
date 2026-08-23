@@ -52,6 +52,12 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'money_compliance_console') then
     create role money_compliance_console nologin;
   end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_card_ingress') then
+    create role money_card_ingress nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_card_worker') then
+    create role money_card_worker nologin;
+  end if;
 end $$;
 
 revoke all on schema public from public;
@@ -68,19 +74,19 @@ revoke all on schema money, money_private from
   money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
   money_compliance_admin, money_compliance_worker, money_compliance_ingress,
   money_risk_worker, money_compliance_ops, money_compliance_onboarding,
-  money_compliance_console;
+  money_compliance_console, money_card_ingress, money_card_worker;
 revoke all on all tables in schema money from
   money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
   money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
   money_compliance_admin, money_compliance_worker, money_compliance_ingress,
   money_risk_worker, money_compliance_ops, money_compliance_onboarding,
-  money_compliance_console;
+  money_compliance_console, money_card_ingress, money_card_worker;
 revoke all on all functions in schema money_private from
   money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
   money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
   money_compliance_admin, money_compliance_worker, money_compliance_ingress,
   money_risk_worker, money_compliance_ops, money_compliance_onboarding,
-  money_compliance_console;
+  money_compliance_console, money_card_ingress, money_card_worker;
 
 grant usage on schema money, money_private to money_app;
 grant select on money.schema_migrations, money.accounts, money.assets, money.services to money_app;
@@ -143,11 +149,59 @@ grant execute on function
   money_private.list_treasury_fundings(text,integer),
   money_private.list_treasury_exposures(text,integer),
   money_private.treasury_control_state(),
+  money_private.card_spend_control_state(),
   money_private.begin_compliance_verification(text,text,text,bigint,bigint),
   money_private.compliance_subject_state(text),
   money_private.request_compliance_verification_session(text,text,text),
   money_private.compliance_verification_session_state(text,uuid)
   to money_app;
+
+-- Card rail: the product role requests, activates, resolves, closes, reads and
+-- issues reveal tokens for cards under its own tenants. It can neither decide
+-- an authorization nor settle, void, or refund one; those belong to the
+-- segregated ingress and worker identities below.
+grant execute on function
+  money_private.prepare_card(uuid,text,text,bigint,boolean,text,text[],timestamptz),
+  money_private.activate_card(text,uuid,text,text,text,smallint,smallint,integer),
+  money_private.resolve_card_approval(text,uuid,text,text,text,text,text,smallint,smallint,integer),
+  money_private.close_card(text,uuid,text),
+  money_private.list_cards_for_requester(text,integer),
+  money_private.get_card_for_requester(text,uuid),
+  money_private.get_card_for_agent_by_key(text,text),
+  money_private.get_card_by_approval_for_owner(text,uuid),
+  money_private.is_card_approval(text,uuid),
+  money_private.list_card_authorizations_for_requester(text,uuid,integer),
+  money_private.issue_card_reveal_token(text,uuid,bytea,integer),
+  money_private.consume_card_reveal_token(bytea,text,uuid)
+  to money_app;
+
+-- Issuer authorization ingress: one synchronous decision against an existing
+-- reserve plus a durable enqueue. It cannot settle, void, refund, prepare,
+-- activate, read a card, or post any transfer.
+grant usage on schema money, money_private to money_card_ingress;
+grant execute on function
+  money_private.decide_card_authorization(text,text,text,text,bigint,text,text,text,text,integer),
+  money_private.enqueue_card_provider_event(text,text,text,bytea)
+  to money_card_ingress;
+
+-- Issuer event worker: applies exact evidence it re-fetched from the issuer
+-- (clearings, voids, refunds), drains issuer-side closes, and may trip but never
+-- reopen the breaker. It cannot decide an authorization or request a card.
+grant usage on schema money, money_private to money_card_worker;
+grant execute on function
+  money_private.record_card_provider_event(text,text,text,text,bytea,jsonb),
+  money_private.claim_card_provider_events(text,integer),
+  money_private.complete_card_provider_event(text,bigint,text),
+  money_private.fail_card_provider_event(text,bigint,text,integer,boolean),
+  money_private.settle_card_authorization(text,text,text,bigint,timestamptz,bytea,jsonb,integer),
+  money_private.void_card_authorization(text,text,text,timestamptz,bytea,jsonb),
+  money_private.refund_card_authorization(text,text,text,text,bigint,timestamptz,bytea,jsonb),
+  money_private.list_cards_awaiting_issuer_close(integer),
+  money_private.get_card_authorization_by_ref(text,text),
+  money_private.get_card_by_provider_ref(text,text),
+  money_private.mark_card_issuer_closed(uuid,text),
+  money_private.trip_treasury_breaker(text)
+  to money_card_worker;
 
 -- Product traffic can submit a non-PII onboarding profile and read only its
 -- own sanitized status. Approval, screening details, cases, and reasons are
@@ -240,7 +294,10 @@ grant execute on function
   money_private.configure_treasury_controls(boolean,boolean,boolean,bigint,bigint,bigint,bigint,text),
   money_private.restore_treasury_controls(text),
   money_private.release_treasury_freeze(text,text),
+  money_private.set_card_spend_enabled(boolean,text),
+  money_private.resolve_card_provider_event(bigint,text,text,text),
   money_private.treasury_control_state(),
+  money_private.card_spend_control_state(),
   money_private.treasury_health()
   to money_treasury;
 
@@ -288,7 +345,10 @@ grant execute on function
 
 grant usage on schema money, money_private to money_worker;
 grant select, update on money.outbox_events to money_worker;
-grant execute on function money_private.sweep_external_payments(integer) to money_worker;
+grant execute on function money_private.sweep_external_payments(integer),
+  money_private.sweep_card_authorizations(integer),
+  money_private.sweep_cards(integer)
+  to money_worker;
 
 -- Re-encryption is isolated from the application, treasury, and worker. This
 -- role can replace ciphertext only when the caller supplies the unchanged
@@ -310,7 +370,10 @@ grant select on money.schema_migrations, money.accounts, money.assets,
   money.treasury_provider_events, money.treasury_fundings,
   money.treasury_exposures, money.treasury_freezes,
   money.treasury_payouts, money.treasury_payout_reviews, money.treasury_asset_accounts,
-  money.treasury_asset_snapshots, money.treasury_poll_cursors
+  money.treasury_asset_snapshots, money.treasury_poll_cursors,
+  money.cards, money.card_authorizations, money.card_refunds,
+  money.card_reveal_tokens, money.card_event_inbox, money.card_event_reviews,
+  money.card_provider_events
   to money_ops;
 grant execute on function money_private.ledger_health(), money_private.treasury_health() to money_ops;
 -- Ops records ledger-health verdicts; the product role may only read the

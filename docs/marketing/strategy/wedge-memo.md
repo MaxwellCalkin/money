@@ -20,4 +20,23 @@
 
 **The moat mechanism, honestly.** Today the defensible asset is a codebase and a position — that is an assertion, not a moat, and our own roadmap says so. The moat is built in two moves. First, publish the mandate format as an open spec (RFC, test vectors, Apache-2.0, separate repo) so wallets, registries, and sellers can verify mandate receipts without us; the format is deliberately commoditized. Second, operate the evidence: every receipt is SHA-256 hash-chained to its predecessor, tampering breaks the chain forward, and the planned public metrics page publishes funding lineage (which mechanically excludes both Artemis wash patterns — same-wallet self-dealing and seller-funded buyers), retention cohorts, and weekly chain roots. The spec spreads the format; the operator accumulates the verified evidence graph. Each third party that verifies our receipts raises the cost of displacing the operator without locking anyone in — switching away is free, but the history is ours. In a market where half the headline volume was shown to be fake, the honest metrics authority is a product, and honest zeroes today are its first proof: nothing on our journal is faked, including the absence of traffic.
 
+**Addendum (2026-08-23): the card is table stakes; the policy plane is the
+moat.** v0.14 ships the reserved-card rail — a Visa/Mastercard virtual card
+borrows every merchant on earth as supply on day one, so the only side left to
+recruit is funded agents. That is deliberately the commodity half: since
+2026-08-08 the field has moved to confirm it. Per panel research 2026-08-23,
+all UNVERIFIED this session: Mercury shipped Agent Cards inside its business
+banking perimeter; Rain launched an Agentic Payments Alliance around
+issuer-side agent controls; Stripe is extending Link toward agent checkout
+("Link for agents"); and OpenAI's Instant Checkout has reportedly been
+retired. The monthly tripwire re-score puts the best competitor at 2.5/5 on
+the five-criteria mandate test (same panel, unverified) — every one of these
+ships a card or a checkout, none ships standing mandates with an escalation
+line, exact-tuple approvals, a new-payee throttle bound to a SQL-computed
+merchant key, and hash-chained receipts across card, closed-loop, and x402
+rails from one policy engine. Our card exists to make the mandate engine
+demonstrable at ordinary merchants; the defensible asset is unchanged, and
+every claim above must be re-verified before it appears in anything
+customer-facing.
+
 **Pre-mortem: how this loses.** (1) A platform ships mandate-grade policy natively — Anthropic, OpenAI, or Coinbase moves beyond session caps — and distribution beats neutrality; our monthly tripwire watches for exactly this, and the pre-drafted pivot is the cross-runtime policy-and-evidence plane above platform wallets. (2) Demand never arrives: real x402 volume is roughly $28k/day, and agent spend may stay on API keys and corporate cards; the plan's kill criterion (pilots not transacting by week 8) forces a pivot to mandating real-world API spend where budgets already exist. (3) The spec succeeds and the operator is captured — an incumbent adopts the open mandate format and outsells us running it; partial loss by design, since the spec's adoption is also the thesis winning. (4) Solo-founder distribution failure — this project's documented failure mode is building v0.14 instead of finding user #2; engineering is capped at ~10% of hours for that reason. (5) Regulatory drag: holding real customer funds requires a sponsor-bank program we do not have; until then the closed loop is sandbox-labeled and the real-money path is pass-through x402 under hard caps — the code enforces this boundary, and crossing it early would be the unforced error.

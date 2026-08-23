@@ -8,6 +8,12 @@ import {
   createComplianceProviderFromEnv,
   createComplianceWebhookCodecFromEnv,
 } from "../compliance/runtime.ts";
+import {
+  parseCardWebhookSecrets,
+  readCardAuthTtlSeconds,
+  readCardOvercaptureBps,
+  readCardWebhookToleranceSeconds,
+} from "../cards/runtime.ts";
 
 const SERVICES = [
   "api",
@@ -23,6 +29,8 @@ const SERVICES = [
   "compliance-reviews",
   "compliance-ops",
   "compliance-console",
+  "card-authorization",
+  "card-events",
   "migrate",
 ] as const;
 
@@ -59,6 +67,12 @@ const SEGREGATED_AUTHORITY = [
   "MONEY_EVM_RPC_URLS",
   "MONEY_EVM_SIGNER_TOKEN",
   "MONEY_TREASURY_EVM_ASSETS",
+  "MONEY_CARD_INGRESS_DATABASE_URL",
+  "MONEY_CARD_WORKER_DATABASE_URL",
+  "MONEY_CARD_WEBHOOK_SECRETS",
+  "MONEY_CARD_ISSUER_API_KEY",
+  "MONEY_CARD_EVENT_API_KEY",
+  "MONEY_CARD_REVEAL_TOKEN_KEY",
   "MONEY_OPS_TOKEN",
   "MONEY_COMPLIANCE_OPS_TOKEN",
   "MONEY_COMPLIANCE_OPERATOR_KEY",
@@ -91,6 +105,32 @@ function exactlyOne(env: Environment, ...names: string[]): void {
     throw new Error(`configure exactly one of ${names.join(", ")}`);
   }
   required(env, present[0]!);
+}
+
+function oneOf(
+  env: Environment,
+  name: string,
+  allowed: readonly string[],
+  fallback?: string,
+): string {
+  const value = env[name]?.trim() || fallback;
+  if (value === undefined) throw new Error(`${name} is not configured`);
+  if (!allowed.includes(value)) {
+    throw new Error(`${name} must be one of ${allowed.join(", ")}`);
+  }
+  return value;
+}
+
+/** Every card service names its issuer, and production never runs the mock:
+ * the mock issuer is in-process sandbox state with no authenticated upstream,
+ * so accepting it here would let a "production" ingress approve authorizations
+ * against fabricated traffic. */
+function cardProvider(env: Environment): string {
+  const provider = oneOf(env, "MONEY_CARD_PROVIDER", ["stripe-issuing", "mock"]);
+  if (provider === "mock") {
+    throw new Error("the mock card issuer is forbidden in production");
+  }
+  return provider;
 }
 
 function restrictAuthority(env: Environment, ...allowed: string[]): void {
@@ -181,8 +221,25 @@ function validateApi(env: Environment): void {
   }
   evmRpcNetworks(env);
   if (env.MONEY_ALLOW_DEV_FUNDING === "true" || env.MONEY_EXTERNAL_MOCK === "true"
-    || env.MONEY_EVM_PRIVATE_KEY) {
-    throw new Error("development funding, mock settlement, and local EVM keys are forbidden in production");
+    || env.MONEY_CARD_PROVIDER?.trim() === "mock" || env.MONEY_EVM_PRIVATE_KEY) {
+    throw new Error(
+      "development funding, mock settlement, the mock card issuer, and local EVM keys are forbidden in production",
+    );
+  }
+  if (env.MONEY_CARD_PROVIDER?.trim()) {
+    const provider = oneOf(env, "MONEY_CARD_PROVIDER", ["stripe-issuing", "mock"]);
+    httpsUrl(env, "MONEY_CARD_ISSUER_BASE_URL");
+    secret(env, "MONEY_CARD_ISSUER_API_KEY", 16);
+    if (provider === "stripe-issuing") required(env, "MONEY_CARD_STRIPE_CARDHOLDER_ID");
+    secret(env, "MONEY_CARD_REVEAL_TOKEN_KEY", 32);
+    oneOf(env, "MONEY_CARD_REVEAL_MODE", ["none", "token"], "none");
+    forbidden(
+      env,
+      "MONEY_CARD_WEBHOOK_SECRETS",
+      "MONEY_CARD_EVENT_API_KEY",
+      "MONEY_CARD_INGRESS_DATABASE_URL",
+      "MONEY_CARD_WORKER_DATABASE_URL",
+    );
   }
   forbidden(
     env,
@@ -199,6 +256,8 @@ function validateApi(env: Environment): void {
     "MONEY_COMPLIANCE_SESSION_KEYS",
     "MONEY_EVM_RPC_URLS",
     "MONEY_EVM_SIGNER_TOKEN",
+    "MONEY_CARD_ISSUER_API_KEY",
+    "MONEY_CARD_REVEAL_TOKEN_KEY",
   );
 }
 
@@ -320,6 +379,26 @@ export function preflightProductionService(
       forbidden(env, "MONEY_COMPLIANCE_PROVIDER_API_KEY", "MONEY_COMPLIANCE_SESSION_KEYS");
       serverBinding(env);
       restrictAuthority(env, "MONEY_COMPLIANCE_CONSOLE_DATABASE_URL");
+      break;
+    case "card-authorization":
+      database(env, "MONEY_CARD_INGRESS_DATABASE_URL");
+      cardProvider(env);
+      required(env, "MONEY_CARD_WEBHOOK_ENDPOINT_ID");
+      parseCardWebhookSecrets(env.MONEY_CARD_WEBHOOK_SECRETS);
+      readCardAuthTtlSeconds(env);
+      readCardWebhookToleranceSeconds(env);
+      forbidden(env, "MONEY_CARD_ISSUER_API_KEY", "MONEY_CARD_EVENT_API_KEY", "DATABASE_URL");
+      serverBinding(env);
+      restrictAuthority(env, "MONEY_CARD_INGRESS_DATABASE_URL", "MONEY_CARD_WEBHOOK_SECRETS");
+      break;
+    case "card-events":
+      database(env, "MONEY_CARD_WORKER_DATABASE_URL");
+      cardProvider(env);
+      secret(env, "MONEY_CARD_EVENT_API_KEY", 16);
+      httpsUrl(env, "MONEY_CARD_ISSUER_BASE_URL");
+      readCardOvercaptureBps(env);
+      forbidden(env, "MONEY_CARD_WEBHOOK_SECRETS", "MONEY_CARD_ISSUER_API_KEY", "DATABASE_URL");
+      restrictAuthority(env, "MONEY_CARD_WORKER_DATABASE_URL", "MONEY_CARD_EVENT_API_KEY");
       break;
     case "migrate":
       database(env, "DATABASE_URL");

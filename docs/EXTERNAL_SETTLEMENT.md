@@ -14,6 +14,12 @@ The older x402 v1 implementation remains for local compatibility tests. The
 command-line production path enables v2 only; mock mode is refused when
 `NODE_ENV=production`.
 
+The card rail (`docs/CARD_RAIL.md`) is the sibling edge for ordinary
+merchants: the same prepare -> approve -> atomic-recheck -> pending -> worker
+pattern, with the reserve posted at issue instead of a signature at spend.
+Sub-$5 machine-to-machine flows stay here on x402; reserved cards carry the
+$5-$500 merchant flows.
+
 ## Lifecycle
 
 ```text

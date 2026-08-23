@@ -11,6 +11,13 @@
 		reverse_proxy database-ops:4022
 	}
 
+	# Issuer webhooks (authorization decisions + async events) go straight to
+	# the card authorization ingress; the path is preserved because the
+	# service routes on /webhooks/:provider/....
+	handle /webhooks/* {
+		reverse_proxy card-authorization:4027
+	}
+
 	handle {
 		reverse_proxy api:4021
 	}

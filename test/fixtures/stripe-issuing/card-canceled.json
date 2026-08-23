@@ -1,0 +1,53 @@
+{
+  "id": "ic_1QfFixture0000000000001",
+  "object": "issuing.card",
+  "brand": "Visa",
+  "cancellation_reason": "requested_by_customer",
+  "cardholder": {
+    "id": "ich_1QfFixtureCardholder001",
+    "object": "issuing.cardholder",
+    "livemode": false,
+    "name": "Agentmoney Sandbox",
+    "status": "active",
+    "type": "company"
+  },
+  "created": 1755907200,
+  "currency": "usd",
+  "exp_month": 8,
+  "exp_year": 2029,
+  "last4": "4242",
+  "livemode": false,
+  "metadata": {
+    "agentmoney_card": "7b1c9c4e-3f2a-4d1b-9e5f-1a2b3c4d5e6f",
+    "agentmoney_agent": "agent:demo-buyer"
+  },
+  "replaced_by": null,
+  "replacement_for": null,
+  "replacement_reason": null,
+  "shipping": null,
+  "spending_controls": {
+    "allowed_categories": null,
+    "blocked_categories": null,
+    "spending_limits": [
+      {
+        "amount": 2900,
+        "categories": [],
+        "interval": "per_authorization"
+      }
+    ],
+    "spending_limits_currency": "usd"
+  },
+  "status": "canceled",
+  "type": "virtual",
+  "wallets": {
+    "apple_pay": {
+      "eligible": false,
+      "ineligible_reason": "missing_cardholder_contact"
+    },
+    "google_pay": {
+      "eligible": false,
+      "ineligible_reason": "missing_cardholder_contact"
+    },
+    "primary_account_identifier": null
+  }
+}

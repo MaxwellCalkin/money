@@ -80,6 +80,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0009", applied: false }),
       expect.objectContaining({ version: "0010", applied: false }),
       expect.objectContaining({ version: "0011", applied: false }),
+      expect.objectContaining({ version: "0012", applied: false }),
     ]);
     const rows = await db.query<{ version: string; checksum: string }>("select version, checksum from money.schema_migrations");
     expect(rows.rows).toEqual([
@@ -94,6 +95,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0009", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0010", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0011", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
+      expect.objectContaining({ version: "0012", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
     ]);
     await db.query("update money.schema_migrations set checksum = repeat('0', 64) where version = '0001'");
     await expect(runMigrations(db)).rejects.toThrow(/checksum changed/);
@@ -237,12 +239,12 @@ describe("Postgres ledger kernel", () => {
     expect((await app.request("/health/live")).status).toBe(200);
     const ready = await app.request("/health/ready");
     expect(ready.status).toBe(200);
-    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0011" }));
+    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0012" }));
     expect((await app.request("/ops/reconcile")).status).toBe(404);
     expect((await app.request("/ops/treasury")).status).toBe(404);
     const reconciled = await app.request("/ops/reconcile", { headers: { authorization: "Bearer ops-secret" } });
     expect(reconciled.status).toBe(200);
-    expect(await reconciled.json()).toEqual({ ok: true, checked: 6, mismatches: [] });
+    expect(await reconciled.json()).toEqual({ ok: true, checked: 7, mismatches: [] });
     const treasuryHealth = await app.request("/ops/treasury", { headers: { authorization: "Bearer ops-secret" } });
     expect(treasuryHealth.status).toBe(503);
     expect(await treasuryHealth.json()).toEqual(expect.objectContaining({
@@ -379,6 +381,45 @@ describe("Postgres ledger kernel", () => {
       compliance_console_table: boolean;
       ops_compliance_table: boolean;
       ops_compliance_inquiry_table: boolean;
+      app_card_prepare: boolean;
+      app_card_activate: boolean;
+      app_card_resolve: boolean;
+      app_card_close: boolean;
+      app_card_reveal: boolean;
+      app_card_decide: boolean;
+      app_card_settle: boolean;
+      app_card_kernel: boolean;
+      app_card_sweep: boolean;
+      app_card_table: boolean;
+      card_ingress_decide: boolean;
+      card_ingress_enqueue: boolean;
+      card_ingress_settle: boolean;
+      card_ingress_prepare: boolean;
+      card_ingress_claim: boolean;
+      card_ingress_table: boolean;
+      card_worker_settle: boolean;
+      card_worker_void: boolean;
+      card_worker_refund: boolean;
+      card_worker_claim: boolean;
+      card_worker_close_drain: boolean;
+      card_worker_read_by_ref: boolean;
+      card_ingress_read_by_ref: boolean;
+      card_worker_trip: boolean;
+      app_control_state: boolean;
+      app_card_spend_state: boolean;
+      treasury_card_spend_state: boolean;
+      card_worker_card_spend_state: boolean;
+      card_worker_decide: boolean;
+      card_worker_prepare: boolean;
+      card_worker_enqueue: boolean;
+      card_worker_restore: boolean;
+      card_worker_table: boolean;
+      worker_card_sweep: boolean;
+      worker_card_auth_sweep: boolean;
+      treasury_card_spend: boolean;
+      treasury_card_decide: boolean;
+      ops_card_table: boolean;
+      ops_card_authorizations_table: boolean;
     }>(`
       select
         has_function_privilege('money_app', 'money_private.post_agent_payment(text,text,text,text,bigint,text,jsonb)', 'EXECUTE') as app_pay,
@@ -502,7 +543,46 @@ describe("Postgres ledger kernel", () => {
         has_function_privilege('money_compliance_console', 'money_private.configure_risk_limits(text,bigint,bigint,bigint,bigint,bigint,text,text)', 'EXECUTE') as compliance_console_direct_limits,
         has_table_privilege('money_compliance_console', 'money.compliance_cases', 'SELECT') as compliance_console_table,
         has_table_privilege('money_ops', 'money.compliance_cases', 'SELECT') as ops_compliance_table,
-        has_table_privilege('money_ops', 'money.compliance_verification_sessions', 'SELECT') as ops_compliance_inquiry_table
+        has_table_privilege('money_ops', 'money.compliance_verification_sessions', 'SELECT') as ops_compliance_inquiry_table,
+        has_function_privilege('money_app', 'money_private.prepare_card(uuid,text,text,bigint,boolean,text,text[],timestamptz)', 'EXECUTE') as app_card_prepare,
+        has_function_privilege('money_app', 'money_private.activate_card(text,uuid,text,text,text,smallint,smallint,integer)', 'EXECUTE') as app_card_activate,
+        has_function_privilege('money_app', 'money_private.resolve_card_approval(text,uuid,text,text,text,text,text,smallint,smallint,integer)', 'EXECUTE') as app_card_resolve,
+        has_function_privilege('money_app', 'money_private.close_card(text,uuid,text)', 'EXECUTE') as app_card_close,
+        has_function_privilege('money_app', 'money_private.consume_card_reveal_token(bytea,text,uuid)', 'EXECUTE') as app_card_reveal,
+        has_function_privilege('money_app', 'money_private.decide_card_authorization(text,text,text,text,bigint,text,text,text,text,integer)', 'EXECUTE') as app_card_decide,
+        has_function_privilege('money_app', 'money_private.settle_card_authorization(text,text,text,bigint,timestamptz,bytea,jsonb,integer)', 'EXECUTE') as app_card_settle,
+        has_function_privilege('money_app', 'money_private.post_card_transfer(text,text,text,text,text,text,bigint,text,jsonb)', 'EXECUTE') as app_card_kernel,
+        has_function_privilege('money_app', 'money_private.sweep_cards(integer)', 'EXECUTE') as app_card_sweep,
+        has_table_privilege('money_app', 'money.cards', 'SELECT') as app_card_table,
+        has_function_privilege('money_card_ingress', 'money_private.decide_card_authorization(text,text,text,text,bigint,text,text,text,text,integer)', 'EXECUTE') as card_ingress_decide,
+        has_function_privilege('money_card_ingress', 'money_private.enqueue_card_provider_event(text,text,text,bytea)', 'EXECUTE') as card_ingress_enqueue,
+        has_function_privilege('money_card_ingress', 'money_private.settle_card_authorization(text,text,text,bigint,timestamptz,bytea,jsonb,integer)', 'EXECUTE') as card_ingress_settle,
+        has_function_privilege('money_card_ingress', 'money_private.prepare_card(uuid,text,text,bigint,boolean,text,text[],timestamptz)', 'EXECUTE') as card_ingress_prepare,
+        has_function_privilege('money_card_ingress', 'money_private.claim_card_provider_events(text,integer)', 'EXECUTE') as card_ingress_claim,
+        has_table_privilege('money_card_ingress', 'money.cards', 'SELECT') as card_ingress_table,
+        has_function_privilege('money_card_worker', 'money_private.settle_card_authorization(text,text,text,bigint,timestamptz,bytea,jsonb,integer)', 'EXECUTE') as card_worker_settle,
+        has_function_privilege('money_card_worker', 'money_private.void_card_authorization(text,text,text,timestamptz,bytea,jsonb)', 'EXECUTE') as card_worker_void,
+        has_function_privilege('money_card_worker', 'money_private.refund_card_authorization(text,text,text,text,bigint,timestamptz,bytea,jsonb)', 'EXECUTE') as card_worker_refund,
+        has_function_privilege('money_card_worker', 'money_private.claim_card_provider_events(text,integer)', 'EXECUTE') as card_worker_claim,
+        has_function_privilege('money_card_worker', 'money_private.mark_card_issuer_closed(uuid,text)', 'EXECUTE') as card_worker_close_drain,
+        has_function_privilege('money_card_worker', 'money_private.get_card_by_provider_ref(text,text)', 'EXECUTE') as card_worker_read_by_ref,
+        has_function_privilege('money_card_ingress', 'money_private.get_card_by_provider_ref(text,text)', 'EXECUTE') as card_ingress_read_by_ref,
+        has_function_privilege('money_card_worker', 'money_private.trip_treasury_breaker(text)', 'EXECUTE') as card_worker_trip,
+        has_function_privilege('money_app', 'money_private.treasury_control_state()', 'EXECUTE') as app_control_state,
+        has_function_privilege('money_app', 'money_private.card_spend_control_state()', 'EXECUTE') as app_card_spend_state,
+        has_function_privilege('money_treasury', 'money_private.card_spend_control_state()', 'EXECUTE') as treasury_card_spend_state,
+        has_function_privilege('money_card_worker', 'money_private.card_spend_control_state()', 'EXECUTE') as card_worker_card_spend_state,
+        has_function_privilege('money_card_worker', 'money_private.decide_card_authorization(text,text,text,text,bigint,text,text,text,text,integer)', 'EXECUTE') as card_worker_decide,
+        has_function_privilege('money_card_worker', 'money_private.prepare_card(uuid,text,text,bigint,boolean,text,text[],timestamptz)', 'EXECUTE') as card_worker_prepare,
+        has_function_privilege('money_card_worker', 'money_private.enqueue_card_provider_event(text,text,text,bytea)', 'EXECUTE') as card_worker_enqueue,
+        has_function_privilege('money_card_worker', 'money_private.restore_treasury_controls(text)', 'EXECUTE') as card_worker_restore,
+        has_table_privilege('money_card_worker', 'money.card_authorizations', 'SELECT') as card_worker_table,
+        has_function_privilege('money_worker', 'money_private.sweep_cards(integer)', 'EXECUTE') as worker_card_sweep,
+        has_function_privilege('money_worker', 'money_private.sweep_card_authorizations(integer)', 'EXECUTE') as worker_card_auth_sweep,
+        has_function_privilege('money_treasury', 'money_private.set_card_spend_enabled(boolean,text)', 'EXECUTE') as treasury_card_spend,
+        has_function_privilege('money_treasury', 'money_private.decide_card_authorization(text,text,text,text,bigint,text,text,text,text,integer)', 'EXECUTE') as treasury_card_decide,
+        has_table_privilege('money_ops', 'money.cards', 'SELECT') as ops_card_table,
+        has_table_privilege('money_ops', 'money.card_authorizations', 'SELECT') as ops_card_authorizations_table
     `);
     expect(privileges.rows[0]).toEqual({
       app_pay: false,
@@ -627,6 +707,45 @@ describe("Postgres ledger kernel", () => {
       compliance_console_table: false,
       ops_compliance_table: false,
       ops_compliance_inquiry_table: false,
+      app_card_prepare: true,
+      app_card_activate: true,
+      app_card_resolve: true,
+      app_card_close: true,
+      app_card_reveal: true,
+      app_card_decide: false,
+      app_card_settle: false,
+      app_card_kernel: false,
+      app_card_sweep: false,
+      app_card_table: false,
+      card_ingress_decide: true,
+      card_ingress_enqueue: true,
+      card_ingress_settle: false,
+      card_ingress_prepare: false,
+      card_ingress_claim: false,
+      card_ingress_table: false,
+      card_worker_settle: true,
+      card_worker_void: true,
+      card_worker_refund: true,
+      card_worker_claim: true,
+      card_worker_close_drain: true,
+      card_worker_read_by_ref: true,
+      card_ingress_read_by_ref: false,
+      card_worker_trip: true,
+      app_control_state: true,
+      app_card_spend_state: true,
+      treasury_card_spend_state: true,
+      card_worker_card_spend_state: false,
+      card_worker_decide: false,
+      card_worker_prepare: false,
+      card_worker_enqueue: false,
+      card_worker_restore: false,
+      card_worker_table: false,
+      worker_card_sweep: true,
+      worker_card_auth_sweep: true,
+      treasury_card_spend: true,
+      treasury_card_decide: false,
+      ops_card_table: true,
+      ops_card_authorizations_table: true,
     });
   });
 
@@ -645,7 +764,7 @@ describe("Postgres ledger kernel", () => {
       );
       expect((await db.query("select * from money_private.account_state('usr_role0001', 'USD')")).rows).toHaveLength(1);
       expect((await db.query("select * from money_private.list_public_services(10, null, null)")).rows).toEqual([]);
-      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0011" });
+      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0012" });
       await expect(db.query(
         "select * from money_private.register_account('usr_bypass01', 'user', 'Bypass', null, null, $1)",
         [`bypass-public-key-${"x".repeat(40)}`]

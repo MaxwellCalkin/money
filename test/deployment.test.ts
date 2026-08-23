@@ -141,6 +141,181 @@ describe("production deployment contract", () => {
     })).toThrow(/api\.withpersona\.com/);
   });
 
+  it("segregates card issuing authority: the api holds only the issuer and reveal keys", () => {
+    const cardApi: Record<string, string | undefined> = {
+      ...apiEnvironment(),
+      MONEY_CARD_PROVIDER: "stripe-issuing",
+      MONEY_CARD_ISSUER_BASE_URL: "https://issuer.internal/stripe",
+      MONEY_CARD_ISSUER_API_KEY: "rk_live_issuer_create_close_reveal",
+      MONEY_CARD_STRIPE_CARDHOLDER_ID: "ich_ProductionCardholder123",
+      MONEY_CARD_REVEAL_TOKEN_KEY: "card-reveal-token-key-with-at-least-32-characters",
+    };
+    expect(preflightProductionService("api", cardApi)).toEqual({ service: "api", ok: true });
+    expect(preflightProductionService("api", { ...cardApi, MONEY_CARD_REVEAL_MODE: "token" }))
+      .toEqual({ service: "api", ok: true });
+    // The mock issuer is sandbox-only state; production refuses it outright.
+    expect(() => preflightProductionService("api", { ...cardApi, MONEY_CARD_PROVIDER: "mock" }))
+      .toThrow(/forbidden in production/);
+    expect(() => preflightProductionService("api", {
+      ...cardApi,
+      MONEY_CARD_PROVIDER: "unknown-issuer",
+    })).toThrow(/must be one of stripe-issuing, mock/);
+    // There is deliberately no `pan` reveal mode.
+    expect(() => preflightProductionService("api", { ...cardApi, MONEY_CARD_REVEAL_MODE: "pan" }))
+      .toThrow(/must be one of none, token/);
+    for (const missing of [
+      "MONEY_CARD_ISSUER_BASE_URL",
+      "MONEY_CARD_ISSUER_API_KEY",
+      "MONEY_CARD_STRIPE_CARDHOLDER_ID",
+      "MONEY_CARD_REVEAL_TOKEN_KEY",
+    ]) {
+      const env = { ...cardApi };
+      delete env[missing];
+      expect(() => preflightProductionService("api", env), missing).toThrow(/not configured/);
+    }
+    expect(() => preflightProductionService("api", {
+      ...cardApi,
+      MONEY_CARD_REVEAL_TOKEN_KEY: "too-short",
+    })).toThrow(/at least 32 characters/);
+    expect(() => preflightProductionService("api", {
+      ...cardApi,
+      MONEY_CARD_ISSUER_BASE_URL: "http://issuer.internal/stripe",
+    })).toThrow(/HTTPS/);
+    // Ingress and worker authority never reach the product API — with the
+    // card rail configured or not.
+    const foreignAuthority = {
+      MONEY_CARD_INGRESS_DATABASE_URL:
+        "postgres://money_card_ingress_login:long-password@db.internal:5432/money?sslmode=verify-full",
+      MONEY_CARD_WORKER_DATABASE_URL:
+        "postgres://money_card_worker_login:long-password@db.internal:5432/money?sslmode=verify-full",
+      MONEY_CARD_WEBHOOK_SECRETS: JSON.stringify(["whsec_cross-service-card-secret"]),
+      MONEY_CARD_EVENT_API_KEY: "cross-service-card-event-key",
+    };
+    for (const [name, value] of Object.entries(foreignAuthority)) {
+      expect(() => preflightProductionService("api", { ...cardApi, [name]: value }), name)
+        .toThrow(/must not be present/);
+      expect(() => preflightProductionService("api", { ...apiEnvironment(), [name]: value }), name)
+        .toThrow(/must not be present/);
+    }
+  });
+
+  it("validates card authorization ingress and event worker as different environments", () => {
+    const ingress: Record<string, string | undefined> = {
+      NODE_ENV: "production",
+      MONEY_BIND_HOST: "0.0.0.0",
+      MONEY_CARD_INGRESS_DATABASE_URL:
+        "postgres://money_card_ingress_login:long-password@db.internal:5432/money?sslmode=verify-full",
+      MONEY_CARD_PROVIDER: "stripe-issuing",
+      MONEY_CARD_WEBHOOK_ENDPOINT_ID: "we_ProductionCardEndpoint123",
+      MONEY_CARD_WEBHOOK_SECRETS: JSON.stringify([
+        "whsec_current-card-production-secret",
+        "whsec_previous-card-production-secret",
+      ]),
+    };
+    expect(preflightProductionService("card-authorization", ingress))
+      .toEqual({ service: "card-authorization", ok: true });
+    expect(preflightProductionService("card-authorization", {
+      ...ingress,
+      MONEY_CARD_AUTH_TTL_SECONDS: "3600",
+      MONEY_CARD_WEBHOOK_TOLERANCE_SECONDS: "120",
+    })).toEqual({ service: "card-authorization", ok: true });
+    expect(() => preflightProductionService("card-authorization", {
+      ...ingress,
+      MONEY_CARD_AUTH_TTL_SECONDS: "59",
+    })).toThrow(/between 60 and 2592000/);
+    expect(() => preflightProductionService("card-authorization", {
+      ...ingress,
+      MONEY_CARD_WEBHOOK_TOLERANCE_SECONDS: "601",
+    })).toThrow(/between 30 and 600/);
+    for (const missing of [
+      "MONEY_CARD_INGRESS_DATABASE_URL",
+      "MONEY_CARD_PROVIDER",
+      "MONEY_CARD_WEBHOOK_ENDPOINT_ID",
+      "MONEY_CARD_WEBHOOK_SECRETS",
+      "MONEY_BIND_HOST",
+    ]) {
+      const env = { ...ingress };
+      delete env[missing];
+      expect(() => preflightProductionService("card-authorization", env), missing)
+        .toThrow(/not configured|is required/);
+    }
+    expect(() => preflightProductionService("card-authorization", {
+      ...ingress,
+      MONEY_CARD_PROVIDER: "mock",
+    })).toThrow(/forbidden in production/);
+    expect(() => preflightProductionService("card-authorization", {
+      ...ingress,
+      MONEY_CARD_WEBHOOK_SECRETS: JSON.stringify(["short-secret"]),
+    })).toThrow(/24-512/);
+    expect(() => preflightProductionService("card-authorization", {
+      ...ingress,
+      MONEY_CARD_INGRESS_DATABASE_URL:
+        "postgres://money_card_ingress_login:long-password@db.internal:5432/money?sslmode=require",
+    })).toThrow(/verify-full/);
+    for (const [name, value] of Object.entries({
+      MONEY_CARD_ISSUER_API_KEY: "must-not-cross",
+      MONEY_CARD_EVENT_API_KEY: "must-not-cross",
+      MONEY_CARD_REVEAL_TOKEN_KEY: "must-not-cross",
+      MONEY_CARD_WORKER_DATABASE_URL:
+        "postgres://money_card_worker_login:long-password@db.internal:5432/money?sslmode=verify-full",
+      DATABASE_URL:
+        "postgres://money_app_login:long-password@db.internal:5432/money?sslmode=verify-full",
+    })) {
+      expect(() => preflightProductionService("card-authorization", { ...ingress, [name]: value }), name)
+        .toThrow(/must not be present/);
+    }
+
+    const worker: Record<string, string | undefined> = {
+      NODE_ENV: "production",
+      MONEY_CARD_WORKER_DATABASE_URL:
+        "postgres://money_card_worker_login:long-password@db.internal:5432/money?sslmode=verify-full",
+      MONEY_CARD_PROVIDER: "stripe-issuing",
+      MONEY_CARD_EVENT_API_KEY: "card-event-production-read-key",
+      MONEY_CARD_ISSUER_BASE_URL: "https://issuer.internal/stripe",
+    };
+    expect(preflightProductionService("card-events", worker))
+      .toEqual({ service: "card-events", ok: true });
+    expect(preflightProductionService("card-events", {
+      ...worker,
+      MONEY_CARD_OVERCAPTURE_BPS: "2500",
+    })).toEqual({ service: "card-events", ok: true });
+    expect(() => preflightProductionService("card-events", {
+      ...worker,
+      MONEY_CARD_OVERCAPTURE_BPS: "2501",
+    })).toThrow(/between 0 and 2500/);
+    for (const missing of [
+      "MONEY_CARD_WORKER_DATABASE_URL",
+      "MONEY_CARD_PROVIDER",
+      "MONEY_CARD_EVENT_API_KEY",
+      "MONEY_CARD_ISSUER_BASE_URL",
+    ]) {
+      const env = { ...worker };
+      delete env[missing];
+      expect(() => preflightProductionService("card-events", env), missing)
+        .toThrow(/not configured/);
+    }
+    expect(() => preflightProductionService("card-events", {
+      ...worker,
+      MONEY_CARD_PROVIDER: "mock",
+    })).toThrow(/forbidden in production/);
+    expect(() => preflightProductionService("card-events", {
+      ...worker,
+      MONEY_CARD_ISSUER_BASE_URL: "http://issuer.internal/stripe",
+    })).toThrow(/HTTPS/);
+    for (const [name, value] of Object.entries({
+      MONEY_CARD_WEBHOOK_SECRETS: JSON.stringify(["whsec_cross-service-card-secret"]),
+      MONEY_CARD_ISSUER_API_KEY: "must-not-cross",
+      MONEY_CARD_REVEAL_TOKEN_KEY: "must-not-cross",
+      MONEY_CARD_INGRESS_DATABASE_URL:
+        "postgres://money_card_ingress_login:long-password@db.internal:5432/money?sslmode=verify-full",
+      DATABASE_URL:
+        "postgres://money_app_login:long-password@db.internal:5432/money?sslmode=verify-full",
+    })) {
+      expect(() => preflightProductionService("card-events", { ...worker, [name]: value }), name)
+        .toThrow(/must not be present/);
+    }
+  });
+
   it("keeps the payout-source contract identical between preflight and the worker", () => {
     const base = {
       NODE_ENV: "production",
@@ -266,7 +441,7 @@ describe("production deployment contract", () => {
       engines: { node: string };
     };
     expect(packageJson).toEqual(expect.objectContaining({
-      version: "0.13.0",
+      version: "0.14.0",
       engines: { node: ">=24" },
     }));
     expect(dockerfile.match(
@@ -369,7 +544,7 @@ describe("production deployment contract", () => {
     expect(compose).toMatch(/read_only: true/);
     expect(compose).toMatch(/cap_drop:\s*\n\s*- ALL/);
     expect(compose).toMatch(/no-new-privileges:true/);
-    expect(compose.match(/test: \[CMD, \/nodejs\/bin\/node,/g)).toHaveLength(6);
+    expect(compose.match(/test: \[CMD, \/nodejs\/bin\/node,/g)).toHaveLength(7);
     expect(compose).not.toMatch(/POSTGRES_PASSWORD|money-dev-only/);
     for (const service of [
       "api",
@@ -380,6 +555,8 @@ describe("production deployment contract", () => {
       "compliance-events",
       "compliance-onboarding",
       "compliance-console",
+      "card-authorization",
+      "card-events",
     ]) {
       expect(compose).toContain(`/${service}.env`);
     }
@@ -399,6 +576,8 @@ describe("production deployment contract", () => {
       "compliance-reviews": "src/compliance/review-worker.ts",
       "compliance-ops": "src/compliance/ops-server.ts",
       "compliance-console": "src/compliance/console-server.ts",
+      "card-authorization": "src/cards/authorization-server.ts",
+      "card-events": "src/cards/event-worker.ts",
     } as const;
     for (const [service, entrypoint] of Object.entries(productionEntrypoints)) {
       expect(readFileSync(resolve(ROOT, entrypoint), "utf8"))

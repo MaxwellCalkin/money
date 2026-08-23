@@ -13,13 +13,17 @@ import { parseExternalPaymentDemand, type ExternalPaymentDemand } from "./x402-d
 
 /**
  * The agent-facing surface: an MCP server any runtime (Claude Code, Cursor,
- * Codex) can mount with one config line. The agent gets four verbs:
+ * Codex) can mount with one config line. The agent gets these verbs:
  *
- *   money_balance — what can I spend?
- *   money_pay     — pay any account on the network (agent, provider, user)
- *   money_fetch   — GET a URL; if it answers 402, pay the challenge within
- *                   the mandate and retry (the x402-shaped loop)
- *   money_feed    — the receipt feed
+ *   money_balance     — how much can I still spend under the mandate?
+ *   money_pay         — pay any account on the network (agent, provider, user)
+ *   money_fetch       — GET a URL; if it answers 402, pay the challenge within
+ *                       the mandate and retry (the x402-shaped loop)
+ *   money_card_create — reserved virtual card for ordinary merchants, under
+ *                       the same mandate (never returns the card number)
+ *   money_card_status — one card's state and authorizations
+ *   money_card_close  — close a card; the unspent remainder returns
+ *   money_feed        — the receipt feed
  *
  * The agent never holds keys or balances — only its account id. Every spend
  * is policy-checked server-side against the owner's mandate.
@@ -112,11 +116,11 @@ function text(value: unknown) {
   return { content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };
 }
 
-const server = new McpServer({ name: "money", version: "0.13.0" });
+const server = new McpServer({ name: "money", version: "0.14.0" });
 
 server.tool(
   "money_balance",
-  "Check this agent's spendable balance on the money network.",
+  "Check how much this agent can still spend under its owner's mandate on the money network.",
   {},
   async () => {
     const { body } = await api("/agent/state");
@@ -635,6 +639,161 @@ server.tool(
 
     // Amount comes from the receipt (authoritative), never from the 402 body.
     return deliverInternal(url, challenge.challengeId, payment.body, advertised);
+  }
+);
+
+/** The card rail exists only on the Postgres-backed network API. A bare 404
+ * (no typed error body) from /cards means this API predates the rail; say so
+ * audibly once, mirroring the recovery-endpoint warning above. */
+let cardsUnsupportedWarned = false;
+
+function warnCardsUnsupported(): void {
+  if (cardsUnsupportedWarned) return;
+  cardsUnsupportedWarned = true;
+  console.error(
+    `money MCP: ${API} does not implement /cards — reserved virtual cards are unavailable on this API. Point MONEY_API at a network API with the card rail (the Postgres-backed server, v0.14+).`,
+  );
+}
+
+function cardsUnsupported(status: number) {
+  warnCardsUnsupported();
+  return text({
+    status,
+    error: "this API does not implement /cards",
+    note: "reserved virtual cards need the Postgres-backed network API (v0.14 or later); ask the operator to point MONEY_API there",
+  });
+}
+
+/** Decline codes become actions the agent can actually take. */
+function cardDenialNote(code: string | undefined): string {
+  switch (code) {
+    case "per_tx_cap":
+      return "exceeds the owner's per-transaction cap; request a smaller card or ask the owner";
+    case "new_payee_cap":
+      return "new merchant above the owner's new-payee throttle; ask the owner to allowlist it or approve this card";
+    case "payee_not_allowed":
+      return "merchant is not on the owner's allowlist; ask the owner to add card:hint:<merchant> to the mandate";
+    case "mcc_not_allowed":
+      return "merchant category not allowed on this card";
+    case "budget":
+      return "the mandate's remaining budget cannot cover this cap; request a smaller card or ask the owner to raise it";
+    case "daily_cap":
+      return "the mandate's daily cap is exhausted for today; retry tomorrow or ask the owner";
+    case "insufficient_funds":
+      return "agent funds cannot cover this cap; ask the owner to allocate more";
+    case "no_mandate":
+    case "mandate_expired":
+      return "no active spend mandate; ask the owner to grant one";
+    case "compliance_required":
+      return "this merchant has not been cleared for card spend yet; ask the operator to register and screen it";
+    case "approval_rejected":
+      return "the owner rejected this card request";
+    case "approval_expired":
+      return "the owner approval expired before it was decided; request the card again";
+    case "idempotency_conflict":
+      return "this idempotency key was already used with different card terms; use a new key for a new card";
+    case "risk_limit":
+      return "declined by the network's risk policy";
+    default:
+      return "the card request was declined by policy";
+  }
+}
+
+server.tool(
+  "money_card_create",
+  "Create a reserved virtual card under the owner's spend mandate for buying at an ordinary online merchant (checkout pages, APIs, SaaS). Issuing the card reserves its full cap from the mandate up front; the unspent remainder returns to the agent's funds when the card closes. Returns only the last4 — this tool never sees or returns the card number. Caps above the owner's escalation threshold create a durable approval request for the owner instead.",
+  {
+    amount_usd: z.number().positive().describe("the card's cap in dollars, e.g. 29 — a spend mandate up to this amount, reserved in full at issue"),
+    merchant: z.string().min(1).max(100).describe("the merchant host this card is for, e.g. mock-shop.example"),
+    single_use: z.boolean().default(true).describe("close the card after its first cleared purchase (default true)"),
+    expires_in_minutes: z.number().int().min(1).max(43_200).default(60).describe("how long the card stays usable (default 60 minutes, max 30 days)"),
+    idempotency_key: z
+      .string()
+      .min(1)
+      .describe(
+        "REQUIRED stable key for this logical card (e.g. 'task-123-shop-card'). When retrying the SAME card request, reuse the exact same key — the network returns the original card instead of reserving twice. A new card needs a new key."
+      ),
+  },
+  async ({ amount_usd, merchant, single_use, expires_in_minutes, idempotency_key }) => {
+    const { status, body } = await api("/cards", {
+      method: "POST",
+      body: JSON.stringify({
+        idempotencyKey: idempotency_key,
+        capMicros: usd(amount_usd),
+        merchantHint: merchant.trim().toLowerCase(),
+        singleUse: single_use,
+        expiresInSeconds: expires_in_minutes * 60,
+      }),
+    });
+    if (status === 404) return cardsUnsupported(status);
+    if (status === 503) {
+      return text({
+        status,
+        error: body?.error === "card_bridge_unavailable"
+          ? "the network API has no card issuer configured; ask the operator to enable the card rail"
+          : "card spending is paused by the operator",
+      });
+    }
+    if (body?.status === "approval_required") {
+      return text({
+        status: 202,
+        cardId: body.cardId,
+        approval: body.approval,
+        note: body.note ?? "this card is waiting in the owner's approval inbox; call money_card_status after the owner decides",
+      });
+    }
+    if (body?.status === "denied") {
+      return text({ status, code: body.code, reason: body.reason, note: cardDenialNote(body.code) });
+    }
+    if (body?.status !== "active" || !body.card) {
+      return text({ status, error: "card request failed", decision: body });
+    }
+    return text({
+      status: "active",
+      cardId: body.card.id,
+      last4: body.card.last4,
+      expMonth: body.card.expMonth,
+      expYear: body.card.expYear,
+      cap: fmt(body.card.capMicros),
+      merchant: body.card.merchantHint,
+      singleUse: body.card.singleUse,
+      expiresAt: body.card.expiresAt,
+      receiptId: body.receiptId,
+      ...(body.checkoutToken ? {
+        checkoutToken: body.checkoutToken,
+        note: "hand the checkoutToken to the host runtime's fill step; the card number itself never enters this conversation",
+      } : {}),
+    });
+  }
+);
+
+server.tool(
+  "money_card_status",
+  "Check one reserved card: its state, cap, what has cleared at the merchant, and whether the owner has approved it yet.",
+  {
+    card_id: z.string().min(1).describe("the card id returned by money_card_create"),
+  },
+  async ({ card_id }) => {
+    const { status, body } = await api(`/cards/${encodeURIComponent(card_id)}`);
+    if (status === 404 && body?.error !== "card_not_found") return cardsUnsupported(status);
+    if (status !== 200) return text({ status, ...body });
+    return text({ status, card: body.card, authorizations: body.authorizations });
+  }
+);
+
+server.tool(
+  "money_card_close",
+  "Close a reserved card. The unspent remainder of its cap returns to the agent's funds; mandate authority already used is not restored.",
+  {
+    card_id: z.string().min(1).describe("the card id returned by money_card_create"),
+  },
+  async ({ card_id }) => {
+    const { status, body } = await api(`/cards/${encodeURIComponent(card_id)}/close`, {
+      method: "POST",
+      body: "{}",
+    });
+    if (status === 404 && body?.error !== "card_not_found") return cardsUnsupported(status);
+    return text({ status, ...body });
   }
 );
 

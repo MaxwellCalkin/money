@@ -152,7 +152,10 @@ should inherit exactly one narrow role: `money_app`, `money_treasury`,
 `money_worker`, `money_key_rotation`, `money_ops`, `money_compliance_admin`,
 `money_compliance_worker`, `money_compliance_onboarding`,
 `money_compliance_ingress`, `money_risk_worker`, `money_compliance_console`,
-or `money_compliance_ops`. They should never own the schema or receive
+`money_compliance_ops`, `money_card_ingress` (card authorization decisions
+and event-envelope enqueue only), or `money_card_worker` (card
+settle/void/refund and inbox claims only). They should never own the schema
+or receive
 direct journal/balance write privileges; the application role cannot directly
 read tenant financial tables either. Tenant-scoped mandate and approval reads
 also go through reviewed functions, so the role can power owner and agent

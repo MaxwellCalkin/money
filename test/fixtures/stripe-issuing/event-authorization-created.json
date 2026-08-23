@@ -1,0 +1,96 @@
+{
+  "id": "evt_1QfFixture0000000000001",
+  "object": "event",
+  "api_version": "2025-03-31.basil",
+  "created": 1755907261,
+  "data": {
+    "object": {
+      "id": "iauth_1QfFixture000000000001",
+      "object": "issuing.authorization",
+      "amount": 2900,
+      "amount_details": {
+        "atm_fee": null,
+        "cashback_amount": null
+      },
+      "approved": true,
+      "authorization_method": "online",
+      "balance_transactions": [],
+      "card": {
+        "id": "ic_1QfFixture0000000000001",
+        "object": "issuing.card",
+        "brand": "Visa",
+        "cancellation_reason": null,
+        "cardholder": "ich_1QfFixtureCardholder001",
+        "created": 1755907200,
+        "currency": "usd",
+        "exp_month": 8,
+        "exp_year": 2029,
+        "last4": "4242",
+        "livemode": false,
+        "metadata": {
+          "agentmoney_card": "7b1c9c4e-3f2a-4d1b-9e5f-1a2b3c4d5e6f",
+          "agentmoney_agent": "agent:demo-buyer"
+        },
+        "status": "active",
+        "type": "virtual"
+      },
+      "cardholder": "ich_1QfFixtureCardholder001",
+      "created": 1755907260,
+      "currency": "usd",
+      "livemode": false,
+      "merchant_amount": 2900,
+      "merchant_currency": "usd",
+      "merchant_data": {
+        "category": "computer_software_stores",
+        "category_code": "5734",
+        "city": "San Francisco",
+        "country": "US",
+        "name": "MOCK-SHOP.EXAMPLE",
+        "network_id": "1234567890",
+        "postal_code": "94103",
+        "state": "CA",
+        "terminal_id": null,
+        "url": "https://mock-shop.example"
+      },
+      "metadata": {},
+      "pending_request": null,
+      "request_history": [
+        {
+          "amount": 2900,
+          "amount_details": {
+            "atm_fee": null,
+            "cashback_amount": null
+          },
+          "approved": true,
+          "authorization_code": "005930",
+          "created": 1755907260,
+          "currency": "usd",
+          "merchant_amount": 2900,
+          "merchant_currency": "usd",
+          "network_risk_score": 5,
+          "reason": "webhook_approved",
+          "reason_message": null,
+          "requested_at": 1755907259
+        }
+      ],
+      "status": "pending",
+      "transactions": [],
+      "verification_data": {
+        "address_line1_check": "not_provided",
+        "address_postal_code_check": "not_provided",
+        "cvc_check": "match",
+        "expiry_check": "match",
+        "postal_code": null,
+        "three_d_secure": null
+      },
+      "wallet": null
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "issuing_authorization.created"
+}

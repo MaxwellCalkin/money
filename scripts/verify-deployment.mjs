@@ -154,6 +154,30 @@ const services = {
     },
     foreign: { MONEY_COMPLIANCE_PROVIDER_API_KEY: "must-not-cross" },
   },
+  "card-authorization": {
+    command: "dist/cards/authorization-server.js",
+    env: {
+      MONEY_BIND_HOST: "0.0.0.0",
+      MONEY_CARD_INGRESS_DATABASE_URL: database("money_card_ingress"),
+      MONEY_CARD_PROVIDER: "stripe-issuing",
+      MONEY_CARD_WEBHOOK_ENDPOINT_ID: "we_ReleaseCardEndpoint123",
+      MONEY_CARD_WEBHOOK_SECRETS: JSON.stringify([
+        "whsec_current-card-release-secret",
+        "whsec_previous-card-release-secret",
+      ]),
+    },
+    foreign: { MONEY_CARD_ISSUER_API_KEY: "must-not-cross" },
+  },
+  "card-events": {
+    command: "dist/cards/event-worker.js",
+    env: {
+      MONEY_CARD_WORKER_DATABASE_URL: database("money_card_worker"),
+      MONEY_CARD_PROVIDER: "stripe-issuing",
+      MONEY_CARD_EVENT_API_KEY: "card-event-release-read-key",
+      MONEY_CARD_ISSUER_BASE_URL: "https://issuer.internal/stripe",
+    },
+    foreign: { MONEY_CARD_WEBHOOK_SECRETS: JSON.stringify(["cross-service-card-webhook-secret"]) },
+  },
 };
 
 const inherited = Object.fromEntries([
@@ -199,4 +223,4 @@ for (const [service, definition] of Object.entries(services)) {
   }
 }
 
-console.log(JSON.stringify({ services: expectedServices.length, positive: 14, negative: 14 }));
+console.log(JSON.stringify({ services: expectedServices.length, positive: 16, negative: 16 }));

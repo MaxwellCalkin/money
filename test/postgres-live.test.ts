@@ -1,11 +1,14 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { PostgresCards } from "../src/db/cards.ts";
 import { PostgresLedger } from "../src/db/ledger.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { PostgresDatabase } from "../src/db/postgres.ts";
 import { PostgresPolicy } from "../src/db/policy.ts";
-import { approveComplianceFixture } from "./helpers/compliance-fixture.ts";
+import { PostgresTreasury } from "../src/db/treasury.ts";
+import { approveComplianceFixture, clearCounterpartyFixture } from "./helpers/compliance-fixture.ts";
 
 const connectionString = process.env.MONEY_TEST_DATABASE_URL;
 
@@ -36,7 +39,7 @@ describe.skipIf(!connectionString)("live PostgreSQL release gate", () => {
     await runMigrations(db);
     const replay = await runMigrations(db);
     expect(replay.map(({ version, applied }) => ({ version, applied }))).toEqual(
-      Array.from({ length: 11 }, (_, index) => ({
+      Array.from({ length: 12 }, (_, index) => ({
         version: String(index + 1).padStart(4, "0"),
         applied: false,
       })),
@@ -70,7 +73,7 @@ describe.skipIf(!connectionString)("live PostgreSQL release gate", () => {
       select version, checksum from money.schema_migrations order by version
     `);
     expect(migrations.rows.map((row) => row.version)).toEqual(
-      Array.from({ length: 11 }, (_, index) => String(index + 1).padStart(4, "0")),
+      Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(4, "0")),
     );
     expect(migrations.rows.every((row) => /^[0-9a-f]{64}$/.test(row.checksum))).toBe(true);
   });
@@ -107,7 +110,25 @@ describe.skipIf(!connectionString)("live PostgreSQL release gate", () => {
         has_function_privilege('money_compliance_console', 'money_private.approve_compliance_subject(text,text,timestamptz,text,text)', 'EXECUTE') as compliance_console_direct_approve,
         has_table_privilege('money_ops', 'money.ledger_entries', 'SELECT') as ops_ledger,
         has_table_privilege('money_ops', 'money.compliance_cases', 'SELECT') as ops_compliance_table,
-        to_regprocedure('money_private.complete_compliance_event(text,bigint,uuid)') is null as split_completion_removed
+        to_regprocedure('money_private.complete_compliance_event(text,bigint,uuid)') is null as split_completion_removed,
+        has_function_privilege('money_card_ingress', 'money_private.decide_card_authorization(text,text,text,text,bigint,text,text,text,text,integer)', 'EXECUTE') as card_ingress_decide,
+        has_function_privilege('money_card_ingress', 'money_private.enqueue_card_provider_event(text,text,text,bytea)', 'EXECUTE') as card_ingress_enqueue,
+        has_function_privilege('money_card_ingress', 'money_private.settle_card_authorization(text,text,text,bigint,timestamptz,bytea,jsonb,integer)', 'EXECUTE') as card_ingress_settle,
+        has_function_privilege('money_card_ingress', 'money_private.prepare_card(uuid,text,text,bigint,boolean,text,text[],timestamptz)', 'EXECUTE') as card_ingress_prepare,
+        has_table_privilege('money_card_ingress', 'money.cards', 'SELECT') as card_ingress_table,
+        has_function_privilege('money_card_worker', 'money_private.settle_card_authorization(text,text,text,bigint,timestamptz,bytea,jsonb,integer)', 'EXECUTE') as card_worker_settle,
+        has_function_privilege('money_card_worker', 'money_private.trip_treasury_breaker(text)', 'EXECUTE') as card_worker_trip,
+        has_function_privilege('money_app', 'money_private.treasury_control_state()', 'EXECUTE') as app_control_state,
+        has_function_privilege('money_app', 'money_private.card_spend_control_state()', 'EXECUTE') as app_card_spend_state,
+        has_function_privilege('money_treasury', 'money_private.card_spend_control_state()', 'EXECUTE') as treasury_card_spend_state,
+        has_function_privilege('money_card_worker', 'money_private.card_spend_control_state()', 'EXECUTE') as card_worker_card_spend_state,
+        has_function_privilege('money_card_worker', 'money_private.decide_card_authorization(text,text,text,text,bigint,text,text,text,text,integer)', 'EXECUTE') as card_worker_decide,
+        has_function_privilege('money_card_worker', 'money_private.prepare_card(uuid,text,text,bigint,boolean,text,text[],timestamptz)', 'EXECUTE') as card_worker_prepare,
+        has_table_privilege('money_card_worker', 'money.cards', 'SELECT') as card_worker_table,
+        has_function_privilege('money_app', 'money_private.prepare_card(uuid,text,text,bigint,boolean,text,text[],timestamptz)', 'EXECUTE') as app_card_prepare,
+        has_function_privilege('money_app', 'money_private.decide_card_authorization(text,text,text,text,bigint,text,text,text,text,integer)', 'EXECUTE') as app_card_decide,
+        has_function_privilege('money_app', 'money_private.post_card_transfer(text,text,text,text,text,text,bigint,text,jsonb)', 'EXECUTE') as app_card_kernel,
+        has_function_privilege('money_worker', 'money_private.sweep_cards(integer)', 'EXECUTE') as worker_card_sweep
     `);
     expect(privileges.rows[0]).toEqual({
       public_private_schema: false,
@@ -140,6 +161,24 @@ describe.skipIf(!connectionString)("live PostgreSQL release gate", () => {
       ops_ledger: true,
       ops_compliance_table: false,
       split_completion_removed: true,
+      card_ingress_decide: true,
+      card_ingress_enqueue: true,
+      card_ingress_settle: false,
+      card_ingress_prepare: false,
+      card_ingress_table: false,
+      card_worker_settle: true,
+      card_worker_trip: true,
+      app_control_state: true,
+      app_card_spend_state: true,
+      treasury_card_spend_state: true,
+      card_worker_card_spend_state: false,
+      card_worker_decide: false,
+      card_worker_prepare: false,
+      card_worker_table: false,
+      app_card_prepare: true,
+      app_card_decide: false,
+      app_card_kernel: false,
+      worker_card_sweep: true,
     });
   });
 
@@ -242,4 +281,67 @@ describe.skipIf(!connectionString)("live PostgreSQL release gate", () => {
     `);
     expect(journal.rows).toEqual([{ unbalanced: "0" }]);
   });
+
+  it("never exceeds a card's reserve under 20 concurrent authorization decisions on real connections", async () => {
+    const suffix = Date.now().toString(36);
+    const ownerId = `usr_cardl_${suffix}`;
+    const agentId = `agt_cardl_${suffix}`;
+    const ledger = new PostgresLedger(db);
+    const policy = new PostgresPolicy(db);
+    const treasury = new PostgresTreasury(db);
+    const cards = new PostgresCards(db);
+    await ledger.registerAccount({ id: ownerId, kind: "user", name: "Card owner" });
+    await ledger.registerAccount({ id: agentId, kind: "agent", name: "Card agent", ownerId });
+    await approveComplianceFixture(db, ownerId);
+    await clearCounterpartyFixture(db, "card:hint:mock-shop.example", "merchant");
+    await treasury.configureControls({
+      fundingEnabled: true, payoutsEnabled: true, externalSpendEnabled: true,
+      maxPayoutMicros: 100_000_000_000n, maxPendingPayoutMicros: 1_000_000_000_000n,
+      maxOpenExposureMicros: 100_000_000_000n, maxReconciliationVarianceMicros: 1_000_000n,
+      reason: `live card fixture ${suffix}`,
+    });
+    await treasury.setCardSpendEnabled(true, `live card fixture ${suffix}`);
+    await ledger.postTransfer({
+      actorId: ownerId, operation: "fund", idempotencyKey: `live-card-fund-${suffix}`,
+      from: "external:funding", to: ownerId, amountMicros: 1_000_000_000n,
+    });
+    await ledger.postTransfer({
+      actorId: ownerId, operation: "allocate", idempotencyKey: `live-card-allocate-${suffix}`,
+      from: ownerId, to: agentId, amountMicros: 1_000_000_000n,
+    });
+    await policy.grantMandate({
+      userId: ownerId, agentId,
+      budgetMicros: 1_000_000_000n, dailyCapMicros: 1_000_000_000n, perTxCapMicros: 1_000_000_000n,
+      escalateAboveMicros: 1_000_000_000n, newPayeeCapMicros: 1_000_000_000n,
+      expiresAt: new Date(Date.now() + 86_400_000), idempotencyKey: `live-card-mandate-${suffix}`,
+    });
+    const prepared = await cards.prepare({
+      cardId: randomUUID(), agentId, idempotencyKey: `live-card-${suffix}`, capMicros: 500_000_000n,
+      singleUse: false, merchantHint: "mock-shop.example", expiresAt: new Date(Date.now() + 3_600_000),
+    });
+    expect(prepared.status).toBe("prepared");
+    const activated = await cards.activate({
+      agentId, cardId: prepared.cardId!, provider: "mock", providerCardRef: `ic_live_${suffix}`,
+      last4: "4242", expMonth: 12, expYear: 2030,
+    });
+    expect(activated).toEqual(expect.objectContaining({ status: "posted", cardState: "pending" }));
+
+    const decisions = await Promise.all(Array.from({ length: 20 }, (_, index) => cards.decideAuthorization({
+      provider: "mock", providerEventId: `evt_live_${suffix}_${index}`, providerAuthorizationRef: `iauth_live_${suffix}_${index}`,
+      providerCardRef: `ic_live_${suffix}`, amountMicros: 50_000_000n,
+      merchantDescriptor: "MOCK SHOP EXAMPLE", merchantMcc: "5734", merchantCountry: "US",
+    })));
+    expect(decisions.filter((decision) => decision.decision === "approved")).toHaveLength(10);
+    expect(decisions.filter((decision) => decision.declineCode === "card_cap")).toHaveLength(10);
+    const card = await cards.get(agentId, prepared.cardId!);
+    expect(card?.heldMicros).toBe(500_000_000n);
+    expect(await cards.decideAuthorization({
+      provider: "mock", providerEventId: `evt_live_${suffix}_0`, providerAuthorizationRef: `iauth_live_${suffix}_0`,
+      providerCardRef: `ic_live_${suffix}`, amountMicros: 50_000_000n,
+      merchantDescriptor: "MOCK SHOP EXAMPLE", merchantMcc: "5734", merchantCountry: "US",
+    })).toEqual({ ...decisions[0], replayed: true });
+    expect((await ledger.reconcile()).every((row) => row.matches)).toBe(true);
+    const health = await db.query<{ zero_sum: boolean; receipts_ok: boolean }>("select * from money_private.ledger_health()");
+    expect(health.rows[0]).toEqual({ zero_sum: true, receipts_ok: true });
+  }, 60_000);
 });

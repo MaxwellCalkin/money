@@ -60,6 +60,8 @@ The system is secure only while all of these remain true:
 | Compliance ingress | Persona webhook bytes and timestamps | Event enqueue only; no evidence interpretation or subject approval |
 | Compliance workers and desk | Refetched provider state, reviewer commands | Narrow evidence, case, restriction, and maker/checker commands |
 | External x402 edge | Seller requirements, facilitator response, RPC view | Remote signing, encrypted authorization release, confirmation or reversal |
+| Card authorization ingress | Forged, replayed or delayed issuer authorization requests | Consume already-reserved authority on one existing pending card; no credit, no issue, no widen, no PAN |
+| Card event worker | Issuer event/object responses and ambiguous approvals | Narrow settle/void/refund/close commands against re-fetched evidence; may trip but never reopen the breaker |
 | Build and deployment | Dependencies, actions, image layers, environment files | Exact release artifact, segregated service credentials, production preflight |
 
 TLS termination, secret storage, HSM policy, PostgreSQL administration, network
@@ -168,6 +170,9 @@ out-of-order events route to review or restriction.
 | Forged, duplicated, delayed, or reordered treasury webhook | Raw-body HMAC, ingress-only credentials, durable deduplication, authenticated refetch, monotonic lifecycle commands, exact immutable-term checks, and reconciliation breakers. | Provider key compromise can create authentic-looking events and API state. Independent asset reconciliation and sponsor-bank escalation remain mandatory. |
 | Forged or unrelated compliance result clears a customer | Timestamped rotating webhook HMAC, authenticated sparse refetch, immutable evidence hashes, atomic evidence sets, inquiry/report type and template allowlists, and Persona Account-ID continuity. | Business associated-person discovery is not owner verification; business activation remains fail-closed until every required person has linked KYC/screening. Provider/template contract tests are still required. |
 | Compliance PII leaks into the product database or logs | The adapter normalizes only opaque references, hashes, expiry, list/template versions, and allowlisted decision facts; hosted URLs and external payment headers use authenticated encryption. | Provider payloads transit process memory and ingress. Log redaction, memory/core-dump policy, retention, privacy rights, and vendor controls are deployment obligations. |
+| Forged, replayed, or malformed issuer card authorization | Raw-body timestamped HMAC with rotating secrets over the authorization webhook; fail-closed parsing (`invalid_request` decline with no database call); one-row card lock with integer arithmetic and a fixed decline ladder ending at the reserved cap; event-id replay returns the stored decision and a second event for the same authorization ref is declined; every uncertain path (exception, deadline, unsupported currency) answers `approved:false`; the issuer-side timeout default is decline, and an approval observed without a matching decision trips the treasury breaker. | The blast radius of a fully compromised ingress is bounded to consuming authority already reserved on existing pending cards. Webhook-secret custody, TLS termination, and edge rate limits are deployment responsibilities. |
+| Card number (PAN) exfiltration through the agent or owner surface | The PAN is never stored; no MCP reveal tool exists; issuer-object parsers strip `number`/`cvc`; reveal mode defaults to `none`, and `token` mode requires a single-use hashed checkout token (10-minute TTL, at most 3 reveals per card) bound in the kernel to the signing agent and the named pending card, returned once with `no-store` and an owner-visible `card.revealed` event; issuer reveal failures return detail-free errors; the release regression asserts no 13-19 digit run in any captured agent/owner body, MCP text, or log line. | `token` mode hands the PAN to host-runtime code once; that host's handling (form fill, memory, logs) is outside this model. Merchant descriptors and network ids in `card_authorizations` are retained indefinitely as policy evidence; a retention/erasure policy is a deployment obligation. |
+| Card issuer API key compromise | The create/close/reveal key is held only by the API service (the webhook ingress holds no issuer credential; the worker holds a read-only event key); cards are created only with `Idempotency-Key = card id` and validated against the requested terms; an issuer approval or settlement without a matching agentmoney decision trips the treasury breaker; ledger effects still require the database's own decision path. | An attacker with the issuer key can create, reveal, and cancel issuer-side cards outside our ledger; issuer-side card inventory reconciliation (unknown issuer cards alarming into the breaker) is **not built in v0.14** and is a release condition for any live card program. |
 | Payout destination is swapped or an ambiguous provider timeout is treated as failure | A signed owner/provider payout request must name a verified destination bound to that source account and a current screened bank counterparty. Destination setup/status and compliance linking are segregated treasury/compliance administration commands. Funds reserve before I/O; deterministic provider idempotency and manual-review state prevent blind retries or release. | Strong account-ownership verification, cooling periods, step-up authentication, beneficiary confirmation, and complete fraud operations remain launch blockers. |
 | Insider combines incompatible powers | Separate database roles constrain API, ingress, workers, ops, compliance desk, migration, reconciliation, and key rotation; sensitive releases use maker/checker commands and append-only evidence. CODEOWNERS and the high-risk pull-request checklist route every authority change through explicit review evidence. | CODEOWNERS is not enforcement, and the current single owner is not independent control. Protected-branch rules, qualified independent reviewers, cloud/database/secret/HSM separation, monitored break-glass, and access reviews are required outside this repository. |
 | Dependency, CI action, or image compromise | Lockfile, exact CI action commits, separately pinned Node builder and shell-less distroless runtime digests, source-revision label, numeric non-root read-only image, no-network production preflight, fixed Trivy version/cache policy, and a commit-named 90-day artifact containing image identity, CycloneDX SBOM, machine-readable blocking scan evidence, and a sorted SHA-256 manifest constrain the artifact. | Signed provenance, registry admission, long-term evidence retention, dependency-review policy, patch cadence, and an independent build environment are required before launch. |
@@ -184,6 +189,8 @@ configuration:
 - no public or private arbitrary-URL fetch without the public-address policy or
   an exact trusted-private-origin grant;
 - no owner-signed fake funding in production;
+- no card number in model context by default: no MCP reveal tool, reveal mode
+  `none` unless an operator enables `token`, and no `pan` mode at all;
 - no automatic business approval from associated-person discovery;
 - no automatic clearance from an ambiguous, stale, errored, mismatched, or
   positive compliance result;
@@ -219,7 +226,7 @@ The release owner must retain evidence for the exact commit and image digest:
 | Claim | Required evidence |
 |---|---|
 | Types and unit/integration contracts are coherent | Clean dependency install, typecheck, complete Vitest suite, and production build |
-| Database invariants and role isolation hold | Fresh PostgreSQL migration through `0011`, idempotent rerun, role application, effective-privilege tests, contention and reconciliation suite |
+| Database invariants and role isolation hold | Fresh PostgreSQL migration through `0012`, idempotent rerun, role application, effective-privilege tests, contention and reconciliation suite |
 | Deployed command surface matches the reviewed source | Image build, Compose render, every service preflight, health/readiness checks, and no cross-service credential leakage |
 | Artifact has reviewed provenance and no blocking known vulnerability | Exact action commits and base-image digest, lockfile review, audit, source-revision-labeled image, retained image ID/CycloneDX/scan artifact, exact-image HIGH/CRITICAL result, and immutable registry digest after publication |
 | Repository changes cannot bypass required review | Effective protected-branch/ruleset configuration, required exact-head `product`, `postgres`, and `image` checks, code-owner approval, stale-approval dismissal, conversation resolution, force-push/deletion denial, and audited break-glass evidence |
@@ -238,6 +245,11 @@ When money or evidence integrity is uncertain, responders should preserve
 evidence and reduce authority in this order:
 
 1. stop new funding, payouts, and external activation with global breakers;
+   for cards, `treasury:setup card-spend disable` (or any breaker trip) stops
+   new authorizations at the next decision and new activations immediately;
+   settlement of already-approved authorization holds cannot be stopped by us
+   (network rule), so card containment is "close all cards" via `close_card`
+   plus the issuer-cancel drain, accepting that existing holds still settle;
 2. freeze affected account families and revoke affected sessions, keys, and
    mandates;
 3. isolate the compromised ingress, worker, API, signer, RPC, or provider while

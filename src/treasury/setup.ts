@@ -95,6 +95,19 @@ export async function treasurySetup() {
       print({ state });
       return;
     }
+    if (command === "resolve-card-event") {
+      const resolution = argument(4, "resolution");
+      if (resolution !== "retry" && resolution !== "ignore") {
+        throw new Error("card event resolution must be retry or ignore");
+      }
+      const state = await treasury.resolveCardEventReview({
+        inboxId: microsArgument(3, "card event inbox id"), resolution,
+        reviewReference: argument(5, "review reference"),
+        reason: argument(6, "review reason"),
+      });
+      print({ state });
+      return;
+    }
     if (command === "configure-controls") {
       const result = await treasury.configureControls({
         fundingEnabled: booleanArgument(3, "funding enabled"),
@@ -114,7 +127,16 @@ export async function treasurySetup() {
       print(result);
       return;
     }
-    throw new Error("usage: deposit-route | destination | asset-account | release-freeze | resolve-payout | resolve-event | configure-controls | restore-controls");
+    if (command === "card-spend") {
+      const mode = argument(3, "enable or disable");
+      if (mode !== "enable" && mode !== "disable") throw new Error("card-spend mode must be enable or disable");
+      const reason = process.argv[4] === "--reason" ? argument(5, "review reason") : argument(4, "review reason");
+      const changed = await treasury.setCardSpendEnabled(mode === "enable", reason);
+      const controls = await treasury.controlState();
+      print({ changed, cardSpendEnabled: controls.cardSpendEnabled ?? false, breakerReason: controls.breakerReason });
+      return;
+    }
+    throw new Error("usage: deposit-route | destination | asset-account | release-freeze | resolve-payout | resolve-event | resolve-card-event | configure-controls | restore-controls | card-spend enable|disable --reason <text>");
   } finally {
     await db.close();
   }
