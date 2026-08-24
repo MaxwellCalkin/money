@@ -3,7 +3,8 @@
 // or money-transmission vocabulary: the approved terms are "reserved card",
 // "spend mandate up to $X", and "agent funds". This script fails the build
 // when a banned term appears in README.md, packages/*/README.md,
-// docs/marketing/**, or an MCP tool description in src/mcp/server.ts.
+// docs/marketing/**, the landing-page copy (site/index.html,
+// site/copy-variants.md), or an MCP tool description in src/mcp/server.ts.
 //
 // Run directly (`npm run lint:vocabulary`) or through test/vocabulary.test.ts.
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -92,6 +93,8 @@ export function lintRepository(root = ROOT) {
   const problems = [];
   const files = [
     join(root, "README.md"),
+    join(root, "site", "index.html"),
+    join(root, "site", "copy-variants.md"),
     ...readdirSync(join(root, "packages"))
       .map((name) => join(root, "packages", name, "README.md"))
       .filter((path) => {

@@ -3,6 +3,10 @@
 Drafted 2026-08-08 against the current YC application form (questions sourced from
 apply.ycombinator.com guides current for the F2026 cycle; the live portal at
 apply.ycombinator.com/home is authoritative — expect minor wording drift).
+**Revised 2026-08-23 for v0.14 (the reserved-card rail): the product, demo, and
+progress answers now lead with the card demo. Card-rail claims verified against
+the repo and the committed `npm run demo:card` transcript on 2026-08-23; see the
+appendix.**
 
 **Batch logistics (verified 2026-08-08 from ycombinator.com/apply):** Fall 2026
 regular deadline was July 27, 8pm PT; **late applications are still accepted** and
@@ -41,39 +45,72 @@ domain. Do not submit a dead URL.]
 Product link: https://www.npmjs.com/package/@agentmoney/wallet-mcp (live, Apache-2.0)
 and https://github.com/MaxwellCalkin/money
 
-Demo video: [FOUNDER-INPUT: record the 60-second demo per
-docs/marketing/demo/demo-video-kit.md — every frame is a real capture; the kit and
-verified transcript already exist. Upload unlisted YouTube/Loom link here.]
+Demo video: [FOUNDER-INPUT: record the 90-second card demo per the storyboard in
+docs/marketing/posts/your-agent-never-sees-the-card-number.md — every frame is a
+real capture of `npm run demo:card`; the deterministic verified transcript is
+docs/marketing/demo/agent-card-transcript.md. Upload unlisted YouTube/Loom link
+here.]
 
 Description of the demo (usable as the video caption or if a text field asks):
 
-> One command gives a coding agent a wallet under a mandate its owner signed:
-> `$10 budget · $1/tx · $5/day · ask above $2 · new payee capped at 10¢`. In the
-> demo the agent hits a paid API, gets HTTP 402, pays $0.05 automatically and
-> retries — receipt attached. Then it's told to pay $1.50, and the network refuses:
-> `{"status":"denied","code":"per_tx_cap","reason":"$1.50 exceeds the $1.00
-> per-transaction cap"}`. That refusal is the product. It is deterministic policy
-> enforced in the database, outside any model context — a prompt injection can ask
-> for money; nothing in the agent's context can sign or widen the mandate. Every
-> other agent-payments demo shows a payment succeeding. Ours peaks on the no.
+> I put $100 behind my agent (sandbox, no real funds) and sign one spend mandate
+> up to $100: $40 per transaction, ask me above $60, a first purchase at an
+> unseen merchant capped at $15. The agent requests a **reserved card** — a
+> single-merchant virtual card under that mandate — and buys a $29 item at an
+> ordinary checkout: APPROVED at MOCK SHOP EXAMPLE (MCC 5734), decided inside
+> the card network's 2-second synchronous window. Then it tries $400 of gift
+> cards at a merchant the owner never bought from, and the network refuses,
+> live: `DECLINED · $400.00 at GIFT CARD EMPORIUM (MCC 6051) · new_payee_cap` —
+> the agent cannot be lured into $400 of gift cards. Then the same agent pays
+> @writer-agent $5 for a service on the internal ledger rail. One hash-chained
+> feed carries the purchase, the decline, and the agent-to-agent payment;
+> `ledger_health` recomputes every receipt's evidence from the ledger: true.
+> The policy is deterministic, enforced in Postgres outside any model context —
+> injected text can ask for money; nothing in the agent's context can sign or
+> widen the mandate — and no card number ever exists anywhere the model can
+> read (the tools return last4 only). Every other agent-payments demo shows a
+> payment succeeding. Ours peaks on the DECLINED.
 
 ### What is your company going to make? Please describe your product and what it does or will do.
-agentmoney is a spend account for AI agents. An owner signs a mandate — budget,
-per-transaction cap, daily cap, an "ask me above $X" escalation line, a first-touch
-throttle on never-seen payees, allowlists, expiry — and the agent spends freely
-inside it. The mandate is enforced deterministically in Postgres, outside any model
-context: policy check, balance check, double-entry journal write, and hash-chained
-receipt happen in one database transaction, exactly-once under retries. Above the
-escalation line, the request parks durably in the owner's inbox and approval
-executes exactly the tuple the human saw, once.
+agentmoney is the owner's spend account for AI agents. The founder sentence, true
+in sandbox today: *I put $100 in, my agent spends it at normal websites like a
+card, and it can pay another agent for a service.* An owner signs one mandate —
+budget, per-transaction cap, daily cap, an "ask me above $X" escalation line, a
+first-purchase throttle on never-seen merchants and payees, allowlists, expiry —
+and one policy engine enforces it deterministically in Postgres, outside any model
+context, across three rails:
 
-It ships today as an MCP wallet any agent runtime can mount (`npx -y
-@agentmoney/wallet-mcp`) plus a seller SDK for anyone to publish a paid API.
-Internal agent-to-agent payments settle as ledger rows (instant, fee-free,
-sub-cent capable); an x402 v2 bridge pays external sellers in USDC on Base under
-the same mandate. The receipt chain is the second product: portable, tamper-evident
-evidence that agent spend is real — which matters in a market where roughly half of
-x402 volume was shown to be self-dealing.
+1. **A reserved-card rail (new in v0.14).** The agent asks for a reserved card —
+   a single-merchant virtual card under the mandate. Issuing reserves its full
+   cap from the agent funds up front; the policy engine answers every card
+   network authorization synchronously (fixed decline ladder: merchant category,
+   allowlist, merchant lock, single-use, first-merchant throttle, cap) inside
+   the issuer's 2-second window; the unspent remainder returns when the card
+   closes and mandate authority is never restored. The card number never enters
+   model context — the agent's tools return last4 only. This borrows every
+   online merchant on earth as supply on day one.
+2. **A closed-loop ledger rail** for agent-to-agent payments: instant, fee-free,
+   sub-cent capable, settled as double-entry journal rows.
+3. **An x402 v2 bridge** paying external machine-native sellers in USDC on Base
+   under the same mandate (implemented; mainnet activation gated on a ~$15
+   founder float).
+
+Above the escalation line, a request parks durably in the owner's inbox and
+approval executes exactly the tuple the human saw, once. It ships as an MCP
+wallet any agent runtime can mount (`npx -y @agentmoney/wallet-mcp`) plus a
+seller SDK for anyone to publish a paid API. The receipt chain is the second
+product: every event on every rail — including declines — is a hash-chained,
+portable, tamper-evident receipt, which matters in a market where roughly half
+of x402 volume was shown to be self-dealing.
+
+The thesis: the card is table stakes — the incumbents are all shipping a card
+or a checkout — and none of them ships standing mandates with an escalation
+line, exact-tuple approvals, a first-purchase throttle, and verifiable receipts
+across card, closed-loop, and machine-native rails from one policy engine.
+agentmoney is that neutral policy-and-evidence plane. Honest status: the card
+rail runs in sandbox against a mock issuer speaking the Stripe Issuing wire
+shape; the Stripe adapter is protocol-faithful, fixture-tested, test-mode ready.
+Sandbox surfaces carry the label "sandbox, no real funds".
 
 ### Where do you live now, and where would the company be based after YC?
 [FOUNDER-INPUT: current city; and the honest answer on relocating to SF for the
@@ -101,12 +138,14 @@ into your own words, do not read verbatim:]
 > runtime. So I built agentmoney: the agent gets a wallet, I sign a mandate —
 > budget, per-transaction cap, a line above which it has to ask me — and the
 > network enforces it in the database, outside the model, so a prompt injection
-> can't spend what I didn't sign. It's live on npm, Apache-2.0, three weeks of
-> work so far: a Postgres money kernel with a 239-test suite, hash-chained
-> receipts, and an x402 bridge. The demo's best moment is the network telling the
-> agent no. I'm applying because the agent-payments control plane is being decided
-> right now, and the neutral version of it shouldn't be owned by a payments
-> platform.
+> can't spend what I didn't sign. It's live on npm, Apache-2.0: a Postgres money
+> kernel with hash-chained receipts, an x402 bridge, and — as of v0.14 — a
+> reserved-card rail, so in sandbox my agent buys at an ordinary checkout with a
+> virtual card under my mandate and never sees the card number. The demo's best
+> moment is the card network asking about $400 of gift cards and my policy
+> engine saying no in under two seconds. I'm applying because the agent-payments
+> control plane is being decided right now, and the neutral version of it
+> shouldn't be owned by a payments platform.
 
 ### Who writes code, or does other technical work on your product? Was any of it done by a non-founder?
 I write and direct all of it. Concretely: I work with AI coding agents as a
@@ -134,7 +173,9 @@ N/A — solo founder.
 Yes, I know YC's data favors teams. Two honest counterpoints. First, leverage: this
 went from empty repo to a production-candidate Postgres money kernel — 239 tests,
 compliance perimeter, treasury boundary, x402 bridge, two published npm packages —
-in 24 days, because I run coding agents as a team and spend my own time on review,
+in its first 24 days, and by week six had shipped a working reserved-card rail
+(sandbox, mock issuer speaking the Stripe Issuing wire shape, deterministic demo
+transcript committed), because I run coding agents as a team and spend my own time on review,
 security invariants, and go-to-market. The repo history is public and verifiable.
 Second, alignment: a company whose product is governance for agent labor should be
 demonstrating agent labor under governance. The honest weakness of solo isn't
@@ -148,21 +189,38 @@ human accountability structure — advisors, peers, whoever actually exists].
 ## PROGRESS
 
 ### How far along are you?
-Built and published; pre-users. Shipped: a production-candidate money kernel
-(Postgres double-entry journal, owner-signed mandates evaluated atomically outside
-model context, exactly-once idempotency, hash-chained receipts, Ed25519 identity,
+Built and published; pre-users. New since v0.13 — **the reserved-card rail
+(v0.14, in the repo)**: an agent can hold a virtual card under its owner's
+mandate; a dedicated minimally-privileged authorization process answers the
+card network's synchronous authorization request through a fixed 12-step
+decline ladder in the database; a durable event worker re-fetches every issuer
+event before trusting it; PAN custody is `none` by default (no reveal surface
+exists; the model only ever sees last4, enforced by a no-PAN regression test);
+a treasury breaker halts all card spend if the issuer ever reports an approval
+we didn't decide. The whole loop runs deterministically (`npm run demo:card`,
+transcript committed): fund $100 → $29 approved at an ordinary merchant in
+under 2 seconds → $400 gift-card attempt visibly declined (`new_payee_cap`) →
+$5 paid agent-to-agent → one hash-chained feed, `ledger_health` true. Sandbox,
+no real funds; the Stripe Issuing adapter is protocol-faithful, fixture-tested,
+test-mode ready.
+
+Already shipped before that: the production-candidate money kernel (Postgres
+double-entry journal, owner-signed mandates evaluated atomically outside model
+context, exactly-once idempotency, hash-chained receipts, Ed25519 identity,
 durable owner approvals), an MCP wallet and seller SDK live on npm since Aug 6
 (`@agentmoney/wallet-mcp`, `@agentmoney/seller-sdk`, Apache-2.0), an x402 v2
-bridge with remote-HSM signing and independent on-chain settlement verification,
-and the treasury/compliance software boundary (Column ACH, Persona KYC) — built
-fail-closed, not yet activated with customer funds. 239-test suite plus a
-live-Postgres contention gate in CI. Honest zeroes: 0 users, 0 revenue, $0 GMV.
-Next 4 weeks (plan already written): invite-gated hosted beta on free-tier infra,
-mainnet bridge behind hard caps (≤$10 total float), and the first stranger
-onboarded to a paid fetch in under 10 minutes.
+bridge with remote-HSM signing and independent on-chain settlement verification
+(implemented; mainnet activation gated on a ~$15 founder float), and the
+treasury/compliance software boundary (Column ACH, Persona KYC) — built
+fail-closed, not yet activated with customer funds. 239-test suite (grown since
+that count was set) plus a live-Postgres contention gate in CI. Honest zeroes:
+0 users, 0 revenue, $0 GMV, no live card program. Next moves (sequence already
+written in docs/GOTOMARKET.md): real issuer traffic in Stripe test mode, then a
+founder-entity commercial beta with the founder's own money at ≤$500 exposure
+while strangers use the invite-gated hosted sandbox.
 
 ### How long have each of you been working on this? How much of that has been full-time?
-First commit July 15, 2026 — about 3.5 weeks. [FOUNDER-INPUT: state truthfully
+First commit July 15, 2026 — about 5.5 weeks as of this revision. [FOUNDER-INPUT: state truthfully
 whether this has been full-time since then, and if not, what fraction and what
 else occupies you. Do not fudge this; YC checks commitment hard for solo founders.]
 
@@ -178,7 +236,11 @@ traction; we don't manufacture it.)
 
 ### When will you have a version people can use?
 Now, self-hosted: `npx -y @agentmoney/wallet-mcp` against the open-source network
-(README walkthrough, ~10 minutes). Hosted invite-gated beta (no self-hosting,
+(README walkthrough, ~10 minutes), and the full card loop runs in one command —
+`npm run demo:card` boots the real API, the real authorization server, and the
+real event worker against an in-process Postgres and replays the fund → approve →
+decline → agent-pays-agent story deterministically (sandbox, no real funds).
+Hosted invite-gated beta (no self-hosting,
 sandbox tier, hard caps, explicit not-production labeling): targeted inside the
 next 4 weeks; the deploy profile and invite-code onboarding are already built.
 
@@ -196,7 +258,14 @@ roles cannot post raw journal entries. Hono HTTP APIs; Ed25519 signed requests w
 durable nonce replay defense; MCP (Model Context Protocol) for the agent-side
 wallet; x402 v2 / EIP-3009 USDC on Base for the external rail, signed by a remote
 HSM and verified independently against chain calldata and logs; Docker
-(distroless, non-root, SBOM'd) for deploys.
+(distroless, non-root, SBOM'd) for deploys. The card rail adds two separately
+credentialed processes with their own database roles: an authorization ingress
+that answers the issuer's synchronous webhook (HMAC-verified, fail-closed parse,
+integer-only SQL decision, sub-2-second budget) and can execute exactly two
+database functions, and an event worker holding a read-only issuer credential
+that re-fetches every clearing/void/refund from the issuer before any ledger
+command. The mock issuer speaks the Stripe Issuing wire shape; the Stripe
+adapter is protocol-faithful, fixture-tested, test-mode ready.
 
 ---
 
@@ -243,6 +312,20 @@ Three things I understand that they can't act on:
    — evidence buyers, sellers, and eventually auditors can verify without
    trusting us. Competitors would have to disavow their own historical volume to
    copy this position.
+
+Since the first draft the field has moved to confirm the framing: agent cards
+and agent checkouts are proliferating (business-banking agent cards, issuer-side
+agent-controls alliances, agent extensions of Link-style checkout —
+[FOUNDER-INPUT: these competitor moves are from panel research 2026-08-23 and
+UNVERIFIED; re-verify each named move the day you submit or cut the names and
+keep the shape]). That is exactly why the card is table stakes: a virtual card
+borrows every merchant on earth as supply, so anyone can ship one. What no one
+ships is standing mandates with an escalation line, exact-tuple approvals, a
+first-purchase throttle bound to a merchant key computed in SQL, and
+hash-chained receipts across card, closed-loop, and machine-native rails from
+one policy engine. Our card exists to make the mandate engine demonstrable at
+ordinary merchants; the defensible asset is the neutral policy-and-evidence
+plane above the rails.
 
 ### How do or will you make money? How much could you make?
 Two mechanisms, sequenced: (1) a hosted control-plane subscription — the owner
@@ -364,14 +447,18 @@ only if that's actually true.]
 
 ---
 
-## APPENDIX — claim verification log (2026-08-08, do not submit)
+## APPENDIX — claim verification log (2026-08-08, card rows added 2026-08-23, do not submit)
 
 | Claim in draft | Verified against |
 |---|---|
-| Packages live on npm, 0.13.0, Apache-2.0, published 2026-08-06 | registry.npmjs.org API query for both @agentmoney packages |
+| Card demo numbers ($100 fund; $40/tx, ask above $60, $15 unseen-merchant cap; $29 APPROVED at MOCK SHOP EXAMPLE MCC 5734 in <2 s; $400 DECLINED at GIFT CARD EMPORIUM MCC 6051, code `new_payee_cap`; $5 to @writer-agent; `ledger_health` true) | docs/marketing/demo/agent-card-transcript.md — verbatim, byte-deterministic `npm run demo:card` output, pinned by test/demo-card.test.ts (2026-08-23) |
+| No card number ever in model context; last4 only; reveal mode `none` default | docs/CARD_RAIL.md "PAN custody"; test/demo-card.test.ts proves no PAN-shaped digit run in demo output; MCP tools money_card_create/status/close in src/mcp/server.ts return last4 only |
+| 12-step fixed decline ladder in the database; separate ingress + event-worker roles; treasury breaker on undecided approvals | docs/CARD_RAIL.md "Authorization decision order", "What the worker proves", "Deployment contract" |
+| Stripe adapter "protocol-faithful, fixture-tested, test-mode ready"; NOT a live card program | docs/CARD_RAIL.md "Stripe test-mode setup" + "Release boundary"; sandbox label mandatory |
+| Reserved-card semantics (full cap reserved at issue; remainder returns on close; mandate authority never restored) | docs/CARD_RAIL.md "Reserved-card accounting"; transcript sections 2 and 6 |
+| x402 mainnet "implemented, activation gated on a ~$15 founder float" | task ground rules 2026-08-23; consistent with GOTOMARKET |
+| Packages live on npm, 0.13.0, Apache-2.0, published 2026-08-06 | registry.npmjs.org API query for both @agentmoney packages (2026-08-08; wallet-mcp 0.14 publish is a GOTOMARKET move-2 gate, not yet claimed) |
 | 239-test suite + live-Postgres CI gate | docs/GOTOMARKET.md M0; grep counted 244 `it()/test()` declarations across test/ (239 is the documented release-gate count; suite has grown — safe to say "239-test") |
-| Refusal JSON quoted verbatim | docs/marketing/demo/verified-transcript.txt (real captured run, 2026-08-08) |
-| Mandate defaults ($10/$1/$5/ask>$2/10¢) | src/onboard.ts defaults per demo kit; transcript confirms |
 | Policy enforced outside model context, exact-tuple approvals, single-use permits, new-payee throttle | README "mandate model" + docs/THREAT_MODEL.md invariants 3–5 |
 | Exactly-once / hash-chained receipts / one DB transaction | README kernel description; THREAT_MODEL invariants 1, 5, 7 |
 | Treasury/compliance built but NOT activated with customer funds | README "Honest v0 shortcuts"; THREAT_MODEL status section — the draft never claims a live regulated network |
@@ -385,8 +472,12 @@ only if that's actually true.]
 | "$300B+ API/SaaS spend" expansion claim | Directional TAM framing, not a sourced statistic — [FOUNDER-INPUT: keep only if you're comfortable defending it, or swap for a sourced number before submitting] |
 
 ### Pre-submission checklist for Max
-1. Record the 1-minute founder video (script above) and the 60-second product
-   demo (kit in docs/marketing/demo/ — every frame a real capture).
+1. Record the 1-minute founder video (script above) and the 90-second card demo
+   (storyboard in docs/marketing/posts/your-agent-never-sees-the-card-number.md;
+   every frame a real capture of `npm run demo:card` — sandbox label on screen
+   for the full runtime).
+1a. Re-verify the competitor moves flagged UNVERIFIED in the competitors answer
+   before submitting, or cut the names.
 2. Fill every [FOUNDER-INPUT] — especially full-time status, runway, bio,
    cofounder stance. These are commitment probes; answer plainly.
 3. Re-verify npm download counts and any market number the day you submit.

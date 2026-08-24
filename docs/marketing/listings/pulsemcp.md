@@ -36,13 +36,15 @@ copy below is what we supply if they ask, or in the adjustment email.
 | Classification | Community (we are not a big-brand "official provider") |
 | Local/Remote | Local (stdio) |
 | License | Apache-2.0 |
-| Category suggestions | Finance / Payments / Agent commerce |
+| Category suggestions | Finance / Payments / Virtual cards / Agent commerce |
 
 Short description (their card format, 1–2 sentences):
 
-> A spend account for AI agents: balance, pay, and 402 auto-pay under an
-> owner-signed mandate the network enforces — never the model. Every
-> payment leaves a hash-chained receipt.
+> Owner-mandated spending for AI agents across three rails: agent-to-agent
+> payments, x402 auto-pay for machine-priced APIs, and reserved virtual
+> cards for ordinary checkouts (sandbox/test-mode today). The mandate is
+> enforced by the network — never the model — and every payment leaves a
+> hash-chained receipt.
 
 Longer body (if offered space): paste the **Long description** from
 `descriptions.md` verbatim, followed by the exact `.mcp.json` block:
@@ -71,14 +73,18 @@ Subject: Listing details for @agentmoney/wallet-mcp
 > `io.github.maxwellcalkin/wallet-mcp` in the official registry). A few
 > details for the listing:
 >
-> - It's a local stdio MCP wallet: four tools (money_balance, money_pay,
+> - It's a local stdio MCP wallet: seven tools (money_balance, money_pay,
 >   money_fetch with HTTP 402 auto-pay incl. external x402 sellers,
->   money_feed).
-> - The differentiator worth a sentence: the owner's spending mandate
->   (budget, per-payment cap, daily cap, ask-me-above line, new-payee
->   throttle) is enforced by the network, not by the model — over-cap
->   payments are refused and routed to an owner approval inbox, and every
->   payment leaves a hash-chained receipt.
+>   money_card_create / money_card_status / money_card_close for reserved
+>   virtual cards at ordinary merchants, money_feed). The card rail is
+>   sandbox/test-mode today — sandbox, no real funds.
+> - The differentiator worth a sentence: the owner's spend mandate (budget,
+>   per-transaction cap, daily cap, ask-me-above line, new-payee throttle,
+>   allowlist) is enforced by the network, not by the model — over-cap
+>   payments and cards are refused or routed to an owner approval inbox,
+>   card authorizations are decided by a deterministic ladder outside the
+>   model, the card number never enters the model's context (tools return
+>   only the last4), and every payment leaves a hash-chained receipt.
 > - Repo: https://github.com/MaxwellCalkin/money (subfolder
 >   packages/wallet-mcp), Apache-2.0.
 >

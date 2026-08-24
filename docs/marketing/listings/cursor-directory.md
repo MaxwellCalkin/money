@@ -28,10 +28,10 @@ Two related surfaces:
 |---|---|
 | Name | Agent Money Wallet |
 | Package | `@agentmoney/wallet-mcp` (npm) |
-| Short description | A spend account for AI agents: balance, pay, and 402 auto-pay under an owner-signed mandate. |
+| Short description | Owner-mandated spending for AI agents: agent payments, x402 auto-pay, and reserved virtual cards. |
 | Longer description | Use the **Medium description** from `descriptions.md`; if a full body is allowed, the **Long description**. |
 | Repo URL | https://github.com/MaxwellCalkin/money |
-| Categories/Tags | payments, finance, wallet, x402, ai-agents |
+| Categories/Tags | payments, finance, wallet, virtual-cards, x402, ai-agents |
 | Logo | TODO-founder (optional) |
 
 ## Cursor install config — `.cursor/mcp.json`
@@ -90,6 +90,9 @@ readers the `.cursor/mcp.json` block instead. Verify once before shipping.)
   `money`, command `npx -y @agentmoney/wallet-mcp`, and the three env
   placeholders — nothing else.
 - After the user swaps in real values, "money" appears under Settings →
-  Tools & MCP with 4 tools, and "check my balance" round-trips.
+  Tools & MCP with 7 tools (including the three `money_card_*` tools), and
+  "check my balance" round-trips.
+- The card rail is sandbox/test-mode today; any card-related copy in the
+  entry carries the "sandbox, no real funds" label.
 - The directory entry never claims a hosted service; install is local
   stdio against the user's own or an operator's network.

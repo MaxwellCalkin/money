@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agentmoney — the neutral spend account for AI agents</title>
-<meta name="description" content="Give any MCP-capable agent a wallet. Owner-signed mandates enforced by a deterministic policy engine outside the model, with hash-chained receipts. Invite-only testnet beta.">
+<title>agentmoney — put $100 behind your agent</title>
+<meta name="description" content="Put $100 behind your agent. It shops at ordinary websites with a reserved virtual card, pays other agents for services, and it can never exceed your spend mandate. Invite-only sandbox beta — no real funds.">
 <style>
   :root {
     color-scheme: light dark;
@@ -246,7 +246,8 @@
   <nav>
     <span class="wordmark">agent<span>money</span></span>
     <span class="links">
-      <a href="#refusal">The refusal</a>
+      <a href="#decline">The decline</a>
+      <a href="#refusal">x402</a>
       <a href="#policy">Policy</a>
       <a href="#quickstart">Quickstart</a>
       <a href="#sellers">Sellers</a>
@@ -256,12 +257,13 @@
   </nav>
 
   <header class="hero">
-    <h1>The neutral spend account for AI&nbsp;agents.</h1>
+    <h1>Put $100 behind your&nbsp;agent.</h1>
     <p class="sub">
-      Give any MCP-capable agent a wallet. The owner's mandate — budget, per-payment cap,
-      daily cap, an ask-me-above line, a new-payee throttle — is enforced by a deterministic
-      policy engine outside the model, and every payment leaves a hash-chained,
-      tamper-evident receipt.
+      It shops at ordinary websites with a reserved virtual card, pays other agents for
+      services, and the one thing it can never do is exceed your mandate. The spend
+      mandate — per-purchase cap, an ask-me-above line, a throttle on unseen merchants —
+      is enforced by a deterministic policy engine outside every model context, live at
+      the card network's authorization hop.
     </p>
     <div class="cta">
       <a class="btn" href="#invite">Request a beta invite</a>
@@ -271,17 +273,94 @@
       <span>Apache-2.0</span>
       <span>npm: @agentmoney/wallet-mcp</span>
       <span>npm: @agentmoney/seller-sdk</span>
-      <span>Postgres kernel · 239-test suite</span>
+      <span>Postgres kernel · npm run demo:card</span>
     </div>
   </header>
 
-  <section id="refusal">
-    <div class="kicker">The hero moment</div>
-    <h2>Every payments demo shows a payment succeeding. Here is ours refusing one.</h2>
+  <section id="decline">
+    <div class="kicker">Act 1 · the reserved card</div>
+    <h2>$29 approved in under two seconds. $400 of gift cards, declined.</h2>
     <p class="lede">
-      An agent buys a $0.05 report inside its mandate, then tries a $2.50 upgrade.
-      The network — not the model — says no. This is the actual decision object the
-      policy engine returns.
+      Every line below is a verbatim excerpt of the byte-deterministic output of
+      <code>npm run demo:card</code> — the real Postgres product API and the real card
+      authorization server, answering a mock issuer network that speaks the Stripe Issuing
+      wire shape. Sandbox, no real funds. Re-run it yourself; it reproduces byte for byte.
+    </p>
+
+    <div class="term">
+      <div class="term-bar"><i></i><i></i><i></i><em>npm run demo:card — sandbox, no real funds</em></div>
+      <pre>agentmoney · reserved-card rail demo
+<span class="t-warn">SANDBOX — no real funds; nothing here is a bank, card, or deposit account.</span>
+
+<span class="t-dim">━━ 1 · Owner funds $100 and signs a spend mandate ━━━━━━━━━━━━━━━━━━</span>
+  <span class="t-ok">✓</span> owner funded $100.00 (dev funding — sandbox, no real funds)
+  <span class="t-ok">✓</span> $100.00 allocated to @scout — agent funds: $100.00
+  <span class="t-ok">✓</span> spend mandate up to $100.00 signed by the owner:
+  <span class="t-ok">✓</span>   $40.00 per transaction · human approval above $60.00
+  <span class="t-ok">✓</span>   first purchase at an unseen merchant capped at $15.00
+
+<span class="t-dim">━━ 2 · A reserved card: spend mandate up to $29.00 at mock-shop.example ━━━━</span>
+  <span class="t-ok">✓</span> @scout requested a reserved card — active, single-use, last4 4242
+  <span class="t-ok">✓</span> issuing the card reserved its full $29.00 cap from the agent funds — agent funds: $71.00
+
+<span class="t-dim">━━ 3 · The merchant network asks; agentmoney answers in real time ━━━━</span>
+  <span class="t-ok">✓ APPROVED · $29.00 at MOCK SHOP EXAMPLE (MCC 5734)</span>
+  <span class="t-ok">✓</span> decision latency: &lt;2 s — measured against the issuer's hard synchronous
+  <span class="t-ok">✓</span>   deadline and asserted on every run (this run held it)
+
+<span class="t-dim">━━ 4 · $400 of gift cards at an unseen merchant: declined ━━━━━━━━━━</span>
+  <span class="t-no">✗ DECLINED · $400.00 at GIFT CARD EMPORIUM (MCC 6051)</span>
+  <span class="t-no">✗</span> decline code: <span class="t-no">new_payee_cap</span> — in plain words: this owner has never bought
+  <span class="t-no">✗</span>   from this merchant, and a first purchase at an unseen merchant may not
+  <span class="t-no">✗</span>   exceed the mandate's $15.00 new-payee cap. The agent cannot be lured
+  <span class="t-no">✗</span>   into $400.00 of gift cards.
+  <span class="t-ok">✓</span> the decline was decided in the same &lt;2 s synchronous window; no funds moved
+
+<span class="t-dim">━━ 5 · The agent pays another agent for a service ━━━━━━━━━━━━━━━━━━</span>
+  <span class="t-ok">✓</span> @scout paid @writer-agent $5.00 — memo: "product summary: mock-shop.example findings"
+  <span class="t-ok">✓</span> instant internal settlement, one hash-chained receipt — agent funds: $26.00
+
+<span class="t-dim">━━ 7 · One feed, verified ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+  <span class="t-ok">✓</span> ledger_health: zero-sum true · receipt evidence recomputed from the ledger: true</pre>
+    </div>
+
+    <p class="caption">
+      The decline is the brand. Every payments demo in this space shows a purchase
+      succeeding; the product here is the refusal — decided inside the issuer's synchronous
+      window, recorded on the same hash-chained feed as the successes. And the agent held
+      only <code>last4 4242</code> the whole time: no card number appears in the transcript,
+      and the pinned demo test proves nothing PAN-shaped ever does.
+    </p>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Issuing reserves, spending clears</h3>
+        <p>A reserved card sets its full cap aside from the agent funds before it works.
+        Close the card and the unspent remainder returns; mandate authority already used
+        is never restored. No surprise bills, by arithmetic.</p>
+      </div>
+      <div class="card">
+        <h3>Answered live, at the network</h3>
+        <p>Every authorization is answered synchronously by a fixed decline ladder —
+        merchant category, allowlist, merchant lock, single-use, first-merchant throttle,
+        cap — inside the issuer's two-second deadline.</p>
+      </div>
+      <div class="card">
+        <h3>Your agent never sees the card number</h3>
+        <p>The MCP tools return only the <span class="mono">last4</span>. In token mode the
+        host runtime — never the model — redeems a single-use checkout token outside model
+        context. Default mode has no reveal surface at all.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="refusal">
+    <div class="kicker">Act 2 · the closed loop and x402</div>
+    <h2>The same mandate governs API payments — and refuses the same way.</h2>
+    <p class="lede">
+      The card rail is one act. The other: an agent buys a $0.05 report over HTTP 402
+      inside its mandate, then tries a $1.50 upgrade. The network — not the model — says
+      no. This is the actual decision object the policy engine returns.
     </p>
 
     <div class="term">
@@ -294,11 +373,11 @@
   <span class="t-dim">⎿</span> HTTP 402 → paid <span class="t-ok">$0.05</span> under the mandate · receipt <span class="t-dim">rcpt_01j8k…</span>
      200 OK — report delivered
 
-<span class="t-ok">⏺</span> money_pay(to: <span class="t-warn">"@research-cloud"</span>, amount_usd: 2.50, memo: <span class="t-warn">"premium dataset"</span>)
+<span class="t-ok">⏺</span> money_pay(to: <span class="t-warn">"@research-cloud"</span>, amount_usd: 1.50, memo: <span class="t-warn">"premium dataset"</span>)
   <span class="t-dim">⎿</span> {
        "status": <span class="t-no">"denied"</span>,
        "code": <span class="t-no">"per_tx_cap"</span>,
-       "reason": <span class="t-no">"$2.50 exceeds the $1.00 per-transaction cap"</span>
+       "reason": <span class="t-no">"$1.50 exceeds the $1.00 per-transaction cap"</span>
      }</pre>
     </div>
 
@@ -358,7 +437,7 @@
 
   <section id="tools">
     <div class="kicker">The wallet</div>
-    <h2>Four tools. That's the whole surface an agent gets.</h2>
+    <h2>Seven tools. That's the whole surface an agent gets.</h2>
     <p class="lede">
       <code>@agentmoney/wallet-mcp</code> works in Claude Code, Cursor, or any MCP-capable
       runtime. The agent process holds only its own signing key — never the owner key, and
@@ -380,8 +459,20 @@
           <td class="desc">GET a URL; on HTTP 402 (network challenge or external x402 seller) pay it within the mandate and retry — exactly-once, crash-recoverable. HTTPS required, redirects never carry payment credentials, private targets rejected by default.</td>
         </tr>
         <tr>
+          <td class="tool">money_card_create</td>
+          <td class="desc">A reserved virtual card under the owner's spend mandate, for buying at an ordinary online merchant. Issuing reserves the full cap up front; returns only the <code>last4</code> — the tool never sees or returns the card number. Caps above the owner's escalation line become a durable approval request instead.</td>
+        </tr>
+        <tr>
+          <td class="tool">money_card_status</td>
+          <td class="desc">One card's state, cap, what has cleared at the merchant, and whether the owner has approved it yet.</td>
+        </tr>
+        <tr>
+          <td class="tool">money_card_close</td>
+          <td class="desc">Close a reserved card. The unspent remainder returns to the agent funds; mandate authority already used is not restored.</td>
+        </tr>
+        <tr>
           <td class="tool">money_feed</td>
-          <td class="desc">Recent receipts.</td>
+          <td class="desc">Recent receipts — the hash-chained evidence feed, both rails.</td>
         </tr>
       </table>
     </div>
@@ -456,6 +547,13 @@ app.get(<span class="ts">"/report"</span>, moneyPaid({
     <ul class="honest">
       <li><strong>Invite-only, testnet-labeled beta.</strong> Sandbox balances with hard
         caps and no KYC. Explicitly not production; do not point real budgets at it.</li>
+      <li><strong>The card rail is sandbox today.</strong> The demo above runs against a
+        Stripe-shaped mock issuer. The Stripe Issuing integration is protocol-faithful,
+        fixture-tested, and test-mode ready — there is no live card program and no real
+        card. Sandbox, no real funds.</li>
+      <li><strong>x402 mainnet: implemented, not yet switched on.</strong> The external
+        x402 rail is built and tested; mainnet activation is gated on a ~$15 founder
+        float. Until then it runs in sandbox.</li>
       <li><strong>One free-tier VM, best-effort.</strong> Nightly encrypted backups and
         external monitoring, but no SLA. The status page says exactly this.</li>
       <li><strong>Real numbers or no numbers.</strong> We publish wash-proof metrics from

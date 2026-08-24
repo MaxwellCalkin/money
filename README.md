@@ -73,6 +73,8 @@ funds):
 npm run demo:card
 ```
 
+![Animated terminal cast of the reserved-card demo: the $29 approval, the $400 new_payee_cap decline, the $5 agent payment, and ledger_health true — sandbox, no real funds](docs/marketing/demo/agent-card-cast.svg)
+
 The committed transcript is `docs/marketing/demo/agent-card-transcript.md`:
 fund $100 → grant the mandate → a $29 purchase at `mock-shop.example`
 authorizes in under two seconds and clears → a $400 attempt at an unseen

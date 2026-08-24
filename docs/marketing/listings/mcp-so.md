@@ -23,10 +23,10 @@ with a markdown body and a "Server Config" JSON block.
 |---|---|
 | Name (slug) | agentmoney-wallet |
 | Title | Agent Money Wallet — a spend account for AI agents |
-| Description (card/SEO, ~155 chars) | MCP wallet for AI agents: check balance, pay accounts, auto-pay HTTP 402 URLs (incl. x402) under an owner-signed mandate the network enforces. |
+| Description (card/SEO, 155 chars) | MCP wallet for AI agents: pay agents, auto-pay HTTP 402/x402 APIs, and buy at ordinary checkouts with reserved virtual cards under an owner-signed mandate. |
 | GitHub URL | https://github.com/MaxwellCalkin/money |
 | Website | https://github.com/MaxwellCalkin/money/tree/main/packages/wallet-mcp |
-| Categories / Tags | payments, wallet, x402, finance, ai-agents, commerce |
+| Categories / Tags | payments, wallet, virtual-cards, x402, finance, ai-agents, commerce |
 | Type | MCP Server (community, local/stdio) |
 
 Server Config block (their pages render one; use the exact contract):
@@ -55,34 +55,56 @@ Paste everything below the line verbatim.
 
 **@agentmoney/wallet-mcp** gives any MCP-capable agent runtime (Claude
 Code, Cursor, Codex) a real spending account on a
-[money](https://github.com/MaxwellCalkin/money) network.
+[money](https://github.com/MaxwellCalkin/money) network — owner-mandated
+spending across three rails: instant agent-to-agent payments on the
+network's ledger, x402/HTTP-402 auto-pay for machine-priced APIs, and
+reserved virtual cards for ordinary online checkouts (sandbox/test-mode
+today — sandbox, no real funds).
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `money_balance` | Spendable balance and mandate state |
+| `money_balance` | How much the agent can still spend under its owner's mandate |
 | `money_pay` | Pay any account (agent, provider, user) by id or `@handle`, idempotency-keyed |
 | `money_fetch` | GET a URL; on HTTP 402 (network challenge or external x402 seller) pay it within the mandate and retry — exactly-once, crash-recoverable |
+| `money_card_create` | A reserved virtual card under the owner's spend mandate for an ordinary merchant — single-use by default, merchant-locked, full cap reserved at issue; returns only the last4 |
+| `money_card_status` | One card's state, cap, cleared amount, and authorizations |
+| `money_card_close` | Close a card; the unspent remainder returns to the agent funds |
 | `money_feed` | Recent receipts from the hash-chained evidence feed |
 
 ## Why this wallet
 
 **The mandate is the security boundary, not the model's judgment.** The
-owner signs a mandate — budget, per-payment cap, daily cap, an
-ask-me-above escalation line, a new-payee throttle — and the network
-enforces it deterministically on every payment. The agent process holds
-only its own signing key: never the owner key, never a spending decision.
-Prompt-injected text can ask for money; nothing in the agent's context can
-sign or widen a mandate. Over-the-line payments are refused and land in
-the owner's approval inbox as a durable request the agent can resume after
-the owner decides.
+owner signs a mandate — budget, per-transaction cap, daily cap, an
+ask-me-above escalation line, a new-payee throttle, a payee allowlist —
+and the network enforces it deterministically on every payment, on every
+rail. When the merchant network asks about a card purchase, a fixed
+decline ladder answers inside the issuer's synchronous window — no model
+in the loop. The agent process holds only its own signing key: never the
+owner key, never a spending decision. Prompt-injected text can ask for
+money; nothing in the agent's context can sign or widen a mandate.
+Over-the-line payments and cards are refused and land in the owner's
+approval inbox as a durable request the agent can resume after the owner
+decides.
 
-**Exactly-once by construction.** Retries reuse idempotency keys,
-paid-but-undelivered fetches resume with the existing receipt instead of
-paying again, and in-flight external payments are recovered from the
-network's durable record after a crash. External x402 payments are
-policy-checked, capped, and auto-reversed if the seller never delivers.
+**The card number never enters the model's context.** There is no reveal
+tool: `money_card_create` returns the last4, expiry, cap, and merchant —
+enough to recognize the card, nothing that can leak it. In `token` reveal
+mode the network returns a single-use checkout token that host code —
+never the model — redeems to fill the merchant's payment form outside
+model context; in the default `none` mode no reveal surface exists at
+all. The card tools require a network API with the card rail (the
+Postgres-backed server, v0.14+); the card rail is sandbox/test-mode today
+— sandbox, no real funds.
+
+**Exactly-once by construction.** Payments and card requests reuse
+idempotency keys — a retry returns the original receipt or card instead
+of charging or reserving twice. Paid-but-undelivered fetches resume with
+the existing receipt instead of paying again, and in-flight external
+payments are recovered from the network's durable record after a crash.
+External x402 payments are policy-checked, capped, and auto-reversed if
+the seller never delivers.
 
 **Hardened fetch.** `money_fetch` requires HTTPS on the public internet,
 re-resolves DNS and pins the socket to the checked address, refuses to
@@ -90,8 +112,9 @@ auto-follow redirects (receipts and one-time payment headers are never
 forwarded across them), blocks private networks by default, and caps
 response bodies.
 
-Every transaction leaves a hash-chained receipt — portable, tamper-evident
-spend evidence.
+Every transaction — ledger payment, x402 purchase, card reserve and
+settlement — leaves a hash-chained receipt on one feed: portable,
+tamper-evident spend evidence.
 
 ## Quickstart
 

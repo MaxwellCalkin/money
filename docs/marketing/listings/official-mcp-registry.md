@@ -6,16 +6,19 @@ Docs: https://modelcontextprotocol.io/registry/quickstart
 
 ## Submission mechanics (CLI, not a form or PR)
 
-1. **Prerequisite — patch release required.** The registry verifies package
-   ownership by reading an `mcpName` field from the published npm tarball's
-   `package.json`. The live `@agentmoney/wallet-mcp@0.13.0` does not have it,
-   so add to `packages/wallet-mcp/package.json`:
+1. **Prerequisite — `mcpName` must ship in the npm tarball.** The registry
+   verifies package ownership by reading an `mcpName` field from the
+   published npm tarball's `package.json`. The v0.14.0 wallet package still
+   does not have it, so add to `packages/wallet-mcp/package.json`:
 
    ```json
    "mcpName": "io.github.maxwellcalkin/wallet-mcp"
    ```
 
-   and publish a patch (`0.13.1`) to npm before publishing to the registry.
+   and make sure the npm publish that carries it lands before publishing to
+   the registry (fold it into the `0.14.0` npm publish if that has not gone
+   out yet; otherwise ship a `0.14.1` patch and bump the versions below to
+   match).
    With GitHub authentication the name **must** start with
    `io.github.<github-username>/` — for the MaxwellCalkin account that is
    `io.github.maxwellcalkin/`. (`server.json` `name` must match `mcpName`
@@ -45,26 +48,28 @@ provenance publishing.
 
 ## server.json (submission-ready)
 
-Description is 92 chars — registry guides state a 100-character maximum, and
-the schema validates on publish.
+Description is 97 chars — registry guides state a 100-character maximum, and
+the schema validates on publish. (It names all three rails; the card rail is
+sandbox/test-mode today — the README the registry links to carries the
+"sandbox, no real funds" label.)
 
 ```json
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.maxwellcalkin/wallet-mcp",
-  "description": "A spend account for AI agents: balance, pay, and 402 auto-pay under an owner-signed mandate.",
+  "description": "Owner-mandated spending for AI agents: agent payments, x402 auto-pay, and reserved virtual cards.",
   "websiteUrl": "https://github.com/MaxwellCalkin/money",
   "repository": {
     "url": "https://github.com/MaxwellCalkin/money",
     "source": "github",
     "subfolder": "packages/wallet-mcp"
   },
-  "version": "0.13.1",
+  "version": "0.14.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@agentmoney/wallet-mcp",
-      "version": "0.13.1",
+      "version": "0.14.0",
       "transport": {
         "type": "stdio"
       },
@@ -112,7 +117,8 @@ the schema validates on publish.
 ```
 
 Notes:
-- `version` bumps in lockstep with the npm version on every future publish.
+- `version` bumps in lockstep with the npm version on every future publish —
+  it must always equal the npm version whose tarball carries `mcpName`.
 - Keep `websiteUrl` at the GitHub repo until the landing page exists, then
   update (TODO-founder: swap in the landing page URL when live).
 - The registry hosts metadata only; npm remains the artifact source, so the

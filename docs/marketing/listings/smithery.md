@@ -89,22 +89,30 @@ startCommand:
 |---|---|
 | Server name / namespace | `@MaxwellCalkin/wallet-mcp` (claimed via GitHub) |
 | Display name | Agent Money Wallet |
-| One-sentence description | A spend account for AI agents: balance, pay, and 402 auto-pay under an owner-signed mandate. |
+| One-sentence description | Owner-mandated spending for AI agents: agent payments, x402 auto-pay, and reserved virtual cards. |
 | Transport | stdio (local) |
-| Tool count | 4 (`money_balance`, `money_pay`, `money_fetch`, `money_feed`) |
+| Tool count | 7 (`money_balance`, `money_pay`, `money_fetch`, `money_card_create`, `money_card_status`, `money_card_close`, `money_feed`) |
 | GitHub repository | https://github.com/MaxwellCalkin/money |
 | Homepage | https://github.com/MaxwellCalkin/money (TODO-founder: landing page when live) |
 | Icon | TODO-founder (optional `icon.svg` in `packages/wallet-mcp/`) |
-| Tags | payments, wallet, x402, finance, ai-agents |
+| Tags | payments, wallet, virtual-cards, x402, finance, ai-agents |
 
 If Smithery's page supports a longer body, paste the **Long description**
 from `descriptions.md` verbatim; otherwise the README (already in the
 package) carries it.
 
+The three card tools (v0.14) need no extra config fields — the schema above
+stays exactly as it is. They require a network API with the card rail (the
+Postgres-backed server, v0.14+); the card rail is sandbox/test-mode today —
+sandbox, no real funds — and the card number never reaches the client, so
+there is nothing card-related to configure or to secure on Smithery's side.
+
 ## Post-submit checklist
 
 - Verify the rendered config form asks for exactly: moneyApi, agentId,
   agentKeyFile/agentKey — nothing else.
+- Verify the tool scan shows all seven tools, including the three
+  `money_card_*` tools.
 - Verify the page does not label the server "hosted"; it must read as a
   local/stdio install.
 - Verify the install snippet resolves to `npx -y @agentmoney/wallet-mcp`.

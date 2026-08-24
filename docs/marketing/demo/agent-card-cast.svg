@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420" xml:space="preserve" font-family="ui-monospace, 'Cascadia Code', Consolas, monospace" role="img" aria-label="Animated terminal cast of npm run demo:card: a $29 approval, a $400 new_payee_cap decline, a $5 agent payment, one verified feed. Sandbox, no real funds.">
+  <title>agentmoney reserved-card rail demo (sandbox, no real funds)</title>
+  <style>
+    text {
+      font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+      font-size: 13px;
+      fill: #b8cfc4;
+    }
+    .title { font-size: 12px; fill: #9fbfb2; }
+    .dim { fill: #7e9a8e; }
+    .hd { fill: #8fb3a5; }
+    .ok { fill: #6fd3ae; }
+    .bad { fill: #f2a08e; }
+    .big { font-size: 15px; font-weight: 600; }
+    .scene { opacity: 0; animation: scene 18s linear infinite; }
+    .s1 { animation-delay: 0s; }
+    .s2 { animation-delay: 3.6s; }
+    .s3 { animation-delay: 7.2s; }
+    .s4 { animation-delay: 10.8s; }
+    .s5 { animation-delay: 14.4s; }
+    @keyframes scene {
+      0%    { opacity: 0; }
+      2.5%  { opacity: 1; }
+      17.5% { opacity: 1; }
+      20%   { opacity: 0; }
+      100%  { opacity: 0; }
+    }
+  </style>
+
+  <rect width="800" height="420" rx="10" fill="#0d1512"/>
+  <rect width="800" height="34" rx="10" fill="#131e19"/>
+  <rect y="24" width="800" height="10" fill="#131e19"/>
+  <circle cx="22" cy="17" r="5" fill="#f2a08e"/>
+  <circle cx="40" cy="17" r="5" fill="#e8c07a"/>
+  <circle cx="58" cy="17" r="5" fill="#6fd3ae"/>
+  <text x="78" y="21" class="title">agentmoney · reserved-card rail demo — npm run demo:card</text>
+
+  <text x="24" y="58" class="dim">SANDBOX — no real funds; nothing here is a bank, card, or deposit account.</text>
+
+  <g class="scene s1">
+    <text x="24" y="98" class="hd">━━ 1 · Owner funds $100 and signs a spend mandate ━━━━━━━━━━━━━━━━━━</text>
+    <text x="24" y="128"><tspan class="ok">✓</tspan> owner funded $100.00 (dev funding — sandbox, no real funds)</text>
+    <text x="24" y="150"><tspan class="ok">✓</tspan> $100.00 allocated to @scout — agent funds: $100.00</text>
+    <text x="24" y="172"><tspan class="ok">✓</tspan> spend mandate up to $100.00 signed by the owner:</text>
+    <text x="24" y="194"><tspan class="ok">✓</tspan>   $40.00 per transaction · human approval above $60.00</text>
+    <text x="24" y="216"><tspan class="ok">✓</tspan>   first purchase at an unseen merchant capped at $15.00</text>
+    <text x="24" y="238"><tspan class="ok">✓</tspan>   payee allowlist: card:hint:mock-shop.example · @writer-agent</text>
+  </g>
+
+  <g class="scene s2">
+    <text x="24" y="98" class="hd">━━ 2 · A reserved card: spend mandate up to $29.00 at mock-shop.example ━━━━</text>
+    <text x="24" y="122"><tspan class="ok">✓</tspan> @scout requested a reserved card — active, single-use, last4 4242</text>
+    <text x="24" y="144"><tspan class="ok">✓</tspan> issuing the card reserved its full $29.00 cap from the agent funds</text>
+    <text x="24" y="176" class="hd">━━ 3 · The merchant network asks; agentmoney answers in real time ━━━━</text>
+    <text x="24" y="204" class="ok big">✓ APPROVED · $29.00 at MOCK SHOP EXAMPLE (MCC 5734)</text>
+    <text x="24" y="230"><tspan class="ok">✓</tspan> decision latency: &lt;2 s</text>
+    <text x="24" y="252"><tspan class="ok">✓</tspan> merchant captured $29.00 — the worker settled the clearing: card confirmed,</text>
+    <text x="24" y="274"><tspan class="ok">✓</tspan>   $29.00 settled under the mandate — agent funds: $71.00</text>
+  </g>
+
+  <g class="scene s3">
+    <text x="24" y="98" class="hd">━━ 4 · $400 of gift cards at an unseen merchant: declined ━━━━━━━━━━</text>
+    <text x="24" y="132" class="bad big">✗ DECLINED · $400.00 at GIFT CARD EMPORIUM (MCC 6051)</text>
+    <text x="24" y="160" class="bad">✗ decline code: new_payee_cap — in plain words: this owner has never bought</text>
+    <text x="24" y="182" class="bad">✗   from this merchant, and a first purchase at an unseen merchant may not</text>
+    <text x="24" y="204" class="bad">✗   exceed the mandate's $15.00 new-payee cap. The agent cannot be lured</text>
+    <text x="24" y="226" class="bad">✗   into $400.00 of gift cards.</text>
+    <text x="24" y="256"><tspan class="ok">✓</tspan> the decline was decided in the same &lt;2 s synchronous window; no funds moved</text>
+  </g>
+
+  <g class="scene s4">
+    <text x="24" y="98" class="hd">━━ 5 · The agent pays another agent for a service ━━━━━━━━━━━━━━━━━━</text>
+    <text x="24" y="132" class="big"><tspan class="ok">✓</tspan> @scout paid @writer-agent $5.00</text>
+    <text x="24" y="160"><tspan class="ok">✓</tspan>   memo: "product summary: mock-shop.example findings"</text>
+    <text x="24" y="182"><tspan class="ok">✓</tspan> instant internal settlement, one hash-chained receipt — agent funds: $26.00</text>
+  </g>
+
+  <g class="scene s5">
+    <text x="24" y="98" class="hd">━━ 7 · One feed, verified ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</text>
+    <text x="24" y="128" class="dim">  @scout  → @writer-agent    $5.00  product summary</text>
+    <text x="24" y="150" class="dim">  @scout  → external:card   $29.00  card:mock-shop.example</text>
+    <text x="24" y="172" class="dim">  @max    → @scout         $100.00</text>
+    <text x="24" y="202"><tspan class="ok">✓</tspan> the $29.00 card reserve and the $5.00 agent payment sit on the same feed,</text>
+    <text x="24" y="224"><tspan class="ok">✓</tspan>   each receipt hash-chained to the transfer evidence beneath it</text>
+    <text x="24" y="252" class="ok">✓ ledger_health: zero-sum true · receipt evidence recomputed: true</text>
+  </g>
+
+  <text x="24" y="400" class="dim">npm run demo:card — deterministic; transcript committed in the repo</text>
+</svg>
