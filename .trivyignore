@@ -1,0 +1,12 @@
+# Time-boxed risk acceptances for the production image scan.
+# Policy: ignore-unfixed stays "false" in CI; every entry here must name one
+# CVE, carry an expiry (Trivy re-fails the gate automatically after it), and
+# have a matching residual-risk entry in docs/THREAT_MODEL.md.
+
+# OpenSSL QUIC *server* unbounded-memory DoS in Debian 13 libssl3t64
+# (3.5.6-1~deb13u2). No fixed Debian package exists yet. Not reachable in
+# this image: the only processes are Node 24 services, and Node does not
+# enable OpenSSL's QUIC server APIs. Re-evaluate before the expiry; remove
+# the moment Debian ships a fix. Accepted 2026-08-23 (pending founder
+# review; recorded in the session brief).
+CVE-2026-14456 exp:2026-10-15

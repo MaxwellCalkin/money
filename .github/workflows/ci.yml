@@ -138,6 +138,7 @@ jobs:
           output: release-evidence/trivy-high-critical.json
           exit-code: "1"
           ignore-unfixed: "false"
+          trivyignores: .trivyignore
           vuln-type: os,library
           severity: CRITICAL,HIGH
           scanners: vuln

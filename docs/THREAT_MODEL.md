@@ -197,6 +197,18 @@ configuration:
 - no payout release from an uncertain provider submission;
 - no production customer-fund claim based only on green software tests.
 
+## Accepted image-scan exceptions
+
+The CI image scan keeps `ignore-unfixed: false`; any temporary acceptance
+must be one named CVE in `.trivyignore`, time-boxed with an `exp:` date so
+the gate re-fails automatically, and mirrored here:
+
+- `CVE-2026-14456` (Debian 13 `libssl3t64`, OpenSSL QUIC **server**
+  unbounded-memory DoS; no fixed package exists). Not reachable: the image
+  runs only Node 24 services, and Node does not enable OpenSSL's QUIC
+  server APIs. Expires 2026-10-15; remove immediately when Debian ships a
+  fix. Accepted 2026-08-23, pending founder review.
+
 ## Known residual product gaps
 
 Before external beta or customer funds, owners must assign and verify concrete
