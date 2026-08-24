@@ -106,7 +106,8 @@ its signed receipt — AND a completed restore-from-backup drill.
 - **Public wash-proof metrics page** (agent, from the receipts journal):
   distinct wallets, funding lineage proving no founder subsidy, retention
   cohorts, weekly chain root. Honest zeroes are fine; the artifact itself
-  is a product demo.
+  is a product demo. **✓ Shipped in repo 2026-08-24 (`docs/METRICS.md`,
+  `public-metrics` service); goes public with the hosted beta.**
 
 **Gate (buyer-side, retention-shaped, wash-resistant):** ≥8 distinct
 external wallets (the BUYER is never the founder) each active in ≥3 distinct

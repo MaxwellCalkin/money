@@ -177,7 +177,7 @@ export async function runCardDemo(log: (line: string) => void = console.log): Pr
 
     section("Setup: the sandbox network boots");
     await runMigrations(db);
-    ok("migrations 0001-0012 applied to an in-process Postgres (PGlite, dev-only)");
+    ok("migrations 0001-0013 applied to an in-process Postgres (PGlite, dev-only)");
     const treasury = new PostgresTreasury(db);
     await treasury.configureControls({
       fundingEnabled: true,

@@ -58,6 +58,9 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'money_card_worker') then
     create role money_card_worker nologin;
   end if;
+  if not exists (select 1 from pg_roles where rolname = 'money_metrics') then
+    create role money_metrics nologin;
+  end if;
 end $$;
 
 revoke all on schema public from public;
@@ -74,19 +77,19 @@ revoke all on schema money, money_private from
   money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
   money_compliance_admin, money_compliance_worker, money_compliance_ingress,
   money_risk_worker, money_compliance_ops, money_compliance_onboarding,
-  money_compliance_console, money_card_ingress, money_card_worker;
+  money_compliance_console, money_card_ingress, money_card_worker, money_metrics;
 revoke all on all tables in schema money from
   money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
   money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
   money_compliance_admin, money_compliance_worker, money_compliance_ingress,
   money_risk_worker, money_compliance_ops, money_compliance_onboarding,
-  money_compliance_console, money_card_ingress, money_card_worker;
+  money_compliance_console, money_card_ingress, money_card_worker, money_metrics;
 revoke all on all functions in schema money_private from
   money_app, money_worker, money_treasury, money_treasury_worker, money_ops,
   money_key_rotation, money_treasury_ingress, money_payout_worker, money_reconciler,
   money_compliance_admin, money_compliance_worker, money_compliance_ingress,
   money_risk_worker, money_compliance_ops, money_compliance_onboarding,
-  money_compliance_console, money_card_ingress, money_card_worker;
+  money_compliance_console, money_card_ingress, money_card_worker, money_metrics;
 
 grant usage on schema money, money_private to money_app;
 grant select on money.schema_migrations, money.accounts, money.assets, money.services to money_app;
@@ -398,3 +401,23 @@ grant select on money.compliance_operators, money.compliance_operator_events,
   money.compliance_action_requests to money_compliance_ops;
 grant execute on function money_private.compliance_subject_state(text)
   to money_compliance_ops;
+
+-- The public metrics process is deliberately unauthenticated on the wire, so
+-- its database identity holds the narrowest authority in the system: EXECUTE
+-- on exactly the two published aggregate functions. No table or view select,
+-- no other command, and no usage on the money schema at all — a compromised
+-- public web process can read nothing account-level. The helper internals
+-- (metrics_operation_class, metrics_week_bucket, metrics_lineage_derived,
+-- metrics_lineage_apply, metrics_advance_chain, metrics_weekly_series) stay
+-- ungranted; they run only inside the SECURITY DEFINER surfaces below.
+grant usage on schema money_private to money_metrics;
+grant execute on function money_private.public_metrics(),
+  money_private.verify_receipt(uuid)
+  to money_metrics;
+-- Operations may run the same published aggregates to check the page before
+-- it goes public. money_ops already holds SELECT on every underlying table,
+-- so this grants no new data authority; no other role — product, worker, or
+-- ingress — can execute the metrics surfaces.
+grant execute on function money_private.public_metrics(),
+  money_private.verify_receipt(uuid)
+  to money_ops;

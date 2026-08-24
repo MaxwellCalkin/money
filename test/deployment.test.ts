@@ -316,6 +316,82 @@ describe("production deployment contract", () => {
     }
   });
 
+  it("keeps the public metrics service credential-empty beyond its own database login", () => {
+    const metrics: Record<string, string | undefined> = {
+      NODE_ENV: "production",
+      MONEY_BIND_HOST: "0.0.0.0",
+      MONEY_METRICS_DATABASE_URL:
+        "postgres://money_metrics_login:long-password@db.internal:5432/money?sslmode=verify-full",
+    };
+    expect(preflightProductionService("public-metrics", metrics))
+      .toEqual({ service: "public-metrics", ok: true });
+    for (const missing of ["MONEY_METRICS_DATABASE_URL", "MONEY_BIND_HOST"]) {
+      const env = { ...metrics };
+      delete env[missing];
+      expect(() => preflightProductionService("public-metrics", env), missing)
+        .toThrow(/not configured/);
+    }
+    expect(() => preflightProductionService("public-metrics", {
+      ...metrics,
+      MONEY_METRICS_DATABASE_URL:
+        "postgres://money_metrics_login:long-password@db.internal:5432/money?sslmode=require",
+    })).toThrow(/verify-full/);
+    // The public page holds no other authority of any kind: not the product
+    // database, the ops token, issuer keys, webhook secrets, or keyrings.
+    for (const [name, value] of Object.entries({
+      DATABASE_URL:
+        "postgres://money_app_login:long-password@db.internal:5432/money?sslmode=verify-full",
+      MONEY_OPS_TOKEN: "must-not-cross-into-the-public-process",
+      MONEY_CARD_ISSUER_API_KEY: "must-not-cross",
+      MONEY_CARD_WEBHOOK_SECRETS: JSON.stringify(["whsec_cross-service-card-secret"]),
+      MONEY_EXTERNAL_HEADER_KEYS: JSON.stringify({ foreign: KEY }),
+      MONEY_COMPLIANCE_PROVIDER_API_KEY: "must-not-cross",
+      MONEY_EVM_PRIVATE_KEY: "0xmust-not-cross",
+    })) {
+      expect(() => preflightProductionService("public-metrics", { ...metrics, [name]: value }), name)
+        .toThrow(/must not be present/);
+    }
+  });
+
+  it("keeps the beta public-metrics exposure on the two-function role, never the owner login", () => {
+    // The beta profile is where the metrics page actually goes public, and
+    // public-metrics is the only internet-reachable service there with zero
+    // request authentication — so its credential and routes get a contract
+    // test even though the rest of the beta profile is best-effort.
+    const compose = readFileSync(resolve(ROOT, "deploy/beta/compose.beta.yaml"), "utf8");
+    const caddy = readFileSync(resolve(ROOT, "deploy/beta/Caddyfile"), "utf8");
+    const envExample = readFileSync(resolve(ROOT, "deploy/beta/beta.env.example"), "utf8");
+    const applyRoles = readFileSync(resolve(ROOT, "deploy/beta/apply-roles.sh"), "utf8");
+
+    const metricsBlock = compose.slice(
+      compose.indexOf("public-metrics:"), compose.indexOf("caddy:"),
+    );
+    expect(metricsBlock.length).toBeGreaterThan(0);
+    expect(metricsBlock).toContain(
+      "MONEY_METRICS_DATABASE_URL: postgres://money_metrics_login:${BETA_METRICS_DB_PASSWORD}@postgres:5432/money",
+    );
+    // Never the database owner: a compromised public process must be limited
+    // to the two aggregate functions.
+    expect(metricsBlock).not.toContain("postgres://money:");
+    expect(metricsBlock).toContain("MONEY_METRICS_SANDBOX_LABEL");
+    expect(metricsBlock).toContain("http://127.0.0.1:4028/health/live");
+    expect(metricsBlock).toMatch(/depends_on:\s*\n\s*roles:\s*\n\s*condition: service_completed_successfully/);
+
+    // The one-shot roles job applies the repo grants and binds the login.
+    expect(compose).toMatch(/roles:\s*\n\s+image: postgres:/);
+    expect(compose).toContain("../../db/roles.sql:/roles.sql:ro");
+    expect(compose).toContain("./apply-roles.sh:/apply-roles.sh:ro");
+    expect(compose).toContain("BETA_METRICS_DB_PASSWORD: ${BETA_METRICS_DB_PASSWORD:?set in beta.env}");
+    expect(applyRoles).toContain("psql \"$ADMIN_DATABASE_URL\" -v ON_ERROR_STOP=1 -f /roles.sql");
+    expect(applyRoles).toContain("grant money_metrics to money_metrics_login;");
+
+    // Edge routing and the secret inventory stay pinned to the service port.
+    expect(caddy).toMatch(/handle \/metrics\* \{\s*\n\s*reverse_proxy public-metrics:4028/);
+    expect(caddy).toMatch(/handle \/receipts\/\* \{\s*\n\s*reverse_proxy public-metrics:4028/);
+    expect(envExample).toMatch(/^BETA_METRICS_DB_PASSWORD=$/m);
+    expect(envExample).toMatch(/^MONEY_METRICS_SANDBOX_LABEL=true$/m);
+  });
+
   it("keeps the payout-source contract identical between preflight and the worker", () => {
     const base = {
       NODE_ENV: "production",
@@ -544,7 +620,7 @@ describe("production deployment contract", () => {
     expect(compose).toMatch(/read_only: true/);
     expect(compose).toMatch(/cap_drop:\s*\n\s*- ALL/);
     expect(compose).toMatch(/no-new-privileges:true/);
-    expect(compose.match(/test: \[CMD, \/nodejs\/bin\/node,/g)).toHaveLength(7);
+    expect(compose.match(/test: \[CMD, \/nodejs\/bin\/node,/g)).toHaveLength(8);
     expect(compose).not.toMatch(/POSTGRES_PASSWORD|money-dev-only/);
     for (const service of [
       "api",
@@ -557,6 +633,7 @@ describe("production deployment contract", () => {
       "compliance-console",
       "card-authorization",
       "card-events",
+      "public-metrics",
     ]) {
       expect(compose).toContain(`/${service}.env`);
     }
@@ -578,6 +655,7 @@ describe("production deployment contract", () => {
       "compliance-console": "src/compliance/console-server.ts",
       "card-authorization": "src/cards/authorization-server.ts",
       "card-events": "src/cards/event-worker.ts",
+      "public-metrics": "src/server/metrics.ts",
     } as const;
     for (const [service, entrypoint] of Object.entries(productionEntrypoints)) {
       expect(readFileSync(resolve(ROOT, entrypoint), "utf8"))

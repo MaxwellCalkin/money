@@ -91,6 +91,7 @@ jobs:
             const fs = require("node:fs");
             const required = [
               "dist/server/postgres-api.js", "dist/server/database-ops.js",
+              "dist/server/metrics.js",
               "dist/db/external-worker.js", "dist/db/migrate.js",
               "dist/treasury/webhook-server.js", "dist/treasury/event-worker.js",
               "dist/treasury/payout-worker.js", "dist/treasury/reconciler.js",

@@ -25,6 +25,8 @@ configured, and every payment still clears the mandate kernel.
 | database-ops | health probes, reconcile, ledger-health recorder |
 | card-authorization (`dist/cards/authorization-server.js`) | issuer webhook ingress on `/webhooks/*` (sandbox: mock issuer, no real card network) |
 | card-events (`dist/cards/event-worker.js`) | card event inbox worker + issuer close drain |
+| roles (one-shot, postgres image) | applies `db/roles.sql` after migrate and binds `money_metrics_login` (`apply-roles.sh`) |
+| public-metrics (`dist/server/metrics.js`) | public wash-proof metrics page + receipt inclusion verifier on `/metrics` and `/receipts`; connects as `money_metrics_login`, a role that can execute exactly two aggregate functions and select from no table — never the owner login, because this is the only internet-reachable service with zero request authentication |
 | caddy | TLS on a free DuckDNS subdomain |
 
 Treasury and compliance workers are intentionally absent; their routes fail

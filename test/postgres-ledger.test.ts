@@ -81,6 +81,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0010", applied: false }),
       expect.objectContaining({ version: "0011", applied: false }),
       expect.objectContaining({ version: "0012", applied: false }),
+      expect.objectContaining({ version: "0013", applied: false }),
     ]);
     const rows = await db.query<{ version: string; checksum: string }>("select version, checksum from money.schema_migrations");
     expect(rows.rows).toEqual([
@@ -96,6 +97,7 @@ describe("Postgres ledger kernel", () => {
       expect.objectContaining({ version: "0010", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0011", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
       expect.objectContaining({ version: "0012", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
+      expect.objectContaining({ version: "0013", checksum: expect.stringMatching(/^[0-9a-f]{64}$/) }),
     ]);
     await db.query("update money.schema_migrations set checksum = repeat('0', 64) where version = '0001'");
     await expect(runMigrations(db)).rejects.toThrow(/checksum changed/);
@@ -239,7 +241,7 @@ describe("Postgres ledger kernel", () => {
     expect((await app.request("/health/live")).status).toBe(200);
     const ready = await app.request("/health/ready");
     expect(ready.status).toBe(200);
-    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0012" }));
+    expect(await ready.json()).toEqual(expect.objectContaining({ ok: true, schemaVersion: "0013" }));
     expect((await app.request("/ops/reconcile")).status).toBe(404);
     expect((await app.request("/ops/treasury")).status).toBe(404);
     const reconciled = await app.request("/ops/reconcile", { headers: { authorization: "Bearer ops-secret" } });
@@ -420,6 +422,20 @@ describe("Postgres ledger kernel", () => {
       treasury_card_decide: boolean;
       ops_card_table: boolean;
       ops_card_authorizations_table: boolean;
+      metrics_public: boolean;
+      metrics_verify: boolean;
+      metrics_internal_series: boolean;
+      metrics_internal_class: boolean;
+      metrics_pay: boolean;
+      metrics_transfers_table: boolean;
+      metrics_receipts_table: boolean;
+      metrics_accounts_table: boolean;
+      metrics_money_schema: boolean;
+      app_public_metrics: boolean;
+      worker_public_metrics: boolean;
+      card_ingress_public_metrics: boolean;
+      ops_public_metrics: boolean;
+      ops_verify_receipt: boolean;
     }>(`
       select
         has_function_privilege('money_app', 'money_private.post_agent_payment(text,text,text,text,bigint,text,jsonb)', 'EXECUTE') as app_pay,
@@ -582,7 +598,21 @@ describe("Postgres ledger kernel", () => {
         has_function_privilege('money_treasury', 'money_private.set_card_spend_enabled(boolean,text)', 'EXECUTE') as treasury_card_spend,
         has_function_privilege('money_treasury', 'money_private.decide_card_authorization(text,text,text,text,bigint,text,text,text,text,integer)', 'EXECUTE') as treasury_card_decide,
         has_table_privilege('money_ops', 'money.cards', 'SELECT') as ops_card_table,
-        has_table_privilege('money_ops', 'money.card_authorizations', 'SELECT') as ops_card_authorizations_table
+        has_table_privilege('money_ops', 'money.card_authorizations', 'SELECT') as ops_card_authorizations_table,
+        has_function_privilege('money_metrics', 'money_private.public_metrics()', 'EXECUTE') as metrics_public,
+        has_function_privilege('money_metrics', 'money_private.verify_receipt(uuid)', 'EXECUTE') as metrics_verify,
+        has_function_privilege('money_metrics', 'money_private.metrics_weekly_series(integer)', 'EXECUTE') as metrics_internal_series,
+        has_function_privilege('money_metrics', 'money_private.metrics_operation_class(text)', 'EXECUTE') as metrics_internal_class,
+        has_function_privilege('money_metrics', 'money_private.request_agent_payment(text,text,text,text,bigint,text)', 'EXECUTE') as metrics_pay,
+        has_table_privilege('money_metrics', 'money.transfers', 'SELECT') as metrics_transfers_table,
+        has_table_privilege('money_metrics', 'money.receipts', 'SELECT') as metrics_receipts_table,
+        has_table_privilege('money_metrics', 'money.accounts', 'SELECT') as metrics_accounts_table,
+        has_schema_privilege('money_metrics', 'money', 'USAGE') as metrics_money_schema,
+        has_function_privilege('money_app', 'money_private.public_metrics()', 'EXECUTE') as app_public_metrics,
+        has_function_privilege('money_worker', 'money_private.public_metrics()', 'EXECUTE') as worker_public_metrics,
+        has_function_privilege('money_card_ingress', 'money_private.public_metrics()', 'EXECUTE') as card_ingress_public_metrics,
+        has_function_privilege('money_ops', 'money_private.public_metrics()', 'EXECUTE') as ops_public_metrics,
+        has_function_privilege('money_ops', 'money_private.verify_receipt(uuid)', 'EXECUTE') as ops_verify_receipt
     `);
     expect(privileges.rows[0]).toEqual({
       app_pay: false,
@@ -746,6 +776,20 @@ describe("Postgres ledger kernel", () => {
       treasury_card_decide: false,
       ops_card_table: true,
       ops_card_authorizations_table: true,
+      metrics_public: true,
+      metrics_verify: true,
+      metrics_internal_series: false,
+      metrics_internal_class: false,
+      metrics_pay: false,
+      metrics_transfers_table: false,
+      metrics_receipts_table: false,
+      metrics_accounts_table: false,
+      metrics_money_schema: false,
+      app_public_metrics: false,
+      worker_public_metrics: false,
+      card_ingress_public_metrics: false,
+      ops_public_metrics: true,
+      ops_verify_receipt: true,
     });
   });
 
@@ -764,7 +808,7 @@ describe("Postgres ledger kernel", () => {
       );
       expect((await db.query("select * from money_private.account_state('usr_role0001', 'USD')")).rows).toHaveLength(1);
       expect((await db.query("select * from money_private.list_public_services(10, null, null)")).rows).toEqual([]);
-      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0012" });
+      expect((await db.query("select max(version) as version from money.schema_migrations")).rows[0]).toEqual({ version: "0013" });
       await expect(db.query(
         "select * from money_private.register_account('usr_bypass01', 'user', 'Bypass', null, null, $1)",
         [`bypass-public-key-${"x".repeat(40)}`]

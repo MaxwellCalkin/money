@@ -31,6 +31,7 @@ const SERVICES = [
   "compliance-console",
   "card-authorization",
   "card-events",
+  "public-metrics",
   "migrate",
 ] as const;
 
@@ -69,6 +70,7 @@ const SEGREGATED_AUTHORITY = [
   "MONEY_TREASURY_EVM_ASSETS",
   "MONEY_CARD_INGRESS_DATABASE_URL",
   "MONEY_CARD_WORKER_DATABASE_URL",
+  "MONEY_METRICS_DATABASE_URL",
   "MONEY_CARD_WEBHOOK_SECRETS",
   "MONEY_CARD_ISSUER_API_KEY",
   "MONEY_CARD_EVENT_API_KEY",
@@ -399,6 +401,35 @@ export function preflightProductionService(
       readCardOvercaptureBps(env);
       forbidden(env, "MONEY_CARD_WEBHOOK_SECRETS", "MONEY_CARD_ISSUER_API_KEY", "DATABASE_URL");
       restrictAuthority(env, "MONEY_CARD_WORKER_DATABASE_URL", "MONEY_CARD_EVENT_API_KEY");
+      break;
+    case "public-metrics":
+      // The public metrics page is unauthenticated by design, so the process
+      // may hold exactly one credential: the money_metrics database login
+      // whose whole authority is two read-only aggregate functions. Every
+      // other secret in the system is forbidden here — including the product
+      // DATABASE_URL and the ops token. The names below are an explicit belt
+      // on top of restrictAuthority's SEGREGATED_AUTHORITY suspenders, so the
+      // highest-blast-radius secrets stay rejected even if the segregated
+      // list ever drifts.
+      database(env, "MONEY_METRICS_DATABASE_URL");
+      forbidden(
+        env,
+        "DATABASE_URL",
+        "MONEY_OPS_TOKEN",
+        "MONEY_EXTERNAL_HEADER_KEYS",
+        "MONEY_EVM_PRIVATE_KEY",
+        "MONEY_EVM_SIGNER_TOKEN",
+        "MONEY_COLUMN_WEBHOOK_SECRET",
+        "MONEY_COLUMN_PAYOUT_API_KEY",
+        "MONEY_COMPLIANCE_PROVIDER_API_KEY",
+        "MONEY_COMPLIANCE_SESSION_KEYS",
+        "MONEY_CARD_ISSUER_API_KEY",
+        "MONEY_CARD_WEBHOOK_SECRETS",
+        "MONEY_CARD_EVENT_API_KEY",
+        "MONEY_CARD_REVEAL_TOKEN_KEY",
+      );
+      serverBinding(env);
+      restrictAuthority(env, "MONEY_METRICS_DATABASE_URL");
       break;
     case "migrate":
       database(env, "DATABASE_URL");

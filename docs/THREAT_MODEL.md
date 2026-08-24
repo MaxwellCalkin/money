@@ -238,7 +238,7 @@ The release owner must retain evidence for the exact commit and image digest:
 | Claim | Required evidence |
 |---|---|
 | Types and unit/integration contracts are coherent | Clean dependency install, typecheck, complete Vitest suite, and production build |
-| Database invariants and role isolation hold | Fresh PostgreSQL migration through `0012`, idempotent rerun, role application, effective-privilege tests, contention and reconciliation suite |
+| Database invariants and role isolation hold | Fresh PostgreSQL migration through the latest migration (`0013`), idempotent rerun, role application, effective-privilege tests, contention and reconciliation suite |
 | Deployed command surface matches the reviewed source | Image build, Compose render, every service preflight, health/readiness checks, and no cross-service credential leakage |
 | Artifact has reviewed provenance and no blocking known vulnerability | Exact action commits and base-image digest, lockfile review, audit, source-revision-labeled image, retained image ID/CycloneDX/scan artifact, exact-image HIGH/CRITICAL result, and immutable registry digest after publication |
 | Repository changes cannot bypass required review | Effective protected-branch/ruleset configuration, required exact-head `product`, `postgres`, and `image` checks, code-owner approval, stale-approval dismissal, conversation resolution, force-push/deletion denial, and audited break-glass evidence |

@@ -49,6 +49,7 @@ response rules are in `SECURITY.md`. Rail-specific contracts: the card rail is
 `docs/CARD_RAIL.md`, external x402 settlement is `docs/EXTERNAL_SETTLEMENT.md`,
 bank funding/payouts are `docs/TREASURY.md`, and the compliance perimeter is
 `docs/COMPLIANCE.md`.
+The public wash-proof metrics page and receipt inclusion verifier are `docs/METRICS.md`.
 
 ## Your agent never sees the card number
 

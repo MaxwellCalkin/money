@@ -1093,8 +1093,9 @@ describe("Postgres card rail state machine", () => {
     const migrations = fileURLToPath(new URL("../db/migrations/", import.meta.url));
     try {
       const files = readdirSync(migrations).filter((entry) => /^\d{4}_[a-z0-9_-]+\.sql$/.test(entry)).sort();
-      expect(files.at(-1)).toBe("0012_card_rail.sql");
-      for (const file of files.slice(0, -1)) {
+      const cardRailIndex = files.indexOf("0012_card_rail.sql");
+      expect(cardRailIndex).toBeGreaterThan(0);
+      for (const file of files.slice(0, cardRailIndex)) {
         await legacyDb.executeScript(readFileSync(join(migrations, file), "utf8"));
       }
       const legacyControl = new PostgresControlPlane(legacyDb);

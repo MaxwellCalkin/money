@@ -168,6 +168,14 @@ const services = {
     },
     foreign: { MONEY_CARD_ISSUER_API_KEY: "must-not-cross" },
   },
+  "public-metrics": {
+    command: "dist/server/metrics.js",
+    env: {
+      MONEY_BIND_HOST: "0.0.0.0",
+      MONEY_METRICS_DATABASE_URL: database("money_metrics"),
+    },
+    foreign: { DATABASE_URL: database("money_app") },
+  },
   "card-events": {
     command: "dist/cards/event-worker.js",
     env: {
@@ -223,4 +231,4 @@ for (const [service, definition] of Object.entries(services)) {
   }
 }
 
-console.log(JSON.stringify({ services: expectedServices.length, positive: 16, negative: 16 }));
+console.log(JSON.stringify({ services: expectedServices.length, positive: 17, negative: 17 }));

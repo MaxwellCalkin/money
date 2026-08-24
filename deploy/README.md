@@ -85,6 +85,7 @@ needs:
 | `compliance-console.env` | `money_compliance_console` | none; operators authenticate with their own Ed25519 keys |
 | `card-authorization.env` | `money_card_ingress` | card issuer webhook secrets and endpoint ID only; never an issuer API key |
 | `card-events.env` | `money_card_worker` | read-only card issuer event key and issuer base URL |
+| `public-metrics.env` | `money_metrics` | none — the surface is deliberately public and its role can execute exactly two aggregate functions |
 
 Every file needs `NODE_ENV=production`; HTTP services also need
 `MONEY_BIND_HOST=0.0.0.0`. Service PostgreSQL URLs must use a passworded

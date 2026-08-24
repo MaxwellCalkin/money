@@ -39,7 +39,7 @@ describe.skipIf(!connectionString)("live PostgreSQL release gate", () => {
     await runMigrations(db);
     const replay = await runMigrations(db);
     expect(replay.map(({ version, applied }) => ({ version, applied }))).toEqual(
-      Array.from({ length: 12 }, (_, index) => ({
+      Array.from({ length: 13 }, (_, index) => ({
         version: String(index + 1).padStart(4, "0"),
         applied: false,
       })),
@@ -73,7 +73,7 @@ describe.skipIf(!connectionString)("live PostgreSQL release gate", () => {
       select version, checksum from money.schema_migrations order by version
     `);
     expect(migrations.rows.map((row) => row.version)).toEqual(
-      Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(4, "0")),
+      Array.from({ length: 13 }, (_, index) => String(index + 1).padStart(4, "0")),
     );
     expect(migrations.rows.every((row) => /^[0-9a-f]{64}$/.test(row.checksum))).toBe(true);
   });
@@ -128,7 +128,15 @@ describe.skipIf(!connectionString)("live PostgreSQL release gate", () => {
         has_function_privilege('money_app', 'money_private.prepare_card(uuid,text,text,bigint,boolean,text,text[],timestamptz)', 'EXECUTE') as app_card_prepare,
         has_function_privilege('money_app', 'money_private.decide_card_authorization(text,text,text,text,bigint,text,text,text,text,integer)', 'EXECUTE') as app_card_decide,
         has_function_privilege('money_app', 'money_private.post_card_transfer(text,text,text,text,text,text,bigint,text,jsonb)', 'EXECUTE') as app_card_kernel,
-        has_function_privilege('money_worker', 'money_private.sweep_cards(integer)', 'EXECUTE') as worker_card_sweep
+        has_function_privilege('money_worker', 'money_private.sweep_cards(integer)', 'EXECUTE') as worker_card_sweep,
+        has_function_privilege('money_metrics', 'money_private.public_metrics()', 'EXECUTE') as metrics_public,
+        has_function_privilege('money_metrics', 'money_private.verify_receipt(uuid)', 'EXECUTE') as metrics_verify,
+        has_function_privilege('money_metrics', 'money_private.metrics_weekly_series(integer)', 'EXECUTE') as metrics_internal_series,
+        has_table_privilege('money_metrics', 'money.transfers', 'SELECT') as metrics_transfers_table,
+        has_table_privilege('money_metrics', 'money.receipts', 'SELECT') as metrics_receipts_table,
+        has_schema_privilege('money_metrics', 'money', 'USAGE') as metrics_money_schema,
+        has_function_privilege('money_app', 'money_private.public_metrics()', 'EXECUTE') as app_public_metrics,
+        has_function_privilege('money_ops', 'money_private.public_metrics()', 'EXECUTE') as ops_public_metrics
     `);
     expect(privileges.rows[0]).toEqual({
       public_private_schema: false,
@@ -179,6 +187,14 @@ describe.skipIf(!connectionString)("live PostgreSQL release gate", () => {
       app_card_decide: false,
       app_card_kernel: false,
       worker_card_sweep: true,
+      metrics_public: true,
+      metrics_verify: true,
+      metrics_internal_series: false,
+      metrics_transfers_table: false,
+      metrics_receipts_table: false,
+      metrics_money_schema: false,
+      app_public_metrics: false,
+      ops_public_metrics: true,
     });
   });
 

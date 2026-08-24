@@ -18,6 +18,16 @@
 		reverse_proxy card-authorization:4027
 	}
 
+	# Public wash-proof metrics: aggregates, funding lineage, weekly chain
+	# roots, and receipt inclusion verification. Deliberately public — the
+	# artifact itself is the product demo, honest zeroes included.
+	handle /metrics* {
+		reverse_proxy public-metrics:4028
+	}
+	handle /receipts/* {
+		reverse_proxy public-metrics:4028
+	}
+
 	handle {
 		reverse_proxy api:4021
 	}

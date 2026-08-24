@@ -38,7 +38,7 @@ agentmoney · reserved-card rail demo
 SANDBOX — no real funds; nothing here is a bank, card, or deposit account.
 
 ━━ Setup: the sandbox network boots ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ✓ migrations 0001-0012 applied to an in-process Postgres (PGlite, dev-only)
+  ✓ migrations 0001-0013 applied to an in-process Postgres (PGlite, dev-only)
   ✓ treasury controls configured; operator enabled card spend
   ✓ mock issuer network online, speaking the Stripe Issuing wire shape
   ✓ card test material stays with the issuer adapter — no card number appears below

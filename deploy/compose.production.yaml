@@ -165,6 +165,23 @@ services:
     command: [dist/cards/event-worker.js]
     env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/card-events.env"]
 
+  # Public wash-proof metrics page: aggregates, funding lineage, and weekly
+  # receipt chain roots. Deliberately unauthenticated, so its only credential
+  # is the money_metrics login (two read-only functions, zero table selects).
+  # It stays on the internal network and reaches the internet only through
+  # the TLS edge; the default bind keeps the host port loopback-only.
+  public-metrics:
+    <<: *money-service
+    command: [dist/server/metrics.js]
+    env_file: ["${MONEY_RUNTIME_DIR:?Set MONEY_RUNTIME_DIR}/public-metrics.env"]
+    ports:
+      - ${MONEY_PUBLIC_METRICS_BIND:-127.0.0.1}:4028:4028
+    healthcheck:
+      test: [CMD, /nodejs/bin/node, -e, "fetch('http://127.0.0.1:4028/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+
 networks:
   money-internal:
     internal: false

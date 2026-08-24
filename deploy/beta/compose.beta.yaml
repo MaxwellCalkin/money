@@ -44,6 +44,25 @@ services:
       postgres:
         condition: service_healthy
 
+  # One-shot role convergence: applies db/roles.sql after migrations and binds
+  # the passworded money_metrics_login the public-metrics service connects as.
+  # That service is the only internet-reachable process with zero request
+  # authentication, so it never holds the owner login — its database identity
+  # can execute exactly two aggregate functions and select from no table.
+  roles:
+    image: postgres:18.4
+    restart: "no"
+    entrypoint: ["/bin/sh", "/apply-roles.sh"]
+    environment:
+      ADMIN_DATABASE_URL: postgres://money:${BETA_DB_PASSWORD}@postgres:5432/money
+      BETA_METRICS_DB_PASSWORD: ${BETA_METRICS_DB_PASSWORD:?set in beta.env}
+    volumes:
+      - ../../db/roles.sql:/roles.sql:ro
+      - ./apply-roles.sh:/apply-roles.sh:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   api:
     build:
       context: ../..
@@ -137,6 +156,35 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+  # Public wash-proof metrics (sandbox). Serves aggregates, the funding
+  # lineage split, retention cohorts, weekly receipt chain roots, and receipt
+  # inclusion verification on /metrics and /receipts via Caddy. Deliberately
+  # unauthenticated on the wire, which is exactly why it connects as the
+  # two-function money_metrics_login (bound by the roles job) and never as
+  # the owner: a compromised public process can read nothing account-level.
+  # It talks to postgres directly — pgbouncer authenticates only the owner
+  # user, and this service issues one aggregate query per minute.
+  # The page itself carries the "sandbox, no real funds" banner and publishes
+  # honest zeroes.
+  public-metrics:
+    build:
+      context: ../..
+      dockerfile: deploy/beta/Dockerfile.beta
+    restart: unless-stopped
+    command: ["dist/server/metrics.js"]
+    environment:
+      MONEY_METRICS_DATABASE_URL: postgres://money_metrics_login:${BETA_METRICS_DB_PASSWORD}@postgres:5432/money
+      MONEY_METRICS_SANDBOX_LABEL: ${MONEY_METRICS_SANDBOX_LABEL:-true}
+      MONEY_BIND_HOST: 0.0.0.0
+    depends_on:
+      roles:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4028/health/live').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   caddy:
     image: caddy:2

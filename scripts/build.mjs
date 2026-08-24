@@ -10,6 +10,7 @@ const entryPoints = [
   "src/server/api.ts",
   "src/server/postgres-api.ts",
   "src/server/database-ops.ts",
+  "src/server/metrics.ts",
   "src/mcp/server.ts",
   "src/db/migrate.ts",
   "src/db/reconcile.ts",
