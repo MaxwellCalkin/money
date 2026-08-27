@@ -9,3 +9,4 @@ deploy/runtime/
 runtime/
 .secrets/
 .money/
+deploy/local/

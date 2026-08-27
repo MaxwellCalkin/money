@@ -1,5 +1,16 @@
 # Stripe Issuing readiness kit (founder pastes; agent never sees keys)
 
+> **STATUS 2026-08-27: APPLICATION SUBMITTED — WAITLISTED.** The in-dashboard
+> "Set up Issuing" wizard was completed in the sandbox (answers: cardholders =
+> the business itself; use case = corporate expense management with an honest
+> program description; "Will AI agents interact with Issuing?" = YES; setup
+> type = Growth (API); Issuing Account Holder ToS accepted by the founder).
+> Outcome: "You are on the waitlist" — approval arrives by email. The 2026
+> reality replaces the "instant self-serve test mode" assumption below: even
+> sandbox Issuing is application-gated (the agent-usage answer is a first-class
+> gate). The Issuing API returns "Your account is not set up to use Issuing"
+> until approval; scripts/stripe-issuing-probe.mjs checks in one command.
+
 Prepared 2026-08-23 for v0.14. Two parts: (A) the 20-minute test-mode setup
 that unlocks recording real `issuing_authorization.request` traffic against
 our authorization server, and (B) the application narrative for
@@ -14,8 +25,9 @@ each in the Dashboard while doing the steps and correct this file.
 
 1. **Create a Stripe account** (sole proprietor is enough for test mode).
    Enter nothing the agent can see; keys stay in local env files.
-2. **Enable Issuing in test mode.** Dashboard -> search "Issuing" -> enable
-   the test-mode program (self-serve, no sales contact needed for test mode).
+2. **Enable Issuing in test mode.** Dashboard -> Issuing -> Get started -> the
+   five-step "Set up Issuing" wizard (VERIFIED 2026-08-27: application-gated
+   with a waitlist, not instant; done — see STATUS above).
 3. **Create one test cardholder** (Issuing -> Cardholders -> New). Type
    `individual` is fine in test mode. Record the cardholder id — it becomes
    `MONEY_CARD_STRIPE_CARDHOLDER_ID`. All agent cards are issued under this
