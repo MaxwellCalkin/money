@@ -48,6 +48,13 @@ describe("production deployment contract", () => {
       ...env,
       MONEY_ALLOW_DEV_FUNDING: "true",
     })).toThrow(/forbidden/);
+    // Session-token authority over funding, allocation, and mandate grant is a
+    // sandbox-only owner-app convenience; production refuses it structurally,
+    // exactly like development funding.
+    expect(() => preflightProductionService("api", {
+      ...env,
+      MONEY_ALLOW_SESSION_OWNER_WRITES: "true",
+    })).toThrow(/forbidden/);
     expect(() => preflightProductionService("api", {
       ...env,
       MONEY_AUTO_MIGRATE: "true",

@@ -16,6 +16,7 @@
     "seller:reader": "tsx src/seller/reader-service.ts",
     "build:packages": "node scripts/build-packages.mjs",
     "dashboard:login": "tsx src/dashboard-login.ts",
+    "dashboard:preview": "tsx src/preview-dashboard.ts",
     "api": "tsx src/server/api.ts",
     "api:db": "tsx src/server/postgres-api.ts",
     "ops:db": "tsx src/server/database-ops.ts",

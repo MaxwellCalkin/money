@@ -75,7 +75,7 @@ import {
   type TreasuryPayout,
   type TreasuryRoute,
 } from "../db/treasury.ts";
-import { dashboardHtml } from "./dashboard.ts";
+import { ownerAppHtml } from "./owner-app.ts";
 import { listenHost } from "./listen.ts";
 
 const AUTH_WINDOW_MS = 2 * 60_000;
@@ -88,6 +88,12 @@ type IdentityKind = "user" | "agent" | "provider";
 export interface PostgresApiOptions {
   /** Local demos only. Real top-ups arrive through the separate treasury role. */
   allowDevelopmentFunding?: boolean;
+  /** SANDBOX ONLY. Lets an owner session (bearer token) call /fund, /allocate,
+   * /mandates, and /mandates/:id/revoke so the local owner app is one-tap.
+   * Production preflight refuses this flag unconditionally: in production those
+   * routes accept only owner-signed (Ed25519) requests, so a stolen session can
+   * never move funds or widen authority. */
+  allowSessionOwnerWrites?: boolean;
   /** When non-empty, POST /users requires a matching inviteCode. The hosted
    * beta hands invites to recruited pilots instead of exposing an open,
    * rate-limitable signup surface to the internet. */
@@ -675,6 +681,16 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     c.set("userId", userId);
     await next();
   };
+
+  // The four owner-money write routes (/fund, /allocate, /mandates,
+  // /mandates/:id/revoke) are owner-SIGNED in production. The sandbox-only
+  // allowSessionOwnerWrites option relaxes exactly those four to session auth
+  // so the local owner app is one-tap; requireOwnerAccess still falls back to
+  // the signature path when no Authorization header is present, so signed
+  // CLI/onboard traffic behaves byte-identically under either flag state.
+  // Identity-root authority (/accounts/:id/rotate-key, /agents, /providers)
+  // is NOT relaxed even in sandbox.
+  const ownerWriteAuth = options.allowSessionOwnerWrites ? requireOwnerAccess : requireOwnerSig;
 
   const profilesFor = async (evidence: readonly PaymentEvidence[]) => {
     const accounts = await control.publicAccounts(evidence.flatMap((item) => [item.from, item.to]));
@@ -1426,7 +1442,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     return c.json({ ok: true });
   });
 
-  app.post("/fund", requireOwnerSig, async (c) => {
+  app.post("/fund", ownerWriteAuth, async (c) => {
     if (!options.allowDevelopmentFunding) {
       return c.json({ error: "treasury_required", reason: "production top-ups are accepted only from the treasury integration" }, 403);
     }
@@ -1443,7 +1459,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     return c.json(await transferView(userId, result), result.status === "posted" ? 200 : 402);
   });
 
-  app.post("/allocate", requireOwnerSig, async (c) => {
+  app.post("/allocate", ownerWriteAuth, async (c) => {
     const userId = c.get("userId");
     const body = await readBody<{ userId: string; agentId: string; amountMicros: number | string; idempotencyKey: string }>(c);
     const amount = body ? positiveMicros(body.amountMicros) : undefined;
@@ -1461,7 +1477,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     }
   });
 
-  app.post("/mandates", requireOwnerSig, async (c) => {
+  app.post("/mandates", ownerWriteAuth, async (c) => {
     const userId = c.get("userId");
     const body = await readBody<{
       userId: string; agentId: string; budgetMicros: number | string; perTxCapMicros: number | string;
@@ -1489,7 +1505,7 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     }
   });
 
-  app.post("/mandates/:id/revoke", requireOwnerSig, async (c) => {
+  app.post("/mandates/:id/revoke", ownerWriteAuth, async (c) => {
     const userId = c.get("userId");
     try {
       const changed = await policy.revokeMandate(userId, c.req.param("id") ?? "");
@@ -2433,11 +2449,16 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
     }
   });
 
+  let ownerAppPage: string | undefined;
   app.get("/dashboard", (c) => {
     c.header("content-security-policy", "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
     c.header("referrer-policy", "no-referrer");
     c.header("x-content-type-options", "nosniff");
-    return c.html(dashboardHtml);
+    ownerAppPage ??= ownerAppHtml({
+      sessionOwnerWrites: Boolean(options.allowSessionOwnerWrites),
+      developmentFunding: Boolean(options.allowDevelopmentFunding),
+    });
+    return c.html(ownerAppPage);
   });
   app.get("/dashboard/state", requireOwnerAccess, async (c) => c.json(await ownerSnapshot(c.get("userId"))));
 
@@ -2517,6 +2538,7 @@ export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) 
   }
   const { app } = createPostgresApi(db, {
     allowDevelopmentFunding: process.env.MONEY_ALLOW_DEV_FUNDING === "true",
+    allowSessionOwnerWrites: process.env.MONEY_ALLOW_SESSION_OWNER_WRITES === "true",
     ...(signupInvites.length ? { signupInvites } : {}),
     ...(configuredKeyring ? { externalHeaderKeyring: configuredKeyring } : {}),
     ...(complianceSessionKeyring && process.env.MONEY_COMPLIANCE_PROVIDER

@@ -223,9 +223,10 @@ function validateApi(env: Environment): void {
   }
   evmRpcNetworks(env);
   if (env.MONEY_ALLOW_DEV_FUNDING === "true" || env.MONEY_EXTERNAL_MOCK === "true"
+    || env.MONEY_ALLOW_SESSION_OWNER_WRITES === "true"
     || env.MONEY_CARD_PROVIDER?.trim() === "mock" || env.MONEY_EVM_PRIVATE_KEY) {
     throw new Error(
-      "development funding, mock settlement, the mock card issuer, and local EVM keys are forbidden in production",
+      "development funding, mock settlement, session-token owner writes, the mock card issuer, and local EVM keys are forbidden in production",
     );
   }
   if (env.MONEY_CARD_PROVIDER?.trim()) {
