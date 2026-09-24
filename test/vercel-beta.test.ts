@@ -468,7 +468,7 @@ describe("vercel main composer", () => {
 
     const ready = await app.request("/health/ready");
     expect(ready.status).toBe(200);
-    expect(await ready.json()).toEqual({ ok: true, schemaVersion: "0014" });
+    expect(await ready.json()).toEqual({ ok: true, schemaVersion: "0015" });
     expect(probes).toBe(1);
     expect((await app.request("/health/ready")).status).toBe(200);
     expect(probes).toBe(1);

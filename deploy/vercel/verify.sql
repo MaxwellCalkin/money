@@ -63,8 +63,8 @@ from (values
        and pg_has_role('money_card_ingress_login', 'money_card_ingress', 'member')
        and pg_has_role('money_ops_login', 'money_ops', 'member')
        and pg_has_role('money_metrics_login', 'money_metrics', 'member')),
-  (22, 'schema head is 0014',
-       (select max(version) from money.schema_migrations) = '0014'),
+  (22, 'schema head is 0015',
+       (select max(version) from money.schema_migrations) = '0015'),
   (23, 'three money-* cron jobs are scheduled',
        (select count(*) from cron.job where jobname like 'money-%') = 3),
   (24, 'sweep key is in Vault',
@@ -75,6 +75,12 @@ from (values
   (26, 'ledger_health: zero_sum',
        (select zero_sum from health)),
   (27, 'ledger_health: receipts_ok',
-       (select receipts_ok from health))
+       (select receipts_ok from health)),
+  (28, 'beta app login can post play-dollar funding (logins.sql)',
+       has_function_privilege('money_app_login',
+         'money_private.post_confirmed_funding(text,text,text,bigint,jsonb)', 'execute')),
+  (29, 'money_app authority role still cannot post funding (production matrix intact)',
+       has_function_privilege('money_app',
+         'money_private.post_confirmed_funding(text,text,text,bigint,jsonb)', 'execute') = false)
 ) as checks (n, check_name, ok)
 order by n;

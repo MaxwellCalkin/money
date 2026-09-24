@@ -69,6 +69,20 @@ grant money_card_ingress to money_card_ingress_login;
 grant money_ops to money_ops_login;
 grant money_metrics to money_metrics_login;
 
+-- Play-dollar funding. This beta's only money source is dev funding (the
+-- composer requires MONEY_ALLOW_DEV_FUNDING=true), and POST /fund posts it
+-- through money_private.post_confirmed_funding. db/roles.sql deliberately
+-- withholds that function from money_app: production top-ups come only from
+-- the treasury, and the live-Postgres release gate asserts it. So the grant
+-- goes to the beta LOGIN, never the authority role. The production role
+-- matrix stays untouched, and a db/roles.sql replay (which revokes and
+-- re-grants money_app's functions) cannot drop it. The kernel's compliance
+-- gate still runs inside post_transfer: an owner without reviewed evidence is
+-- refused play dollars too.
+grant execute on function
+  money_private.post_confirmed_funding(text, text, text, bigint, jsonb)
+  to money_app_login;
+
 -- ---------------------------------------------------------------------------
 -- 3. Role-level guards that survive transaction pooling. The pools set the
 --    same statement timeouts per transaction; these cap them from the server

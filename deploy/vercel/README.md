@@ -23,7 +23,7 @@ Files in this directory:
 | `logins.sql` | the migrating identity (`postgres`; `money_owner` on the live project), after `db/roles.sql` | the six passworded logins (psql variables `app_pw`, `worker_pw`, `ingress_pw`, `ops_pw`, `metrics_pw`, `backup_pw`), role-level statement timeouts and connection limits, backup grants |
 | `data-api.sql` | `postgres`, after `logins.sql` (no secrets: the Supabase MCP `execute_sql` is fine) | Supabase Data API hardening: `postgres`'s default grants in `public` closed for anon/authenticated/service_role, existing ones stripped, the API roles kept out of `money`/`money_private` |
 | `schedule.sql` | `postgres`, in the `postgres` database | the sweep key into Vault (`sweep_key`), the beta origin (`beta_origin`), `beta_cron.call_internal`, three `cron.schedule` jobs |
-| `verify.sql` | `postgres`, read-only | 27 labelled boolean checks: shims, `anon` isolation, backup-login isolation, role matrix, head `0014`, cron jobs, Vault key, `ledger_health()` |
+| `verify.sql` | `postgres`, read-only | 29 labelled boolean checks: shims, `anon` isolation, backup-login isolation, role matrix, head `0015`, cron jobs, Vault key, `ledger_health()`, the play-dollar funding grant on the app LOGIN only |
 
 ## Topology
 
@@ -166,7 +166,7 @@ chat.
    psql "$ADMIN_URL" -At -c "select encode(public.digest('x','sha256'),'hex')"   # a 64-hex hash, not an error
    ```
 
-7. **Migrate** (from Windows too; the head must come out as `0014`):
+7. **Migrate** (from Windows too; the head must come out as `0015`):
 
    ```bash
    DATABASE_URL="$ADMIN_URL" npm run db:migrate

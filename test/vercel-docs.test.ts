@@ -269,7 +269,7 @@ describe("hosted beta docs: supporting documents", () => {
       expect(threatModel, marker).toContain(marker);
     }
     expect(threatModel).toMatch(/custodians are named: Vercel/);
-    expect(threatModel).toContain("(`0014`)");
+    expect(threatModel).toContain("(`0015`)");
     expect(threatModel).not.toContain("(`0013`)");
   });
 

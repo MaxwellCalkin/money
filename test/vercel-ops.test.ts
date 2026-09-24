@@ -287,6 +287,13 @@ describe("deploy/vercel Supabase SQL", () => {
       expect(logins).toContain(`alter role ${login} connection limit ${limit};`);
     }
     expect(logins).toContain("alter role money_backup_login connection limit 2;");
+    // Play-dollar funding: the beta app LOGIN only, never the money_app authority
+    // role (db/roles.sql withholds it; the live release gate asserts app_funding false).
+    expect(logins).toMatch(
+      /grant execute on function\n\s+money_private\.post_confirmed_funding\(text, text, text, bigint, jsonb\)\n\s+to money_app_login;/,
+    );
+    expect(sqlCode(logins)).not.toMatch(/post_confirmed_funding[^;]*to money_app\s*;/);
+    expect(read("db/roles.sql")).not.toMatch(/post_confirmed_funding[^;]*to money_app\b/);
     expect(logins).not.toMatch(/alter role money_backup_login set statement_timeout/);
   });
 
@@ -355,10 +362,12 @@ describe("deploy/vercel Supabase SQL", () => {
       "from money_private.ledger_health() h",
       "(select zero_sum from health)",
       "(select receipts_ok from health)",
+      "has_function_privilege('money_app_login',",
+      "'money_private.post_confirmed_funding(text,text,text,bigint,jsonb)', 'execute') = false)",
     ]) {
       expect(verify).toContain(check);
     }
-    expect(verify).toContain("(select max(version) from money.schema_migrations) = '0014'");
+    expect(verify).toContain("(select max(version) from money.schema_migrations) = '0015'");
     // Lockstep once the migration set moves past the spec's head: verify.sql
     // must be bumped with every new migration.
     const head = readdirSync(resolve(ROOT, "db/migrations"))

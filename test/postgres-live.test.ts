@@ -39,7 +39,7 @@ describe.skipIf(!connectionString)("live PostgreSQL release gate", () => {
     await runMigrations(db);
     const replay = await runMigrations(db);
     expect(replay.map(({ version, applied }) => ({ version, applied }))).toEqual(
-      Array.from({ length: 14 }, (_, index) => ({
+      Array.from({ length: 15 }, (_, index) => ({
         version: String(index + 1).padStart(4, "0"),
         applied: false,
       })),
@@ -73,7 +73,7 @@ describe.skipIf(!connectionString)("live PostgreSQL release gate", () => {
       select version, checksum from money.schema_migrations order by version
     `);
     expect(migrations.rows.map((row) => row.version)).toEqual(
-      Array.from({ length: 14 }, (_, index) => String(index + 1).padStart(4, "0")),
+      Array.from({ length: 15 }, (_, index) => String(index + 1).padStart(4, "0")),
     );
     expect(migrations.rows.every((row) => /^[0-9a-f]{64}$/.test(row.checksum))).toBe(true);
   });
