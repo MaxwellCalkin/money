@@ -90,9 +90,16 @@ does not deploy. Deploys are prebuilt from a clean checkout of `main` with the
 CLI (`.vercel/project.json` pointing at the project):
 `MONEY_VERCEL_ENTRY=metrics node scripts/build-vercel.mjs` (metrics) or
 `MONEY_METRICS_ORIGIN=https://agentmoney-metrics.vercel.app node scripts/build-vercel.mjs`
-(main), then `vercel deploy --prebuilt --prod`. First verify pass: 25 of 27
-`t`, rows 7 and 10 report-only. The first manual sweep and ledger-health
-calls answered 200.
+(main), then `vercel deploy --prebuilt --prod`. Verify: 29 of 29 `t` (rows 7
+and 10 are report-only). Sweep and ledger-health answer 200 from the cron
+loop. A founder test owner onboarded through the invite path with $100 of
+play dollars (dev-approved). That onboarding surfaced the PostgreSQL 17
+deferred-trigger fix (migration 0015) and the beta-only funding grant in
+`logins.sql`. Every login password and the sweep key were generated fresh
+that day (the 2026-09-11 values had transited a transcript), and
+`money_owner`'s password was rotated too. After a rotation, Supavisor can
+refuse the new password for a few seconds while its cached secret refreshes.
+Retry before assuming the change failed.
 
 ## One-time setup
 

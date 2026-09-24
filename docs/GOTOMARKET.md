@@ -86,6 +86,21 @@ kernel refuses funding (play dollars included) for an owner without reviewed
 evidence — and the mainnet x402 payment still needs the founder float; the
 bridge stays off in this profile (routes fail closed).
 
+**Status (2026-09-24): the hosted beta is live** at
+https://agentmoney-beta.vercel.app (public metrics at `/metrics`; invite-only
+signup with five codes minted into the gitignored `deploy/local/`). M1 gate
+item 3 is done. Restore-drill evidence:
+https://github.com/MaxwellCalkin/money/actions/runs/36028327814 (restoring the
+first nightly-profile backup,
+https://github.com/MaxwellCalkin/money/actions/runs/36028173586). Going live
+also surfaced a PostgreSQL 17 vs 18 difference: 17 runs deferred triggers as
+the committing role, so every posting by a least-privilege login failed at
+commit. Tests and CI run 18, so they never saw it; the fix is migration 0015
+plus a structural guard test. A founder test owner onboarded through the
+invite path with $100 of play dollars. Still open: a measured stranger
+onboarding (gate item 1; each pilot still needs one founder-run
+`dev:approve`), and the mainnet x402 payment (item 2; founder float).
+
 The funnel ships here, not at M3 — these are acquisition instruments:
 
 - **Hosted beta deploy profile** (agent): postgres + pgbouncer + api:db +
