@@ -13,6 +13,7 @@ const setup = read("deploy/vercel/setup.sql");
 const setupExtensions = read("deploy/vercel/setup-extensions.sql");
 const setupShim = read("deploy/vercel/setup-shim.sql");
 const logins = read("deploy/vercel/logins.sql");
+const dataApi = read("deploy/vercel/data-api.sql");
 const schedule = read("deploy/vercel/schedule.sql");
 const verify = read("deploy/vercel/verify.sql");
 
@@ -289,19 +290,22 @@ describe("deploy/vercel Supabase SQL", () => {
     expect(logins).not.toMatch(/alter role money_backup_login set statement_timeout/);
   });
 
-  it("logins.sql scopes the backup login to money/money_private and closes the Data API defaults", () => {
+  it("logins.sql scopes the backup login to money/money_private; data-api.sql closes the Data API defaults", () => {
     expect(logins).toContain("grant usage on schema money, money_private to money_backup_login;");
     expect(logins).toContain("grant select on all tables in schema money to money_backup_login;");
     expect(logins).toContain("grant select on all sequences in schema money to money_backup_login;");
-    expect(logins).toMatch(/alter default privileges for role postgres in schema money\n\s+grant select on tables to money_backup_login;/);
-    expect(logins).toMatch(/alter default privileges for role postgres in schema money\n\s+grant select on sequences to money_backup_login;/);
+    expect(logins).toMatch(/alter default privileges for role current_user in schema money\n\s+grant select on tables to money_backup_login;/);
+    expect(logins).toMatch(/alter default privileges for role current_user in schema money\n\s+grant select on sequences to money_backup_login;/);
     expect(logins).not.toMatch(/grant [^\n]*(cron|vault|auth|net)\./);
     // The dump's --enable-row-security counterpart: one policy, one role.
     expect(logins).toMatch(
       /create policy beta_waitlist_backup_read on money\.beta_waitlist\n\s+for select to money_backup_login using \(true\);/,
     );
     expect(logins.match(/create policy/g)).toHaveLength(1);
-    expect(logins).toContain("if exists (select 1 from pg_roles where rolname = 'anon') then");
+    // Altering postgres's own default privileges needs postgres, so the hardening
+    // is its own file; logins.sql runs as the migrating identity (money_owner live).
+    expect(sqlCode(logins)).not.toMatch(/for role postgres|\banon\b/);
+    expect(dataApi).toContain("if exists (select 1 from pg_roles where rolname = 'anon') then");
     for (const hardening of [
       "revoke all on tables from anon, authenticated, service_role;",
       "revoke execute on functions from anon, authenticated, service_role;",
@@ -309,7 +313,7 @@ describe("deploy/vercel Supabase SQL", () => {
       "revoke all on all functions in schema public from anon, authenticated, service_role;",
       "revoke usage on schema money, money_private from anon, authenticated, service_role;",
     ]) {
-      expect(logins).toContain(hardening);
+      expect(dataApi).toContain(hardening);
     }
   });
 
@@ -339,7 +343,7 @@ describe("deploy/vercel Supabase SQL", () => {
       "has_function_privilege('anon', 'money_private.join_waitlist(text,text)', 'execute') = false",
       "has_schema_privilege('anon', 'money', 'usage') = false",
       "has_schema_privilege('anon', 'public', 'usage')",
-      "has_table_privilege('money_backup_login', 'cron.job', 'select') = false",
+      "not (has_schema_privilege('money_backup_login', 'cron', 'usage')",
       "has_table_privilege('money_backup_login', 'vault.decrypted_secrets', 'select') = false",
       "has_function_privilege('money_app', 'money_private.join_waitlist(text,text)', 'execute')",
       "has_function_privilege('money_worker', 'money_private.sweep_external_payments(integer)', 'execute')",

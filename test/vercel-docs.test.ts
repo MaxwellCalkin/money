@@ -36,6 +36,7 @@ const opsSources = [
   "deploy/vercel/setup-extensions.sql",
   "deploy/vercel/setup-shim.sql",
   "deploy/vercel/logins.sql",
+  "deploy/vercel/data-api.sql",
   "deploy/vercel/schedule.sql",
   "deploy/vercel/verify.sql",
   ".github/workflows/beta-backup.yml",

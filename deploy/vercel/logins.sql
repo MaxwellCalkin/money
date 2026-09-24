@@ -1,8 +1,12 @@
 -- Vercel beta profile: the six passworded Supabase logins, one per database
--- identity. Supabase-only. Run as `postgres` over the SESSION pooler (port
--- 5432) AFTER `npm run db:migrate` and AFTER `db/roles.sql`, with every
--- password supplied as a psql variable read from a file — never a literal in
--- this file, never pasted, never through the Supabase MCP tools:
+-- identity. Supabase-only. Run as the MIGRATING identity — the login that ran
+-- `npm run db:migrate` and `db/roles.sql`, so it owns `money`/`money_private`
+-- and holds ADMIN on the authority roles (`postgres` on a fresh project;
+-- `money_owner` on the live one, see README "Admin identity") — over the
+-- SESSION pooler (port 5432) AFTER both, with every password supplied as a
+-- psql variable read from a file — never a literal in this file, never pasted,
+-- never through the Supabase MCP tools. The Supabase Data API hardening that
+-- used to close this file is data-api.sql, run as `postgres`:
 --
 --   psql "$ADMIN_URL" -v ON_ERROR_STOP=1 \
 --     -v app_pw="$(cat "$SECRETS/app.pw")"         -v worker_pw="$(cat "$SECRETS/worker.pw")" \
@@ -87,16 +91,17 @@ alter role money_backup_login connection limit 2;
 -- ---------------------------------------------------------------------------
 -- 4. Backup login: least privilege, schema-scoped, deliberately NOT a member
 --    of the predefined read-everything role. It can read every table and
---    sequence in `money` (and whatever `postgres` creates there later), the
+--    sequence in `money` (and whatever the migrating identity creates there
+--    later — hence `for role current_user` below), the
 --    function definitions in `money_private` via the catalogs, and nothing
 --    else: never `cron.job`, `vault.*`, `auth.*`, or `net._http_response`.
 -- ---------------------------------------------------------------------------
 grant usage on schema money, money_private to money_backup_login;
 grant select on all tables in schema money to money_backup_login;
 grant select on all sequences in schema money to money_backup_login;
-alter default privileges for role postgres in schema money
+alter default privileges for role current_user in schema money
   grant select on tables to money_backup_login;
-alter default privileges for role postgres in schema money
+alter default privileges for role current_user in schema money
   grant select on sequences to money_backup_login;
 
 -- money.beta_waitlist (migration 0014) has row-level security enabled with no
@@ -122,30 +127,5 @@ begin
   ) then
     create policy beta_waitlist_backup_read on money.beta_waitlist
       for select to money_backup_login using (true);
-  end if;
-end $$;
-
--- ---------------------------------------------------------------------------
--- 5. Supabase Data API hardening. Supabase's default privileges hand anon,
---    authenticated and service_role full access to anything `postgres` creates
---    in `public`; the pgcrypto shims live there. Close the defaults, strip what
---    already exists, and make sure the API roles cannot even enter the money
---    schemas. Guarded so the file also runs on a database without those roles
---    (the restore drill's container). The dashboard step "remove `public` from
---    the exposed schemas" (deploy/vercel/README.md) is the second lock.
--- ---------------------------------------------------------------------------
-do $$
-begin
-  if exists (select 1 from pg_roles where rolname = 'anon') then
-    alter default privileges for role postgres in schema public
-      revoke all on tables from anon, authenticated, service_role;
-    alter default privileges for role postgres in schema public
-      revoke execute on functions from anon, authenticated, service_role;
-    alter default privileges for role postgres in schema public
-      revoke all on sequences from anon, authenticated, service_role;
-    revoke all on all tables in schema public from anon, authenticated, service_role;
-    revoke all on all functions in schema public from anon, authenticated, service_role;
-    revoke all on all sequences in schema public from anon, authenticated, service_role;
-    revoke usage on schema money, money_private from anon, authenticated, service_role;
   end if;
 end $$;

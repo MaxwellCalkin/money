@@ -20,7 +20,8 @@ Files in this directory:
 | File | Runs as | Purpose |
 |---|---|---|
 | `setup.sql` (`\ir setup-extensions.sql` + `\ir setup-shim.sql`) | `postgres`, before `npm run db:migrate` | pg_cron + pg_net, and the `public.digest`/`public.gen_random_uuid` shims over pgcrypto in `extensions` (the restore drill replays only `setup-shim.sql`) |
-| `logins.sql` | `postgres`, after `db/roles.sql` | the six passworded logins (psql variables `app_pw`, `worker_pw`, `ingress_pw`, `ops_pw`, `metrics_pw`, `backup_pw`), role-level statement timeouts and connection limits, backup grants, Supabase Data API hardening |
+| `logins.sql` | the migrating identity (`postgres`; `money_owner` on the live project), after `db/roles.sql` | the six passworded logins (psql variables `app_pw`, `worker_pw`, `ingress_pw`, `ops_pw`, `metrics_pw`, `backup_pw`), role-level statement timeouts and connection limits, backup grants |
+| `data-api.sql` | `postgres`, after `logins.sql` (no secrets: the Supabase MCP `execute_sql` is fine) | Supabase Data API hardening: `postgres`'s default grants in `public` closed for anon/authenticated/service_role, existing ones stripped, the API roles kept out of `money`/`money_private` |
 | `schedule.sql` | `postgres`, in the `postgres` database | the sweep key into Vault (`sweep_key`), the beta origin (`beta_origin`), `beta_cron.call_internal`, three `cron.schedule` jobs |
 | `verify.sql` | `postgres`, read-only | 27 labelled boolean checks: shims, `anon` isolation, backup-login isolation, role matrix, head `0014`, cron jobs, Vault key, `ledger_health()` |
 
@@ -63,6 +64,35 @@ webhook secrets and endpoint id; the metrics function refuses
 on every request and logs the reason once — the reason names a variable, never
 a value. An env edit therefore cannot nudge this beta toward real-money
 configuration; a real issuer or a real rail is a new spec, not an env change.
+
+**Admin identity on the live project.** The 2026-09-11 project was set up
+without the `postgres` password. `postgres` (the Supabase MCP connection)
+created one login, `money_owner` (CREATEROLE), and everything else ran as
+`money_owner`: migrations, `db/roles.sql`, `logins.sql`. So `money_owner` owns
+`money`/`money_private` and holds ADMIN on every authority role; read its
+session-pooler URL wherever the steps below say `$ADMIN_URL` for migrate,
+roles, logins, reconcile or dev:approve. `postgres` holds an INHERIT
+membership in `money_owner` (granted 2026-09-24), so the no-secret,
+postgres-only files (`data-api.sql`, `verify.sql`, and `schedule.sql` minus
+its Vault insert) run through the MCP. That day the sweep key reached Vault
+without transiting the transcript: a temporary SECURITY DEFINER function,
+executable only by `money_owner`, took it as a SELECT argument (not logged
+under `log_statement = ddl`), then was dropped. Login passwords went in as
+SCRAM verifiers computed client-side, so no plaintext reached the server
+log. pgcrypto was relocated into `public` that day, which makes
+`setup-shim.sql` a no-op there.
+
+**Live deployment (2026-09-24).** Main project `agentmoney-beta`
+(https://agentmoney-beta.vercel.app), metrics project `agentmoney-metrics`
+(https://agentmoney-metrics.vercel.app), Supabase ref `wakgyyistxfxolymijco`.
+Neither Vercel project is connected to Git yet, so step 12's "merge to `main`"
+does not deploy. Deploys are prebuilt from a clean checkout of `main` with the
+CLI (`.vercel/project.json` pointing at the project):
+`MONEY_VERCEL_ENTRY=metrics node scripts/build-vercel.mjs` (metrics) or
+`MONEY_METRICS_ORIGIN=https://agentmoney-metrics.vercel.app node scripts/build-vercel.mjs`
+(main), then `vercel deploy --prebuilt --prod`. First verify pass: 25 of 27
+`t`, rows 7 and 10 report-only. The first manual sweep and ledger-health
+calls answered 200.
 
 ## One-time setup
 
@@ -142,10 +172,11 @@ chat.
    DATABASE_URL="$ADMIN_URL" npm run db:migrate
    ```
 
-8. **Roles, then logins.** `db/roles.sql` creates the nologin authority roles
-   and the convergent grants; `logins.sql` binds the six passworded logins,
-   the role-level statement timeouts and connection limits, the backup
-   grants, and the Supabase Data API hardening:
+8. **Roles, then logins, then the Data API lock.** `db/roles.sql` creates the
+   nologin authority roles and the convergent grants; `logins.sql` binds the
+   six passworded logins, the role-level statement timeouts and connection
+   limits, and the backup grants; `data-api.sql` (as `postgres`) closes the
+   Supabase Data API defaults:
 
    ```bash
    psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -f db/roles.sql
@@ -154,9 +185,10 @@ chat.
      -v ingress_pw="$(cat "$SECRETS/ingress.pw")" -v ops_pw="$(cat "$SECRETS/ops.pw")" \
      -v metrics_pw="$(cat "$SECRETS/metrics.pw")" -v backup_pw="$(cat "$SECRETS/backup.pw")" \
      -f deploy/vercel/logins.sql
+   psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -f deploy/vercel/data-api.sql   # as postgres
    ```
 
-9. **First `verify.sql` pass** — every `ok` must read `t` except row 7 (report
+9. **First `verify.sql` pass** — every `ok` must read `t` except rows 7 and 10 (report
    only) and, until step 15 has run, rows 23-25 (cron jobs, Vault key,
    origin):
 
@@ -240,7 +272,7 @@ chat.
       -f deploy/vercel/schedule.sql
     ```
 
-16. **Second `verify.sql` pass** — now every row except 7 must read `t`.
+16. **Second `verify.sql` pass** — now every row except 7 and 10 (report only) must read `t`.
 17. **GitHub secrets** (environment `beta-backup`). The backup login uses the
     SESSION pooler and carries no `sslmode`; the workflow supplies
     `PGSSLMODE=verify-full` and `PGSSLROOTCERT` from `BETA_BACKUP_SSL_CA`:

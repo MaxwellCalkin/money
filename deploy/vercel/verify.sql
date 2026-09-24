@@ -4,7 +4,7 @@
 --
 --   psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -f deploy/vercel/verify.sql
 --
--- Every `ok` must read `t` except the row marked "report only". Nothing here
+-- Every `ok` must read `t` except the rows marked "report only" (7, 10). Nothing here
 -- prints a row of data, a secret, or a URL. Supabase-only (cron, vault, net,
 -- auth and the API roles do not exist elsewhere).
 with health as (
@@ -26,12 +26,14 @@ from (values
        has_schema_privilege('anon', 'money_private', 'usage') = false),
   ( 7, 'report only: anon has usage on schema public (close it by removing public from the exposed schemas)',
        has_schema_privilege('anon', 'public', 'usage')),
-  ( 8, 'backup login cannot read cron.job',
-       has_table_privilege('money_backup_login', 'cron.job', 'select') = false),
+  ( 8, 'backup login cannot reach cron.job (PUBLIC holds SELECT, but only postgres may enter the cron schema)',
+       not (has_schema_privilege('money_backup_login', 'cron', 'usage')
+            and has_table_privilege('money_backup_login', 'cron.job', 'select'))),
   ( 9, 'backup login cannot read vault.decrypted_secrets',
        has_table_privilege('money_backup_login', 'vault.decrypted_secrets', 'select') = false),
-  (10, 'backup login cannot read net._http_response',
-       has_table_privilege('money_backup_login', 'net._http_response', 'select') = false),
+  (10, 'report only: every login reaches net.* (Supabase pg_net default: PUBLIC holds ALL plus USAGE on net, granted by supabase_admin; postgres cannot revoke it)',
+       has_schema_privilege('money_backup_login', 'net', 'usage')
+       and has_table_privilege('money_backup_login', 'net._http_response', 'select')),
   (11, 'backup login cannot read auth.users',
        has_table_privilege('money_backup_login', 'auth.users', 'select') = false),
   (12, 'backup login can select money.beta_waitlist (for pg_dump)',
