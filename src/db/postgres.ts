@@ -3,13 +3,67 @@ import type { QueryRows, SqlExecutor, TransactionalDatabase } from "./database.t
 
 const { Pool } = pg;
 
+export type PostgresSsl = boolean | { rejectUnauthorized: boolean; ca?: string };
+
 export interface PostgresOptions {
   connectionString?: string;
   maxConnections?: number;
   idleTimeoutMs?: number;
   statementTimeoutMs?: number;
   applicationName?: string;
-  ssl?: boolean | { rejectUnauthorized: boolean };
+  ssl?: PostgresSsl;
+}
+
+/** Query parameters pg-connection-string turns into an `ssl` object. When the
+ * caller passes an explicit `ssl` option we strip them: pg merges the parsed
+ * URL over the explicit config, so an in-URL `sslmode=require` would silently
+ * replace a verify-full CA pin with a MITM-tolerant empty object. */
+const URL_TLS_PARAMETERS = ["sslmode", "sslcert", "sslkey", "sslrootcert", "ssl"] as const;
+
+/** MONEY_DB_SSL → the pg `ssl` option. Unset or `off` leaves pg's default
+ * (plaintext unless the URL says otherwise); `require` encrypts without
+ * verifying the peer; `verify-full` pins the CA from MONEY_DB_SSL_CA (PEM)
+ * and verifies the hostname — the only mode the hosted beta accepts. */
+export function resolvePostgresSsl(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): PostgresSsl | undefined {
+  const mode = env.MONEY_DB_SSL?.trim();
+  if (!mode || mode === "off") return undefined;
+  if (mode === "require") return { rejectUnauthorized: false };
+  if (mode === "verify-full") {
+    const ca = env.MONEY_DB_SSL_CA?.trim();
+    if (!ca) throw new Error("MONEY_DB_SSL_CA (PEM) is required when MONEY_DB_SSL=verify-full");
+    return { ca, rejectUnauthorized: true };
+  }
+  throw new Error("MONEY_DB_SSL must be one of off, require, verify-full");
+}
+
+function stripUrlTlsParameters(connectionString: string): string {
+  let url: URL;
+  try {
+    url = new URL(connectionString);
+  } catch {
+    return connectionString;
+  }
+  const original = url.search;
+  if (!original) return connectionString;
+  let changed = false;
+  for (const name of URL_TLS_PARAMETERS) {
+    if (url.searchParams.has(name)) {
+      url.searchParams.delete(name);
+      changed = true;
+    }
+  }
+  if (!changed) return connectionString;
+  const query = url.searchParams.toString();
+  // Replace only the query segment so the rest of the string (credentials,
+  // host, database) reaches pg byte-for-byte as configured.
+  const index = connectionString.indexOf(original);
+  if (index < 0) {
+    url.search = query;
+    return url.toString();
+  }
+  return `${connectionString.slice(0, index)}${query ? `?${query}` : ""}${connectionString.slice(index + original.length)}`;
 }
 
 /** Production database adapter. One Pool per process; deployments should put
@@ -20,8 +74,9 @@ export class PostgresDatabase implements TransactionalDatabase {
   private readonly statementTimeoutMs: number;
 
   constructor(options: PostgresOptions = {}) {
-    const connectionString = options.connectionString ?? process.env.DATABASE_URL;
-    if (!connectionString) throw new Error("DATABASE_URL is required for Postgres mode");
+    const configured = options.connectionString ?? process.env.DATABASE_URL;
+    if (!configured) throw new Error("DATABASE_URL is required for Postgres mode");
+    const connectionString = options.ssl !== undefined ? stripUrlTlsParameters(configured) : configured;
     this.statementTimeoutMs = options.statementTimeoutMs ?? Number(process.env.PG_STATEMENT_TIMEOUT_MS ?? 5_000);
     this.pool = new Pool({
       connectionString,

@@ -1,0 +1,109 @@
+# Nightly encrypted logical backup of the hosted beta's Supabase database
+# (deploy/vercel/README.md, "Backups"). Schema-scoped: only `money` and
+# `money_private` are dumped, as the least-privilege `money_backup_login`
+# (deploy/vercel/logins.sql) — never `cron.job`, `vault.*`, `auth.*`, or
+# `net._http_response`. The dump is age-encrypted before it becomes a workflow
+# artifact because anyone can download a public repository's artifacts. The
+# artifact retains waitlist emails and hashed session/nonce tables for 30 days.
+#
+# Secrets live in the `beta-backup` GitHub environment, whose deployment-branch
+# policy is `main` only: a copy of this file on any other branch cannot read
+# them. Scheduled workflows run from the default branch only, so the first run
+# after merge is a `workflow_dispatch`. Public-repo schedules auto-disable after
+# 60 days without commits.
+#
+# Nothing here prints the connection URL, the CA, or a row: only the archive
+# size. The URL crosses into the client container as an environment variable,
+# never as an argument. The restore drill (beta-restore-drill.yml) consumes
+# the artifact and doubles as the monitor that this workflow keeps running.
+
+name: beta-backup
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beta-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: beta-backup
+    env:
+      # pg_dump must match the server major (Supabase Postgres 17; confirm with
+      # `select version()` before re-pinning). Digest resolved 2026-09-11 from
+      # the registry's manifest index (what `crane digest postgres:17.11-bookworm`
+      # returns) — never guessed. Keep this pin and the two in
+      # beta-restore-drill.yml identical (test/vercel-ops.test.ts).
+      PG_IMAGE: postgres:17.11-bookworm@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install age
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends age
+          age --version
+
+      - name: Write the Supabase CA to a private temp file
+        env:
+          BETA_BACKUP_SSL_CA: ${{ secrets.BETA_BACKUP_SSL_CA }}
+        run: |
+          umask 077
+          printf '%s\n' "$BETA_BACKUP_SSL_CA" > "$RUNNER_TEMP/ca.pem"
+          grep -q 'BEGIN CERTIFICATE' "$RUNNER_TEMP/ca.pem"
+
+      - name: pg_dump money and money_private over verify-full TLS (custom format)
+        env:
+          BETA_BACKUP_DATABASE_URL: ${{ secrets.BETA_BACKUP_DATABASE_URL }}
+        # Single quotes: the URL expands only inside the container, from its
+        # environment, so it never appears in argv on the runner or in the log.
+        # The URL carries no sslmode; PGSSLMODE/PGSSLROOTCERT pin verify-full
+        # against the project CA. --enable-row-security: money.beta_waitlist has
+        # RLS enabled and the backup login is not its owner, so pg_dump (which
+        # sets row_security = off) would refuse the table; the login's select
+        # policy from logins.sql shows it every row under row_security = on.
+        # No --schema=public: the pgcrypto shims are recreated by setup-shim.sql.
+        # No extra gzip: the custom format is already compressed.
+        run: |
+          umask 077
+          docker run --rm \
+            -e BETA_BACKUP_DATABASE_URL \
+            -e PGSSLMODE=verify-full \
+            -e PGSSLROOTCERT=/ca.pem \
+            -v "$RUNNER_TEMP/ca.pem:/ca.pem:ro" \
+            "$PG_IMAGE" \
+            sh -c 'pg_dump --dbname="$BETA_BACKUP_DATABASE_URL" --format=custom --no-owner --no-privileges --enable-row-security --schema=money --schema=money_private' \
+            > "$RUNNER_TEMP/beta-backup.dump"
+          test -s "$RUNNER_TEMP/beta-backup.dump"
+
+      - name: Encrypt with age and shred the plaintext dump
+        env:
+          BETA_BACKUP_AGE_RECIPIENT: ${{ secrets.BETA_BACKUP_AGE_RECIPIENT }}
+        run: |
+          umask 077
+          age -r "$BETA_BACKUP_AGE_RECIPIENT" -o "$RUNNER_TEMP/beta-backup.dump.age" "$RUNNER_TEMP/beta-backup.dump"
+          shred -u "$RUNNER_TEMP/beta-backup.dump"
+          stat -c 'encrypted archive: %s bytes' "$RUNNER_TEMP/beta-backup.dump.age"
+
+      - name: Retain the encrypted archive for 30 days
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: beta-backup
+          path: ${{ runner.temp }}/beta-backup.dump.age
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Remove the CA copy
+        if: always()
+        run: shred -u "$RUNNER_TEMP/ca.pem" 2>/dev/null || true

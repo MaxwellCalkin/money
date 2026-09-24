@@ -1,5 +1,8 @@
 # Hosted beta profile ($0, single VM)
 
+> **Superseded (2026-09-11):** the live hosted beta is the serverless profile in `deploy/vercel/` (Vercel + Supabase); this single-VM profile is kept for reference and is not deployed.
+> Its `postgres:18` differs from Supabase's Postgres 17: a dump from one needs a client of the matching major to restore into the other.
+
 The invite-only, testnet-labeled pilot deployment from `docs/GOTOMARKET.md`
 M1. This is deliberately NOT the production contract in `deploy/README.md`:
 the production image refuses to run outside production posture (the baked

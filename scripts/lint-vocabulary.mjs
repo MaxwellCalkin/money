@@ -95,6 +95,7 @@ export function lintRepository(root = ROOT) {
     join(root, "README.md"),
     join(root, "site", "index.html"),
     join(root, "site", "copy-variants.md"),
+    join(root, "deploy", "vercel", "README.md"),
     ...readdirSync(join(root, "packages"))
       .map((name) => join(root, "packages", name, "README.md"))
       .filter((path) => {

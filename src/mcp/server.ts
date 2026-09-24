@@ -116,7 +116,7 @@ function text(value: unknown) {
   return { content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };
 }
 
-const server = new McpServer({ name: "money", version: "0.14.0" });
+const server = new McpServer({ name: "money", version: "0.14.1" });
 
 server.tool(
   "money_balance",

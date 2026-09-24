@@ -10,3 +10,4 @@ runtime/
 .secrets/
 .money/
 deploy/local/
+.vercel/

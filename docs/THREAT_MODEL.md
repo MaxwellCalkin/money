@@ -62,12 +62,24 @@ The system is secure only while all of these remain true:
 | External x402 edge | Seller requirements, facilitator response, RPC view | Remote signing, encrypted authorization release, confirmation or reversal |
 | Card authorization ingress | Forged, replayed or delayed issuer authorization requests | Consume already-reserved authority on one existing pending card; no credit, no issue, no widen, no PAN |
 | Card event worker | Issuer event/object responses and ambiguous approvals | Narrow settle/void/refund/close commands against re-fetched evidence; may trip but never reopen the breaker |
-| Build and deployment | Dependencies, actions, image layers, environment files | Exact release artifact, segregated service credentials, production preflight |
+| Hosted beta scheduler (pg_cron → pg_net → `/internal/*`) | Forged, replayed, or repeated sweep-key requests; cron re-runs | Trigger idempotent sweeps and append at most two ledger-health verdicts per hour; counts-only responses; no ids, no funding, no mandate change |
+| Public waitlist (`POST /waitlist`) | Arbitrary JSON or form bodies, floods, duplicate or hostile addresses | One SECURITY DEFINER insert of an email and optional note (`money_private.join_waitlist`) behind TypeScript validation, a per-instance bucket, and a database-side cap; the product role has no read path to the table |
+| Public metrics function (`agentmoney-metrics`) | Crawls, malformed receipt ids | Two aggregate functions under the `money_metrics` login and nothing else; a separate Vercel project sharing no `process.env` with any money-moving identity |
+| Build and deployment | Dependencies, actions, image layers, environment files; for the hosted beta, any push to `main` | Exact release artifact, segregated service credentials, production preflight; for the hosted beta, Production-only Sensitive environment values, a boot-time drift guard, and founder-side branch protection on `main` |
 
 TLS termination, secret storage, HSM policy, PostgreSQL administration, network
 policy, backups, observability, and sponsor-bank custody sit outside this
 repository. A deployment that collapses those boundaries invalidates this
-model even if the application code is unchanged.
+model even if the application code is unchanged. For the hosted sandbox beta
+(`deploy/vercel/`) those custodians are named: Vercel (TLS termination, the
+function runtime, Production-only Sensitive environment values), Supabase
+(PostgreSQL administration, the project CA pinned by `MONEY_DB_SSL=verify-full`,
+Vault for the sweep key, pg_cron and pg_net), and GitHub Actions
+(age-encrypted backups and restore drills under the `beta-backup` environment,
+restricted to `main`). There is no HSM and no sponsor-bank custody in that
+profile because there is no real money; the composers refuse every real-money
+credential name at boot, so the boundary cannot be collapsed by an environment
+edit.
 
 ## Primary payment flows
 
@@ -179,6 +191,11 @@ out-of-order events route to review or restriction.
 | Dependency, CI action, or image compromise | Lockfile, exact CI action commits, separately pinned Node builder and shell-less distroless runtime digests, source-revision label, numeric non-root read-only image, no-network production preflight, fixed Trivy version/cache policy, and a commit-named 90-day artifact containing image identity, CycloneDX SBOM, machine-readable blocking scan evidence, and a sorted SHA-256 manifest constrain the artifact. | Signed provenance, registry admission, long-term evidence retention, dependency-review policy, patch cadence, and an independent build environment are required before launch. |
 | Denial of service exhausts database, workers, provider quotas, or memory | Bounded bodies, timeouts, pagination, worker leases, capped batches, readiness checks, retries, dead-letter/review states, and process separation limit local amplification. | Edge rate limits, queues, autoscaling, provider quotas, database capacity, DDoS protection, and overload testing are infrastructure requirements. Availability never permits bypassing a money or compliance control. |
 | Journal, evidence, or backup is corrupted or selectively restored | Immutable journal/evidence, hash-linked receipts, migration checksums, reconciliation commands, and release-pinned migrations detect several classes of divergence. | Point-in-time recovery, encrypted backups, restore drills, region failure, clock integrity, forensic retention, and independent finance reports must be proven operationally. |
+| Sweep / ledger-health key of the hosted beta is stolen, or `/internal/*` is flooded | The key arms only `POST /internal/sweep` and `POST /internal/ledger-health`; its authority is to trigger idempotent sweeps and append at most two ledger-health verdicts per hour (a 30-minute minimum interval through `latest_ledger_health()` plus the hourly cron); requests are JSON-only, compared sha256-then-constant-time, answered with counts only; the key lives in Supabase Vault (`money_sweep_key`), is read by `beta_cron.call_internal` at execution time and never stored in `cron.job`, and `vault.decrypted_secrets` is never granted to the backup login. | Containment is `vault.update_secret` plus a Vercel env rotate and redeploy. A stolen key can burn function invocations and pollute `net._http_response`; it cannot move funds, widen a mandate, or read a row. |
+| Public metrics identity loses process isolation on serverless hosting | The metrics code runs in the separate `agentmoney-metrics` Vercel project holding only `MONEY_METRICS_DATABASE_URL` and the TLS/posture variables; the main origin's `/metrics*` and `/receipts/*` are CDN rewrites, so the deployment contract in `docs/METRICS.md` holds unchanged; the composer refuses `DATABASE_URL` and every other segregated-authority name at boot. | Both projects build from the same repository, so a build-script change could move code between them; `test/vercel-build.test.ts` pins the output shapes and review must keep the metrics entry credential-free. |
+| Waitlist PII leaks, or the table is enumerated or flooded | Email plus an optional note only; TypeScript validation before any database call, then `money_private.join_waitlist` (SECURITY DEFINER, validates again, silent 300/hour and 20,000-row caps); the product role can execute the function but not select the table; duplicates answer 202 exactly like first joins; the only log line is a SQLSTATE code, and the `23505` `detail` that would echo the address is never logged (regression-tested). | Rows sit in the encrypted backup artifact for 30 days; deletion requests are honoured in the live table and age out of backups on the next cycle. The per-instance rate limit is per instance; the database-side cap is the real limit. |
+| Serverless multi-instance execution defeats replay, idempotency, or session controls | Nonces (`money_private.consume_signed_request`, a 2-minute window on the database clock), idempotency keys, owner sessions, approvals, and the ledger are database-resident, so replay protection holds across instances and through the Supavisor transaction pooler; the code stays pooler-safe (transaction-local settings, transaction-level advisory locks, no session state). Per-instance state is limited to the mock card issuer, the waitlist bucket, and the `/health/ready` authority-probe cache; pool count is bounded by role-level connection limits. | Because the mock issuer is per instance, the card-event batch and issuer-close drain never run in this profile (`MONEY_CARD_PROVIDER=mock` is asserted at boot); flipping to a real issuer is a new deployment spec, not an env edit. |
+| Production deploy triggered without review (hosted beta) | Production deploys are `git push origin main` through the Vercel Git integration, available to any session holding the SSH key; previews never build (`ignoreCommand`, `git.deploymentEnabled`) and could not boot with Production-only values. Secret material is created and moved only by file or stdin expansion (`deploy/vercel/README.md`), never as literal arguments. | The compensating control is founder-side branch protection on `main` requiring one review (or Vercel production promotion) before the first stranger onboards; until it is configured this row is open. The Supabase MCP connector is a standing admin credential whose only audit trail is the transcript — switch it to read-only after setup. |
 
 ## Deliberately unavailable capabilities
 
@@ -190,6 +207,10 @@ configuration:
 - no public or private arbitrary-URL fetch without the public-address policy or
   an exact trusted-private-origin grant;
 - no owner-signed fake funding in production;
+- no real-money configuration reachable by an environment edit in the hosted
+  sandbox beta: both Vercel functions refuse every segregated-authority name
+  outside their allowlist, `NODE_ENV=production`, and any card provider but
+  `mock` at boot;
 - no session-token authority over funding, allocation, or mandate grant/revoke
   in production: `MONEY_ALLOW_SESSION_OWNER_WRITES` is a sandbox-only owner-app
   convenience, off by default and refused by production preflight exactly like
@@ -243,10 +264,10 @@ The release owner must retain evidence for the exact commit and image digest:
 | Claim | Required evidence |
 |---|---|
 | Types and unit/integration contracts are coherent | Clean dependency install, typecheck, complete Vitest suite, and production build |
-| Database invariants and role isolation hold | Fresh PostgreSQL migration through the latest migration (`0013`), idempotent rerun, role application, effective-privilege tests, contention and reconciliation suite |
+| Database invariants and role isolation hold | Fresh PostgreSQL migration through the latest migration (`0014`), idempotent rerun, role application, effective-privilege tests, contention and reconciliation suite |
 | Deployed command surface matches the reviewed source | Image build, Compose render, every service preflight, health/readiness checks, and no cross-service credential leakage |
 | Artifact has reviewed provenance and no blocking known vulnerability | Exact action commits and base-image digest, lockfile review, audit, source-revision-labeled image, retained image ID/CycloneDX/scan artifact, exact-image HIGH/CRITICAL result, and immutable registry digest after publication |
-| Repository changes cannot bypass required review | Effective protected-branch/ruleset configuration, required exact-head `product`, `postgres`, and `image` checks, code-owner approval, stale-approval dismissal, conversation resolution, force-push/deletion denial, and audited break-glass evidence |
+| Repository changes cannot bypass required review | Effective protected-branch/ruleset configuration, required exact-head `product`, `postgres`, and `image` checks, code-owner approval, stale-approval dismissal, conversation resolution, force-push/deletion denial, and audited break-glass evidence. For the hosted beta, honestly: production deploys follow any push to `main`, so the evidence is the founder's branch-protection ruleset on `main` (one required review, or Vercel production promotion) captured before the first stranger onboards — without that ruleset this row is not satisfied for the beta |
 | Persona decisions preserve identity and evidence semantics | Sandbox matrix in `docs/RELEASES.md`, including duplicate/reordered/rotated-secret and monitoring cases |
 | External authorization and settlement fail closed | Testnet HSM/RPC matrix in `docs/RELEASES.md`, including wrong key, redirect, timeout, oversized response, delayed confirmation, and reversal |
 | Operators can contain and recover an incident | Breaker/freeze/revoke/rotate drills, ledger and asset reconciliation, ambiguous payout exercise, backup restore, and two-person restoration record |

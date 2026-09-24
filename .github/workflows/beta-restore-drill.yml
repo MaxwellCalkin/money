@@ -1,0 +1,205 @@
+# Monthly restore drill for the hosted beta's backups — and, because it refuses
+# any backup older than 48 hours, the monitor that proves the nightly
+# beta-backup.yml is actually running. Its passing run is the M1
+# "completed restore-from-backup drill" evidence (docs/GOTOMARKET.md).
+#
+# What it proves, in order: the newest successful backup on `main` downloads
+# and decrypts; the pgcrypto shims plus the schema-scoped dump restore into an
+# empty Postgres of the same major with --exit-on-error; db/roles.sql replays
+# against the restored schema; every cached balance matches the journal
+# (`npm run db:reconcile`); money_private.ledger_health() reports zero_sum and
+# receipts_ok; the restored schema head equals the last file in db/migrations;
+# and every table in `money` is present (row COUNTS only — beta_waitlist holds
+# emails, and nothing here prints a row).
+#
+# No pull_request trigger, ever: the `beta-backup` environment holds the age
+# identity, and its deployment-branch policy (`main` only) refuses a copy of
+# this file on any other branch. Scheduled workflows run from the default
+# branch only, so the first drill after merge is a `workflow_dispatch`.
+#
+# The runner's own PostgreSQL client is a different major, so psql and
+# pg_restore run from the same digest-pinned image as the server (and as the
+# pg_dump in beta-backup.yml) via `docker run --network host`.
+
+name: beta-restore-drill
+
+on:
+  schedule:
+    - cron: "23 4 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: beta-restore-drill
+  cancel-in-progress: false
+
+jobs:
+  drill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: beta-backup
+    services:
+      postgres:
+        # Same digest as PG_IMAGE below and in beta-backup.yml: the `env`
+        # context is not available inside `services`, hence the literal.
+        image: postgres:17.11-bookworm@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: beta-drill-throwaway
+          POSTGRES_DB: drill
+          POSTGRES_INITDB_ARGS: --data-checksums
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d drill"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # Digest resolved 2026-09-11 from the registry's manifest index (what
+      # `crane digest postgres:17.11-bookworm` returns); confirm the Supabase
+      # major with `select version()` before re-pinning. Keep identical to
+      # beta-backup.yml (test/vercel-ops.test.ts).
+      PG_IMAGE: postgres:17.11-bookworm@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+      # Throwaway: an empty database on the runner's loopback, gone with the
+      # runner. The password travels as PGPASSWORD, never inside the URL.
+      PGPASSWORD: beta-drill-throwaway
+      DRILL_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/drill
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          package-manager-cache: true
+      - run: npm ci --no-audit --no-fund
+
+      - name: Install age and the pinned Postgres client wrapper
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends age
+          age --version
+          docker pull --quiet "$PG_IMAGE"
+          cat > "$RUNNER_TEMP/pg" <<'WRAPPER'
+          #!/usr/bin/env bash
+          # psql / pg_restore from the digest-pinned server image. Host network
+          # reaches the service container's published port; the checkout is
+          # read-only at /work, the drill scratch directory read-write at /drill.
+          set -euo pipefail
+          exec docker run --rm --network host \
+            -e PGPASSWORD \
+            -v "$GITHUB_WORKSPACE:/work:ro" -v "$RUNNER_TEMP:/drill" -w /work \
+            "$PG_IMAGE" "$@"
+          WRAPPER
+          chmod +x "$RUNNER_TEMP/pg"
+          "$RUNNER_TEMP/pg" psql --version
+
+      - name: Locate the newest successful backup on main (must be under 48 h old)
+        id: locate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs="$(gh run list -R "$GITHUB_REPOSITORY" -w beta-backup.yml -s success -b main -L 1 --json databaseId,createdAt)"
+          run_id="$(printf '%s' "$runs" | jq -r '.[0].databaseId // empty')"
+          created_at="$(printf '%s' "$runs" | jq -r '.[0].createdAt // empty')"
+          if [ -z "$run_id" ]; then
+            echo "::error::no successful beta-backup run on main — dispatch beta-backup.yml first" >&2
+            exit 1
+          fi
+          age_seconds=$(( $(date -u +%s) - $(date -u -d "$created_at" +%s) ))
+          if [ "$age_seconds" -gt $((48 * 3600)) ]; then
+            echo "::error::newest backup (run $run_id, created $created_at) is older than 48 h — the nightly backup is not running" >&2
+            exit 1
+          fi
+          echo "newest backup: run $run_id, created $created_at (${age_seconds}s ago)"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "created_at=$created_at" >> "$GITHUB_OUTPUT"
+
+      - name: Download the encrypted archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.locate.outputs.run_id }}
+        run: |
+          gh run download -R "$GITHUB_REPOSITORY" "$RUN_ID" -n beta-backup -D "$RUNNER_TEMP/archive"
+          stat -c 'encrypted archive: %s bytes' "$RUNNER_TEMP/archive/beta-backup.dump.age"
+
+      - name: Decrypt with the age identity (private temp file, shredded after)
+        env:
+          BETA_BACKUP_AGE_IDENTITY: ${{ secrets.BETA_BACKUP_AGE_IDENTITY }}
+        run: |
+          umask 077
+          printf '%s\n' "$BETA_BACKUP_AGE_IDENTITY" > "$RUNNER_TEMP/age.key"
+          age -d -i "$RUNNER_TEMP/age.key" -o "$RUNNER_TEMP/beta-backup.dump" "$RUNNER_TEMP/archive/beta-backup.dump.age"
+          shred -u "$RUNNER_TEMP/age.key"
+          stat -c 'decrypted dump: %s bytes' "$RUNNER_TEMP/beta-backup.dump"
+
+      - name: Prepare the empty target (pgcrypto in extensions, the public shims, the backup role)
+        # setup-extensions.sql is skipped on purpose: a vanilla container has
+        # neither pg_cron nor pg_net and the drill needs neither. The backup
+        # role must exist before pg_restore because the dump carries the
+        # beta_waitlist row-security policy granted to it (logins.sql).
+        run: |
+          "$RUNNER_TEMP/pg" psql -v ON_ERROR_STOP=1 -d "$DRILL_DATABASE_URL" \
+            -c "create schema extensions" \
+            -c "create extension pgcrypto with schema extensions" \
+            -c "create role money_backup_login nologin"
+          "$RUNNER_TEMP/pg" psql -v ON_ERROR_STOP=1 -d "$DRILL_DATABASE_URL" -f deploy/vercel/setup-shim.sql
+          "$RUNNER_TEMP/pg" psql -v ON_ERROR_STOP=1 -At -d "$DRILL_DATABASE_URL" \
+            -c "select encode(public.digest('x', 'sha256'), 'hex')" | grep -qE '^[0-9a-f]{64}$'
+
+      - name: Restore money and money_private (extension entries filtered, first error fatal)
+        run: |
+          "$RUNNER_TEMP/pg" pg_restore -l /drill/beta-backup.dump > "$RUNNER_TEMP/all.list"
+          grep -v -E ' (EXTENSION|COMMENT - EXTENSION) ' "$RUNNER_TEMP/all.list" > "$RUNNER_TEMP/filtered.list"
+          "$RUNNER_TEMP/pg" pg_restore --exit-on-error --no-owner --no-privileges \
+            -L /drill/filtered.list -d "$DRILL_DATABASE_URL" /drill/beta-backup.dump
+          echo "restored $(grep -c -v '^;' "$RUNNER_TEMP/filtered.list") archive entries"
+
+      - name: Replay db/roles.sql against the restored schema
+        run: '"$RUNNER_TEMP/pg" psql -v ON_ERROR_STOP=1 -d "$DRILL_DATABASE_URL" -f db/roles.sql'
+
+      - name: Reconcile every cached balance against the journal
+        env:
+          DATABASE_URL: ${{ env.DRILL_DATABASE_URL }}
+        run: npm run db:reconcile
+
+      - name: Ledger health, schema head, and per-table row counts
+        id: verify
+        run: |
+          health="$("$RUNNER_TEMP/pg" psql -v ON_ERROR_STOP=1 -At -d "$DRILL_DATABASE_URL" \
+            -c "select zero_sum and receipts_ok from money_private.ledger_health()")"
+          echo "ledger_health(): zero_sum and receipts_ok = $health"
+          test "$health" = "t"
+          expected="$(ls db/migrations | tail -1 | cut -c1-4)"
+          actual="$("$RUNNER_TEMP/pg" psql -v ON_ERROR_STOP=1 -At -d "$DRILL_DATABASE_URL" \
+            -c "select max(version) from money.schema_migrations")"
+          echo "schema head: restored=$actual repo=$expected"
+          test "$actual" = "$expected"
+          counts_sql="select t.table_name, (xpath('/row/n/text()', query_to_xml(format('select count(*) as n from money.%I', t.table_name), false, true, '')))[1]::text::bigint as row_count from information_schema.tables t where t.table_schema = 'money' and t.table_type = 'BASE TABLE' order by t.table_name"
+          "$RUNNER_TEMP/pg" psql -v ON_ERROR_STOP=1 -d "$DRILL_DATABASE_URL" -c "$counts_sql"
+          echo "schema_head=$actual" >> "$GITHUB_OUTPUT"
+
+      - name: Record the drill evidence
+        env:
+          RUN_ID: ${{ steps.locate.outputs.run_id }}
+          CREATED_AT: ${{ steps.locate.outputs.created_at }}
+          SCHEMA_HEAD: ${{ steps.verify.outputs.schema_head }}
+        run: |
+          {
+            echo "## beta restore drill: passed"
+            echo "- backup: beta-backup run $RUN_ID, created $CREATED_AT"
+            echo "- restored into the digest-pinned postgres:17 image; schema head $SCHEMA_HEAD"
+            echo "- db:reconcile clean; ledger_health() zero_sum and receipts_ok"
+            echo "- per-table row counts are in the step log; no row was printed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Shred the decrypted dump and any leftover key material
+        if: always()
+        run: |
+          shred -u "$RUNNER_TEMP/beta-backup.dump" 2>/dev/null || true
+          shred -u "$RUNNER_TEMP/age.key" 2>/dev/null || true

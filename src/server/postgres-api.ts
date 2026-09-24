@@ -2465,92 +2465,96 @@ export function createPostgresApi(db: TransactionalDatabase, options: PostgresAp
   return { app, control, ledger, policy, marketplace, external, treasury, compliance, cards };
 }
 
-export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) {
-  enforceProductionPreflight("api");
-  const db = new PostgresDatabase({ applicationName: "money-product-api" });
-  if (process.env.MONEY_AUTO_MIGRATE === "true") await runMigrations(db);
-  const mockExternal = process.env.MONEY_EXTERNAL_MOCK === "true";
-  if (mockExternal && process.env.NODE_ENV === "production") {
+/** Assemble the product API options from an environment map. Pure: it reads
+ * only `env`, opens no pool, and runs no preflight or migration, so the
+ * container entry point below and the serverless composers under src/deploy/
+ * interpret the same variables identically — including every
+ * NODE_ENV=production refusal. */
+export function postgresApiOptionsFromEnv(
+  env: Readonly<Record<string, string | undefined>>,
+): PostgresApiOptions {
+  const mockExternal = env.MONEY_EXTERNAL_MOCK === "true";
+  if (mockExternal && env.NODE_ENV === "production") {
     throw new Error("MONEY_EXTERNAL_MOCK cannot be enabled in production");
   }
-  if (process.env.NODE_ENV === "production" && process.env.MONEY_EXTERNAL_HEADER_KEY
-    && !process.env.MONEY_EXTERNAL_HEADER_KEYS) {
+  if (env.NODE_ENV === "production" && env.MONEY_EXTERNAL_HEADER_KEY
+    && !env.MONEY_EXTERNAL_HEADER_KEYS) {
     throw new Error("MONEY_EXTERNAL_HEADER_KEY is a legacy local fallback; production requires a versioned MONEY_EXTERNAL_HEADER_KEYS keyring");
   }
-  const configuredKeyring = process.env.MONEY_EXTERNAL_HEADER_KEYS
+  const configuredKeyring = env.MONEY_EXTERNAL_HEADER_KEYS
     ? parseExternalHeaderKeyring(
-      process.env.MONEY_EXTERNAL_HEADER_KEYS,
-      process.env.MONEY_EXTERNAL_HEADER_ACTIVE_KEY_ID ?? ""
+      env.MONEY_EXTERNAL_HEADER_KEYS,
+      env.MONEY_EXTERNAL_HEADER_ACTIVE_KEY_ID ?? ""
     )
-    : process.env.MONEY_EXTERNAL_HEADER_KEY
-      ? singleExternalHeaderKeyring(parseExternalHeaderKey(process.env.MONEY_EXTERNAL_HEADER_KEY))
+    : env.MONEY_EXTERNAL_HEADER_KEY
+      ? singleExternalHeaderKeyring(parseExternalHeaderKey(env.MONEY_EXTERNAL_HEADER_KEY))
       : undefined;
-  if (Boolean(process.env.MONEY_COMPLIANCE_SESSION_KEYS)
-    !== Boolean(process.env.MONEY_COMPLIANCE_SESSION_ACTIVE_KEY_ID)) {
+  if (Boolean(env.MONEY_COMPLIANCE_SESSION_KEYS)
+    !== Boolean(env.MONEY_COMPLIANCE_SESSION_ACTIVE_KEY_ID)) {
     throw new Error("both MONEY_COMPLIANCE_SESSION_KEYS and MONEY_COMPLIANCE_SESSION_ACTIVE_KEY_ID are required together");
   }
-  const complianceSessionKeyring = process.env.MONEY_COMPLIANCE_SESSION_KEYS
+  const complianceSessionKeyring = env.MONEY_COMPLIANCE_SESSION_KEYS
     ? parseComplianceSessionKeyring(
-      process.env.MONEY_COMPLIANCE_SESSION_KEYS,
-      process.env.MONEY_COMPLIANCE_SESSION_ACTIVE_KEY_ID!,
+      env.MONEY_COMPLIANCE_SESSION_KEYS,
+      env.MONEY_COMPLIANCE_SESSION_ACTIVE_KEY_ID!,
     )
     : undefined;
   if (mockExternal && !configuredKeyring) throw new Error("an external header keyring is required when MONEY_EXTERNAL_MOCK=true");
   const mockWallet = mockExternal ? new MockWallet() : undefined;
-  if (mockExternal && (process.env.MONEY_EVM_SIGNER_URL || process.env.MONEY_EVM_PRIVATE_KEY)) {
+  if (mockExternal && (env.MONEY_EVM_SIGNER_URL || env.MONEY_EVM_PRIVATE_KEY)) {
     throw new Error("mock and real external signer modes are mutually exclusive");
   }
-  if (process.env.MONEY_EVM_PRIVATE_KEY && process.env.NODE_ENV === "production") {
+  if (env.MONEY_EVM_PRIVATE_KEY && env.NODE_ENV === "production") {
     throw new Error("MONEY_EVM_PRIVATE_KEY is refused in production; use the remote HSM signer adapter");
   }
   let evmSigner: HttpEvmSigner | LocalEvmSigner | undefined;
-  if (process.env.MONEY_EVM_SIGNER_URL) {
-    if (!process.env.MONEY_EVM_SIGNER_ADDRESS) throw new Error("MONEY_EVM_SIGNER_ADDRESS is required with MONEY_EVM_SIGNER_URL");
-    if (process.env.NODE_ENV === "production"
-      && (!process.env.MONEY_EVM_SIGNER_TOKEN
-        || process.env.MONEY_EVM_SIGNER_TOKEN.length < 32)) {
+  if (env.MONEY_EVM_SIGNER_URL) {
+    if (!env.MONEY_EVM_SIGNER_ADDRESS) throw new Error("MONEY_EVM_SIGNER_ADDRESS is required with MONEY_EVM_SIGNER_URL");
+    if (env.NODE_ENV === "production"
+      && (!env.MONEY_EVM_SIGNER_TOKEN
+        || env.MONEY_EVM_SIGNER_TOKEN.length < 32)) {
       throw new Error("production remote EVM signing requires MONEY_EVM_SIGNER_TOKEN with at least 32 characters");
     }
     evmSigner = new HttpEvmSigner({
-      url: process.env.MONEY_EVM_SIGNER_URL,
-      address: process.env.MONEY_EVM_SIGNER_ADDRESS,
-      ...(process.env.MONEY_EVM_SIGNER_TOKEN ? { bearerToken: process.env.MONEY_EVM_SIGNER_TOKEN } : {}),
-      allowInsecureLocalhost: process.env.NODE_ENV !== "production",
+      url: env.MONEY_EVM_SIGNER_URL,
+      address: env.MONEY_EVM_SIGNER_ADDRESS,
+      ...(env.MONEY_EVM_SIGNER_TOKEN ? { bearerToken: env.MONEY_EVM_SIGNER_TOKEN } : {}),
+      allowInsecureLocalhost: env.NODE_ENV !== "production",
     });
-  } else if (process.env.MONEY_EVM_PRIVATE_KEY) {
-    evmSigner = new LocalEvmSigner(process.env.MONEY_EVM_PRIVATE_KEY);
+  } else if (env.MONEY_EVM_PRIVATE_KEY) {
+    evmSigner = new LocalEvmSigner(env.MONEY_EVM_PRIVATE_KEY);
   }
   const v2PaymentSigner = evmSigner ? new X402V2EvmPaymentSigner(evmSigner) : undefined;
-  const rpcVerifier = process.env.MONEY_EVM_RPC_URLS
-    ? new EvmRpcSettlementVerifier(parseEvmRpcNetworks(process.env.MONEY_EVM_RPC_URLS))
+  const rpcVerifier = env.MONEY_EVM_RPC_URLS
+    ? new EvmRpcSettlementVerifier(parseEvmRpcNetworks(env.MONEY_EVM_RPC_URLS))
     : undefined;
   if (v2PaymentSigner && !rpcVerifier) throw new Error("MONEY_EVM_RPC_URLS is required for independent settlement verification");
-  const signupInvites = parseSignupInvites(process.env.MONEY_SIGNUP_INVITES);
+  const signupInvites = parseSignupInvites(env.MONEY_SIGNUP_INVITES);
   // Card rail: this process holds the create/close/reveal issuer credential
   // and never the webhook secrets; preflight enforces the same split.
-  const cardIssuer = process.env.MONEY_CARD_PROVIDER?.trim()
-    ? createCardIssuerFromEnv(process.env, { role: "api" })
+  const cardIssuer = env.MONEY_CARD_PROVIDER?.trim()
+    ? createCardIssuerFromEnv(env, { role: "api" })
     : undefined;
-  const cardRevealMode = readCardRevealMode(process.env);
-  const cardRevealTokenKey = process.env.MONEY_CARD_REVEAL_TOKEN_KEY;
+  const cardRevealMode = readCardRevealMode(env);
+  const cardRevealTokenKey = env.MONEY_CARD_REVEAL_TOKEN_KEY;
   if (cardRevealMode === "token" && (cardRevealTokenKey ?? "").length < 32) {
     throw new Error("MONEY_CARD_REVEAL_TOKEN_KEY with at least 32 characters is required when MONEY_CARD_REVEAL_MODE=token");
   }
-  const { app } = createPostgresApi(db, {
-    allowDevelopmentFunding: process.env.MONEY_ALLOW_DEV_FUNDING === "true",
-    allowSessionOwnerWrites: process.env.MONEY_ALLOW_SESSION_OWNER_WRITES === "true",
+  return {
+    allowDevelopmentFunding: env.MONEY_ALLOW_DEV_FUNDING === "true",
+    allowSessionOwnerWrites: env.MONEY_ALLOW_SESSION_OWNER_WRITES === "true",
     ...(signupInvites.length ? { signupInvites } : {}),
     ...(configuredKeyring ? { externalHeaderKeyring: configuredKeyring } : {}),
-    ...(complianceSessionKeyring && process.env.MONEY_COMPLIANCE_PROVIDER
+    ...(complianceSessionKeyring && env.MONEY_COMPLIANCE_PROVIDER
       ? {
         complianceSessionKeyring,
-        complianceProviderName: process.env.MONEY_COMPLIANCE_PROVIDER,
+        complianceProviderName: env.MONEY_COMPLIANCE_PROVIDER,
       }
       : {}),
     ...(cardIssuer ? { cardIssuer } : {}),
     cardRevealMode,
     ...(cardRevealTokenKey ? { cardRevealTokenKey: Buffer.from(cardRevealTokenKey, "utf8") } : {}),
-    cardAuthTtlSeconds: readCardAuthTtlSeconds(process.env),
+    cardAuthTtlSeconds: readCardAuthTtlSeconds(env),
     ...(v2PaymentSigner ? { externalPaymentSigner: v2PaymentSigner } : {}),
     ...(rpcVerifier ? {
       verifyExternalSettlement: ({ authorization, settlement }: ExternalSettlementVerificationInput) => {
@@ -2575,7 +2579,14 @@ export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) 
           ? { reason: "mock settlement transaction must start with 0xmock" } : {}),
       }),
     } : {}),
-  });
+  };
+}
+
+export async function startPostgresApi(port = Number(process.env.PORT ?? 4021)) {
+  enforceProductionPreflight("api");
+  const db = new PostgresDatabase({ applicationName: "money-product-api" });
+  if (process.env.MONEY_AUTO_MIGRATE === "true") await runMigrations(db);
+  const { app } = createPostgresApi(db, postgresApiOptionsFromEnv(process.env));
   const hostname = listenHost("127.0.0.1");
   const server = serve({ fetch: app.fetch, hostname, port });
   console.log(`Postgres money API listening on http://${hostname}:${port}`);

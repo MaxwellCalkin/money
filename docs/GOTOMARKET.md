@@ -64,6 +64,28 @@ noted: Connect's ~2.9% + $0.30 per hop makes sub-$5 agent-to-agent
 uneconomic, so x402 stays the micro rail and cards/Connect carry $5–$500
 flows.
 
+**Status (2026-09-11): hosting moved to Vercel + Supabase.** The "Hosting"
+bullet below (Oracle Always Free VM, nightly pg_dump to R2, UptimeRobot on a
+VM) is superseded: the live profile is `deploy/vercel/` — two Vercel Hobby
+projects (`agentmoney`: landing page, `/waitlist`, card webhook ingress,
+`/internal/*`, the signed product API; `agentmoney-metrics`: the public
+wash-proof metrics page and receipt verifier on its own credential) over one
+free Supabase Postgres 17 project, pg_cron + pg_net driving the sweeps and the
+hourly ledger-health verdicts, GitHub Actions doing nightly age-encrypted
+backups and a monthly restore drill. Still $0. What goes live: invite-code
+onboarding with play dollars (dev funding), the mock card issuer under
+`MONEY_CARD_REVEAL_MODE=none`, the owner app with session-authenticated
+one-tap writes, the waitlist form on the landing page, and the public metrics
+page — all under the posture line in `deploy/vercel/README.md` (best-effort,
+sandbox money only, no KYC; the "testnet" label is gone because this profile
+has no chain). Restore-drill evidence = the passing `beta-restore-drill`
+workflow run link (paste it here after the first `workflow_dispatch` run on
+`main`). Still open on the gate: the stranger onboarding time is unmeasured —
+the loop includes one founder-run `npm run dev:approve` per pilot, because the
+kernel refuses funding (play dollars included) for an owner without reviewed
+evidence — and the mainnet x402 payment still needs the founder float; the
+bridge stays off in this profile (routes fail closed).
+
 The funnel ships here, not at M3 — these are acquisition instruments:
 
 - **Hosted beta deploy profile** (agent): postgres + pgbouncer + api:db +

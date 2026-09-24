@@ -1,6 +1,7 @@
 {
   "name": "@agentmoney/wallet-mcp",
-  "version": "0.14.0",
+  "mcpName": "io.github.MaxwellCalkin/wallet-mcp",
+  "version": "0.14.1",
   "description": "MCP wallet for AI agents on the money network: check what the mandate allows, pay accounts, auto-pay 402-gated URLs, and request reserved virtual cards under an owner-signed spend mandate.",
   "type": "module",
   "scripts": {

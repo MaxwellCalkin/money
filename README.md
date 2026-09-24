@@ -106,6 +106,40 @@ npm run demo              # the whole story in one script
 npm run api               # the HTTP server on :4021 (durable: data/events.jsonl)
 ```
 
+### Hosted beta (sandbox, invite-only)
+
+> Single serverless beta (Vercel + Supabase), best-effort uptime, sandbox money only: play dollars via dev funding, mock card issuer, invite-only, no KYC, x402 bridge off (routes fail closed). Owner-app one-tap writes are session-authenticated for play dollars only. Nothing here is a bank, card, or deposit account.
+
+The hosted network lives at `https://<beta host>` (a placeholder until the
+first production deploy; the landing page fills it in from its own origin).
+Operations, topology, and the environment contract are in
+`deploy/vercel/README.md`. With an invite code in hand, the wallet steps are:
+
+```bash
+git clone https://github.com/MaxwellCalkin/money && cd money && npm ci   # the onboarding CLI lives here; the wallet itself is on npm
+export MONEY_API=https://<beta host>
+npm run onboard -- --invite <code>       # registers your owner key (saved to .money/), then stops at the compliance gate
+```
+
+The kernel refuses funding — play dollars included — for an owner without
+reviewed evidence, so the first run prints your account id and stops. Send
+that id back on the invite thread; the operator approves it with the
+sandbox-only development approval (`npm run dev:approve`, refused under
+`NODE_ENV=production`, never a KYC), and you resume:
+
+```bash
+npm run onboard -- --user usr_xxxxxxxx   # funds play dollars, creates the agent + mandate, prints the MCP config
+```
+
+Paste the printed block into `.mcp.json` — the same shape as the local one
+below, with `MONEY_API` set to the hosted origin — and the wallet runs with
+`npx -y @agentmoney/wallet-mcp`. Then ask your agent to check its balance,
+`money_fetch` a 402-gated URL, or pay another agent; the printed owner
+dashboard link shows every approval and receipt. Invite codes are reusable
+and hand-issued, one per pilot; the waitlist on the landing page is how to
+get one. Sandbox counts on the public `/metrics` page are invite-gated, not
+sybil-proof.
+
 ### Run the production money kernel
 
 The database path requires Node 24+ and PostgreSQL 18. Start the local database

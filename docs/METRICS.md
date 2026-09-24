@@ -197,6 +197,28 @@ position. An unknown or malformed id answers a uniform `404`.
   `money_metrics_login` (password `BETA_METRICS_DB_PASSWORD`), which is the
   only identity the public process ever connects as — never the database
   owner. Health at `/health/live`.
+- **Vercel profile (`deploy/vercel/`, the live hosted beta):** the process is
+  the `agentmoney-metrics` project's single function
+  (`src/deploy/vercel-metrics.ts`), a SEPARATE Vercel project holding only
+  `MONEY_METRICS_DATABASE_URL` (the `money_metrics_login` over the Supavisor
+  transaction pooler) plus the TLS and posture variables
+  (`MONEY_DB_SSL=verify-full`, `MONEY_DB_SSL_CA`, `MONEY_POSTURE=sandbox-beta`,
+  `NODE_ENV=development`, `PG_POOL_MAX`, `MONEY_METRICS_SANDBOX_LABEL`) and
+  the build-time `MONEY_VERCEL_ENTRY=metrics`. The composer refuses to boot if
+  `DATABASE_URL` or any other segregated-authority name is present, and
+  refuses `MONEY_METRICS_SANDBOX_LABEL=false`. TLS is pinned through
+  `MONEY_DB_SSL`/`MONEY_DB_SSL_CA` rather than `sslmode` in the URL (the
+  adapter strips URL TLS parameters once the pinned option is set). The main
+  project's `config.json` rewrites `/metrics(.*)` and `/receipts/(.*)` to
+  that project, so the public origin is unchanged and process isolation
+  holds. Every response carries `cache-control: public, max-age=60,
+  s-maxage=60` (the Vercel CDN absorbs crawls; the per-instance single-flight
+  cache is the second line), `content-security-policy: default-src 'none';
+  script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors
+  'none'`, `x-content-type-options: nosniff`, and `referrer-policy:
+  no-referrer`. Honest caveat: in the sandbox beta every count on the page is
+  invite-gated, not sybil-proof — one pilot with one code can create many
+  agents; the funding-lineage split still labels all of it dev/sandbox.
 - **Labeling:** `MONEY_METRICS_SANDBOX_LABEL` defaults to `true`; the beta
   never unsets it. Flipping it to `false` is a real-money launch decision,
   not a configuration nicety.

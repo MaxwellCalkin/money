@@ -90,31 +90,45 @@ Do this **twice**, once per package:
 
 ## Cutting a release
 
-Versions are in lockstep by construction — `test/packages-build.test.ts`
-fails the gate if any of these disagree:
+The two packages share one version, and the official MCP registry listing
+shares it too. `test/packages-build.test.ts` fails the gate if the root
+manifest, the two package manifests, the MCP server's advertised version,
+or `server.json` disagree; `test/deployment.test.ts` pins the root version
+a second time; the lockfile is regenerated, not tested.
 
-1. Bump the version in **four** places to the same `X.Y.Z`:
+1. Bump the version to the same `X.Y.Z` in **every** pin — seven files,
+   none optional:
    - `package.json` (root)
+   - `package-lock.json` — both root `version` fields. Never hand-edit;
+     regenerate with `npm install --package-lock-only --no-audit --no-fund`
    - `packages/wallet-mcp/package.json`
    - `packages/seller-sdk/package.json`
+   - `packages/wallet-mcp/server.json` — `version` **and**
+     `packages[0].version` (the MCP registry listing; see below)
    - `src/mcp/server.ts` — the advertised `version: "X.Y.Z"` string
+   - `test/deployment.test.ts` — the `version: "X.Y.Z"` expectation in the
+     deployment-contract test
+
+   Do not touch `mcpName` in `packages/wallet-mcp/package.json` or `name`
+   in `server.json`: they are the registry identity, not a version.
 2. Verify locally:
    ```sh
    npm run build:packages
-   npm test -- test/packages-build.test.ts
+   npm test -- test/packages-build.test.ts test/deployment.test.ts
    ```
 3. Land the bump on `main` through the normal PR flow (`verify` CI must be
    green — the publish workflow refuses tags whose commit is not in
    `main`'s history).
-4. Tag the release commit on main — one tag per package you're releasing:
+4. Tag the release commit on `main` — **both** tags, on the **same** commit
+   (the packages share one version, so they are released together):
    ```sh
    git tag wallet-mcp-vX.Y.Z <commit-sha>
    git tag seller-sdk-vX.Y.Z <commit-sha>
    git push origin wallet-mcp-vX.Y.Z seller-sdk-vX.Y.Z
    ```
    Each tag triggers its own workflow run and publishes exactly that one
-   package. Tag both to release both. (Versions must not contain the
-   substring `-v` — the tag parser splits on the last `-v`.)
+   package. (Versions must not contain the substring `-v` — the tag parser
+   splits on the last `-v`.)
 5. If the `npm-publish` environment has required reviewers, approve the
    pending deployment in the Actions UI.
 
@@ -123,7 +137,43 @@ the tag and check it against the package manifest version → `npm ci` →
 `npm run build:packages` → the `packages-build` test gate → (approval) →
 `npm publish --provenance --access public` from the package directory
 (`prepack` rebuilds `dist/` from `src/` during publish, so a stale artifact
-can never ship) → poll `npm view` until the registry serves the version.
+can never ship) → poll `npm view` until the registry serves the version →
+(`wallet-mcp-v*` tags only) the `registry` job below.
+
+### The MCP registry listing (automated by the `registry` job)
+
+The wallet is listed on the official MCP registry
+(https://registry.modelcontextprotocol.io) by the `registry` job in the
+same workflow. Nothing is done by hand and there is no registry credential
+anywhere. The job declares `needs: [gate, publish]` and runs only on
+`wallet-mcp-v*` tags, strictly after the npm publish has been observed by
+`npm view`, because the registry validates the npm tarball before it
+accepts a listing: the tarball's `package.json` must carry `mcpName` equal
+to `server.json`'s `name`, at the same version.
+
+- **Identity.** `mcpName` / `name` is `io.github.MaxwellCalkin/wallet-mcp`.
+  The registry authorizes `io.github.<repository_owner>/*` from the GitHub
+  OIDC token's claim verbatim and matches it as a case-sensitive prefix, so
+  the owner segment must be spelled exactly `MaxwellCalkin` (the GitHub
+  login); `io.github.maxwellcalkin/...` is refused.
+- **Publisher.** `mcp-publisher` v1.8.1 for linux/amd64, downloaded from
+  the versioned release URL (never `/releases/latest/`) and checked against
+  its sha256 before it runs. Bumping it means updating both the URL and the
+  hash, taken from `registry_<version>_checksums.txt` on the release page.
+- **Guards.** Before login, `jq` asserts `server.json` `.name` equals
+  `package.json` `.mcpName`, `.version` and `.packages[0].version` equal
+  the tag's version, and `.packages[0].identifier` equals `package.json`
+  `.name`.
+- **Auth.** `mcp-publisher login github-oidc` under `id-token: write`; the
+  short-lived registry token lives only on the runner.
+- **Idempotent.** A re-run against an already-listed version ("cannot
+  publish duplicate version … already exists") is treated as success.
+- **Never retro-fails npm.** The job is `continue-on-error: true`: a
+  registry outage leaves the workflow green and the npm publish stands.
+  Re-run just the `registry` job from the Actions UI once the registry is
+  back.
+- **Verify:**
+  `curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.MaxwellCalkin/wallet-mcp"`
 
 ## Dry-run mode (no tag, publishes nothing)
 
@@ -139,6 +189,8 @@ manual run into a real publish; real publishes come only from tags.
 - Package page on npmjs.com shows the new version **and a "Provenance"
   section** linking the exact commit and workflow run.
 - `npm view @agentmoney/wallet-mcp@X.Y.Z` (the workflow already polls this).
+- (wallet-mcp) the official MCP registry lists the version:
+  `curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.MaxwellCalkin/wallet-mcp"`
 - In any scratch project:
   ```sh
   npm i @agentmoney/wallet-mcp@X.Y.Z @agentmoney/seller-sdk@X.Y.Z hono
@@ -157,6 +209,9 @@ manual run into a real publish; real publishes come only from tags.
 | "tag says X but packages/... says Y" | Version lockstep step 1 was incomplete. Fix the manifests on `main`, delete the bad tag (`git push origin :refs/tags/<tag>`), re-tag. |
 | Publish succeeded but you need to redo it | npm never allows republishing the same version. Fix forward: bump the patch version and release again. To warn consumers off a bad version: `npm deprecate @agentmoney/<pkg>@X.Y.Z "reason"`. Unpublish is a last resort with strict registry time limits. |
 | Workflow run for a tag doesn't start | Tag must match `wallet-mcp-v*` or `seller-sdk-v*` and the workflow file must exist at the tagged commit. |
+| `registry` job fails with a namespace / authorization error | `server.json` `name` (= `mcpName`) does not start with `io.github.MaxwellCalkin/` in that exact case; the OIDC grant is a case-sensitive prefix on the repository owner. |
+| `registry` job failed but the npm publish succeeded | The designed shape of a registry outage (`continue-on-error`). Re-run only the `registry` job from the Actions UI; a duplicate-version response on the re-run counts as success. |
+| `registry` job reports the npm package missing or an `mcpName` mismatch | The registry read the npm tarball. Either the version is not yet visible to the registry's npm lookup (re-run the job) or the published tarball's `package.json` has no `mcpName` (0.14.0 and earlier) — release a patch version; the registry never accepts a listing the tarball does not claim. |
 
 ### Break-glass (registry incident, Actions outage)
 

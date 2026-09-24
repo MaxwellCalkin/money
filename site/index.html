@@ -222,6 +222,17 @@
     display: flex; gap: 1.2rem; align-items: center; flex-wrap: wrap;
   }
   .invite p { max-width: 34rem; font-size: 0.95rem; }
+  .invite form { display: grid; gap: 0.45rem; width: 100%; max-width: 30rem; }
+  .invite label { font-size: 0.8rem; font-weight: 600; color: var(--ink-soft); }
+  .invite input, .invite textarea {
+    font: inherit; color: var(--ink); background: var(--card);
+    border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem 0.7rem; width: 100%;
+  }
+  .invite textarea { resize: vertical; }
+  .invite form .btn { border: 0; cursor: pointer; justify-self: start; margin-top: 0.3rem; }
+  .invite form .btn:disabled { opacity: 0.6; cursor: wait; }
+  .waitlist-state, .waitlist-fallback { width: 100%; font-size: 0.92rem; }
+  [hidden] { display: none !important; }
 
   footer {
     border-top: 1px solid var(--line);
@@ -237,8 +248,8 @@
 <body>
 
 <div class="beta">
-  <strong>Invite-only beta.</strong> Testnet-labeled sandbox, hard caps, no KYC, no production funds.
-  Hosted on a single free-tier VM — best-effort, honestly.
+  <strong>Invite-only beta.</strong> Sandbox money only, hard caps, no KYC.
+  Single serverless beta — best-effort, honestly.
   <a href="#invite">Request an invite</a>
 </div>
 
@@ -250,6 +261,7 @@
       <a href="#refusal">x402</a>
       <a href="#policy">Policy</a>
       <a href="#quickstart">Quickstart</a>
+      <a href="#hosted">Hosted beta</a>
       <a href="#sellers">Sellers</a>
       <a href="https://github.com/MaxwellCalkin/money">GitHub</a>
       <a class="btn" href="#invite">Get an invite</a>
@@ -495,7 +507,7 @@
       <span class="tk">"command"</span>: "npx",
       <span class="tk">"args"</span>: ["-y", "@agentmoney/wallet-mcp"],
       <span class="tk">"env"</span>: {
-        <span class="tk">"MONEY_API"</span>: "https://url-from-your-invite",
+        <span class="tk">"MONEY_API"</span>: "<span class="beta-host">https://&lt;beta host&gt;</span>",
         <span class="tk">"MONEY_AGENT_ID"</span>: "agt_xxxxxxxx",
         <span class="tk">"MONEY_AGENT_KEY_FILE"</span>: "/absolute/path/to/agent.key"
       }
@@ -506,6 +518,36 @@
     <p class="note">
       The key stays in a file, out of <code>.mcp.json</code> and out of every model
       context. Then ask your agent to check its balance.
+    </p>
+  </section>
+
+  <section id="hosted">
+    <div class="kicker">Try the hosted beta</div>
+    <h2>A sandbox network you can point an agent at today.</h2>
+    <p class="lede">
+      One invite code, one clone, one wallet. Everything on it is play dollars — nothing to
+      fund, nothing to lose, nothing real — and every payment still clears the mandate kernel.
+    </p>
+    <div class="codebox">
+      <button class="copy" data-copy="snippet-hosted">copy</button>
+      <pre id="snippet-hosted"><span class="tc"># 1. the wallet is on npm; the onboarding CLI lives in the repo</span>
+git clone https://github.com/MaxwellCalkin/money &amp;&amp; cd money &amp;&amp; npm ci
+export MONEY_API=<span class="beta-host">https://&lt;beta host&gt;</span>
+
+<span class="tc"># 2. register your owner key (saved to .money/); the run stops at the compliance gate</span>
+npm run onboard -- --invite &lt;code&gt;
+
+<span class="tc"># 3. reply with the printed account id — we approve it (sandbox-only, no KYC) — then resume</span>
+npm run onboard -- --user usr_xxxxxxxx   <span class="tc"># play dollars, agent + mandate, prints the MCP config</span>
+
+<span class="tc"># 4. paste the printed block into .mcp.json; the wallet runs with</span>
+npx -y @agentmoney/wallet-mcp</pre>
+    </div>
+    <p class="note">
+      Then ask your agent to check its balance, <code>money_fetch</code> a 402-gated URL, or
+      pay another agent; the owner-dashboard link the CLI prints shows every approval and
+      receipt. Posture, verbatim:
+      Single serverless beta (Vercel + Supabase), best-effort uptime, sandbox money only: play dollars via dev funding, mock card issuer, invite-only, no KYC, x402 bridge off (routes fail closed). Owner-app one-tap writes are session-authenticated for play dollars only. Nothing here is a bank, card, or deposit account.
     </p>
   </section>
 
@@ -545,17 +587,18 @@ app.get(<span class="ts">"/report"</span>, moneyPaid({
     <div class="kicker">Status, honestly</div>
     <h2>What this is today — and what it isn't.</h2>
     <ul class="honest">
-      <li><strong>Invite-only, testnet-labeled beta.</strong> Sandbox balances with hard
-        caps and no KYC. Explicitly not production; do not point real budgets at it.</li>
+      <li><strong>Invite-only sandbox beta.</strong> Play dollars with hard caps and no
+        KYC. Explicitly not production; do not point real budgets at it.</li>
       <li><strong>The card rail is sandbox today.</strong> The demo above runs against a
         Stripe-shaped mock issuer. The Stripe Issuing integration is protocol-faithful,
         fixture-tested, and test-mode ready — there is no live card program and no real
         card. Sandbox, no real funds.</li>
       <li><strong>x402 mainnet: implemented, not yet switched on.</strong> The external
         x402 rail is built and tested; mainnet activation is gated on a ~$15 founder
-        float. Until then it runs in sandbox.</li>
-      <li><strong>One free-tier VM, best-effort.</strong> Nightly encrypted backups and
-        external monitoring, but no SLA. The status page says exactly this.</li>
+        float. In the hosted beta the bridge is off: its routes fail closed.</li>
+      <li><strong>Single serverless beta, best-effort.</strong> Two free-tier functions and
+        one free database; nightly encrypted backups, a monthly restore drill, external
+        monitoring, no SLA. The posture line above says exactly this.</li>
       <li><strong>Real numbers or no numbers.</strong> We publish wash-proof metrics from
         the receipts journal — funding lineage, retention cohorts, chain roots. If a
         number is zero, it says zero.</li>
@@ -574,11 +617,25 @@ app.get(<span class="ts">"/report"</span>, moneyPaid({
     <div class="invite">
       <p>
         Invites are hand-issued while the beta is small. Tell us what your agent would
-        buy — an API, a dataset, another agent's work — and we'll send the three config
-        values and a funded sandbox mandate.
+        buy — an API, a dataset, another agent's work — and we'll send an invite code,
+        the wallet steps, and a funded sandbox mandate.
       </p>
-      <!-- WAITLIST PLACEHOLDER: swap this mailto for the hosted waitlist form URL when it exists. -->
-      <a class="btn" href="mailto:mcalkinmusic@gmail.com?subject=agentmoney%20beta%20invite&amp;body=What%20my%20agent%20would%20buy%3A%20">Request an invite</a>
+      <!-- Posts to the beta's own /waitlist: JSON via the inline script, form-encoded
+           (303 back to /?waitlist=<state>#invite) without JavaScript. -->
+      <form id="waitlist-form" action="/waitlist" method="post">
+        <label for="waitlist-email">Email</label>
+        <input id="waitlist-email" type="email" name="email" required maxlength="254" autocomplete="email" placeholder="you@example.com">
+        <label for="waitlist-note">What my agent would buy</label>
+        <textarea id="waitlist-note" name="note" maxlength="500" rows="3" placeholder="an API, a dataset, another agent's work"></textarea>
+        <button class="btn" type="submit">Request an invite</button>
+      </form>
+      <p class="waitlist-state" data-waitlist-state="ok" hidden><strong>You're on the list.</strong> Invites go out by email, one at a time.</p>
+      <p class="waitlist-state" data-waitlist-state="invalid" hidden>That address didn't look right. Check it and try again.</p>
+      <p class="waitlist-state" data-waitlist-state="busy" hidden>Too many requests from here just now. Try again in a minute.</p>
+      <p class="waitlist-state" data-waitlist-state="unavailable" hidden>The waitlist is unavailable right now.</p>
+      <!-- Fallback when the waitlist is down or JavaScript is off: the same address as the footer. -->
+      <p class="waitlist-fallback" id="waitlist-fallback" hidden>Prefer email? <a href="mailto:mcalkinmusic@gmail.com?subject=agentmoney%20beta%20invite&amp;body=What%20my%20agent%20would%20buy%3A%20">Request an invite by mail</a>.</p>
+      <noscript><p class="waitlist-fallback">Prefer email? <a href="mailto:mcalkinmusic@gmail.com?subject=agentmoney%20beta%20invite&amp;body=What%20my%20agent%20would%20buy%3A%20">Request an invite by mail</a>.</p></noscript>
     </div>
   </section>
 
@@ -595,7 +652,7 @@ app.get(<span class="ts">"/report"</span>, moneyPaid({
       <div>
         <h4>Contact</h4>
         <ul>
-          <!-- WAITLIST PLACEHOLDER: same address as the invite button above. -->
+          <!-- The same address as the waitlist's email fallback above. -->
           <li><a href="mailto:mcalkinmusic@gmail.com?subject=agentmoney">mcalkinmusic@gmail.com</a></li>
         </ul>
       </div>
@@ -603,7 +660,9 @@ app.get(<span class="ts">"/report"</span>, moneyPaid({
     <p class="fine">
       Apache-2.0. This page is a single static file: no analytics, no cookies, no external
       requests. The beta is a sandbox — nothing on it is money transmission, and no
-      customer funds are held.
+      customer funds are held. The waitlist stores your email and note only: capped,
+      never logged, not enumerable, kept in encrypted backups for 30 days, deleted on
+      request.
     </p>
   </footer>
 </div>
@@ -618,6 +677,45 @@ app.get(<span class="ts">"/report"</span>, moneyPaid({
       });
     });
   });
+</script>
+<script>
+  (function () {
+    // This page is served by the beta itself, so its own origin is the network
+    // URL; anywhere else (a local file, a mirror) the static placeholder stays.
+    var host = /^https:$/.test(location.protocol) ? location.origin : "https://<beta host>";
+    var hosts = document.querySelectorAll(".beta-host");
+    for (var i = 0; i < hosts.length; i++) hosts[i].textContent = host;
+
+    var form = document.getElementById("waitlist-form");
+    if (!form) return;
+    var fallback = document.getElementById("waitlist-fallback");
+    function show(state) {
+      var panels = document.querySelectorAll("[data-waitlist-state]");
+      for (var j = 0; j < panels.length; j++) panels[j].hidden = panels[j].getAttribute("data-waitlist-state") !== state;
+      form.hidden = state === "ok";
+      fallback.hidden = state === "ok";
+    }
+    // Without JavaScript the form posts itself and the server answers with a
+    // 303 back here; the state travels in the query string.
+    var redirected = new URLSearchParams(location.search).get("waitlist");
+    if (redirected && /^(ok|invalid|busy|unavailable)$/.test(redirected)) show(redirected);
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var button = form.querySelector("button");
+      button.disabled = true;
+      fetch("/waitlist", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: form.elements.email.value, note: form.elements.note.value })
+      }).then(function (res) {
+        show(res.status === 202 ? "ok" : res.status === 400 ? "invalid" : res.status === 429 ? "busy" : "unavailable");
+      }).catch(function () {
+        show("unavailable");
+      }).then(function () {
+        button.disabled = false;
+      });
+    });
+  })();
 </script>
 </body>
 </html>

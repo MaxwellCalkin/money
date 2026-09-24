@@ -226,3 +226,100 @@ jobs:
           done
           echo "::error::@agentmoney/${PKG}@${VERSION} not visible on the registry after 2 minutes" >&2
           exit 1
+
+  # Lists @agentmoney/wallet-mcp on the official MCP registry
+  # (https://registry.modelcontextprotocol.io) once npm serves the version.
+  # Ordering is load-bearing: the registry validates the published npm
+  # tarball (its package.json must carry `mcpName` equal to server.json's
+  # `name`, at the same version) before it accepts a listing, so this job
+  # runs strictly after the publish job's `npm view` poll. Auth is GitHub
+  # OIDC: the registry grants `io.github.<repository_owner>/*` from the
+  # token's claim verbatim and matches it as a case-sensitive prefix, hence
+  # `io.github.MaxwellCalkin/...` (the GitHub login's exact case) in both
+  # files. continue-on-error: a registry outage must never retro-fail a
+  # completed npm publish — the run stays green and the job is re-run from
+  # the Actions UI once the registry is back (a duplicate-version response
+  # on that re-run is treated as success below).
+  registry:
+    needs: [gate, publish]
+    if: needs.gate.outputs.mode == 'publish' && startsWith(github.ref_name, 'wallet-mcp-v')
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Required: lets mcp-publisher exchange the runner's OIDC token for a
+      # short-lived registry token. No registry credential exists anywhere.
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      # Pinned by version AND sha256 (from registry_1.8.1_checksums.txt on
+      # the release page). Never /releases/latest/: an unpinned binary that
+      # holds an OIDC-minted token is exactly the kind of supply-chain step
+      # the rest of this workflow refuses to have.
+      - name: Install mcp-publisher v1.8.1 (sha256-pinned)
+        env:
+          PUBLISHER_URL: https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
+          PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfL --retry 3 --retry-delay 5 -o mcp-publisher.tar.gz "$PUBLISHER_URL"
+          echo "${PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          chmod +x mcp-publisher
+          ./mcp-publisher --version
+
+      # The listing must agree with the tarball the registry is about to
+      # read, and with the tag that drove this run.
+      - name: Guard server.json against package.json and the tag
+        working-directory: packages/wallet-mcp
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          test "$(jq -r .name server.json)" = "$(jq -r .mcpName package.json)"
+          jq -e --arg v "$VERSION" '.version == $v and .packages[0].version == $v' server.json
+          test "$(jq -r '.packages[0].identifier' server.json)" = "$(jq -r .name package.json)"
+          echo "server.json: $(jq -r .name server.json)@$(jq -r .version server.json) -> $(jq -r '.packages[0].identifier' server.json)"
+
+      - name: Authenticate to the MCP registry (GitHub OIDC)
+        run: |
+          "$RUNNER_TEMP/mcp-publisher" login github-oidc
+
+      # The registry refuses a version it already lists with
+      # "invalid version: cannot publish duplicate version: <name>@<v>
+      # already exists"; on a re-run of this job that is the desired state.
+      - name: Publish server.json to the MCP registry
+        working-directory: packages/wallet-mcp
+        run: |
+          set +e
+          "$RUNNER_TEMP/mcp-publisher" publish 2>&1 | tee "$RUNNER_TEMP/mcp-publish.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            if grep -q -E 'cannot publish duplicate version|already exists' "$RUNNER_TEMP/mcp-publish.log"; then
+              echo "registry already lists this version; treating the re-run as success"
+              exit 0
+            fi
+            echo "::error::mcp-publisher publish failed (exit $status); the npm publish stands - re-run this job once the registry is healthy" >&2
+            exit "$status"
+          fi
+
+      - name: Verify the registry lists the wallet
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          NAME: io.github.MaxwellCalkin/wallet-mcp
+        run: |
+          for attempt in $(seq 1 6); do
+            body="$(curl -sSf "https://registry.modelcontextprotocol.io/v0.1/servers?search=${NAME}")" || body=""
+            if printf '%s' "$body" | grep -q -F "$NAME" && printf '%s' "$body" | grep -q -F "$VERSION"; then
+              echo "registry lists ${NAME}@${VERSION}"
+              exit 0
+            fi
+            echo "attempt ${attempt}: not visible yet, retrying in 10s"
+            sleep 10
+          done
+          echo "::warning::${NAME}@${VERSION} not visible in the registry search after 1 minute (the publish step succeeded; indexing may lag)" >&2
+          exit 1

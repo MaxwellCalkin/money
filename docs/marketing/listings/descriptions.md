@@ -2,14 +2,14 @@
 
 Canonical copy used by every listing surface. Every claim below is grounded in
 `packages/wallet-mcp/README.md`, `src/mcp/server.ts`, and
-`packages/wallet-mcp/package.json` (v0.14.0) as of 2026-08-23. Do not add
-capabilities that are not in the shipped package.
+`packages/wallet-mcp/package.json` (repo v0.14.1; live npm v0.14.0) as of
+2026-09-11. Do not add capabilities that are not in the shipped package.
 
 ## Canonical facts (do not deviate)
 
 | Fact | Value |
 |---|---|
-| npm package | `@agentmoney/wallet-mcp` v0.14.0 (this repo; npm publish pending — live npm is 0.13.0 until the v0.14.0 publish lands, a move-2 gate) — https://www.npmjs.com/package/@agentmoney/wallet-mcp |
+| npm package | `@agentmoney/wallet-mcp` — live npm is **0.14.0** (`npm view @agentmoney/wallet-mcp version`, 2026-09-11); the repo is at 0.14.1, which adds the MCP-registry `mcpName` and ships with the `wallet-mcp-v0.14.1` tag — https://www.npmjs.com/package/@agentmoney/wallet-mcp |
 | Bin | `money-wallet-mcp` (`npx -y @agentmoney/wallet-mcp`) |
 | Transport | stdio (MCP), Node >= 20 |
 | Tools | `money_balance`, `money_pay`, `money_fetch`, `money_card_create`, `money_card_status`, `money_card_close`, `money_feed` (exactly seven) |
@@ -76,7 +76,8 @@ attempt at an unseen merchant is DECLINED, decline code `new_payee_cap`.
 - Do not claim a hosted service exists. Today the honest install story is:
   run the money network yourself (repo) or get credentials from a network
   operator. When the hosted beta ships it is described as
-  "invite-only beta, testnet-labeled, best-effort" — nothing more.
+  "invite-only beta, sandbox money only, best-effort" — the posture line in
+  `deploy/vercel/README.md`, nothing more.
 - Fail-closed is the brand: it is fine (good, even) to lead with refusal.
 
 ## Short description — 97 chars (fits the official registry's 100-char limit)

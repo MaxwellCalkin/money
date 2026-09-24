@@ -38,7 +38,7 @@ const SERVICES = [
 export type ProductionService = typeof SERVICES[number];
 type Environment = Readonly<Record<string, string | undefined>>;
 
-const SEGREGATED_AUTHORITY = [
+export const SEGREGATED_AUTHORITY = [
   "DATABASE_URL",
   "MONEY_WORKER_DATABASE_URL",
   "MONEY_KEY_ROTATION_DATABASE_URL",

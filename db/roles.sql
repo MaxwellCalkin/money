@@ -178,6 +178,10 @@ grant execute on function
   money_private.consume_card_reveal_token(bytea,text,uuid)
   to money_app;
 
+-- Beta waitlist: the product role may only append a validated, deduplicated
+-- email through the SECURITY DEFINER function; it never reads the table.
+grant execute on function money_private.join_waitlist(text, text) to money_app;
+
 -- Issuer authorization ingress: one synchronous decision against an existing
 -- reserve plus a durable enqueue. It cannot settle, void, refund, prepare,
 -- activate, read a card, or post any transfer.

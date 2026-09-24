@@ -108,5 +108,30 @@ describe("publishable packages", () => {
       expect(manifest.scripts.prepack).toBe("node ../../scripts/build-packages.mjs");
       expect(existsSync(join(ROOT, pkg, "..", "LICENSE")), `${pkg} LICENSE file`).toBe(true);
     }
+    // The official MCP registry listing (packages/wallet-mcp/server.json) is
+    // not in the npm tarball, so nothing at publish time keeps it honest
+    // except this: both of its version fields must equal the release, and its
+    // name must equal the tarball's mcpName — the registry compares the two
+    // verbatim, and authorizes the io.github.<owner>/ namespace from the OIDC
+    // claim as a case-sensitive prefix (the GitHub login is MaxwellCalkin).
+    const wallet = JSON.parse(readFileSync(join(ROOT, "packages/wallet-mcp/package.json"), "utf8")) as {
+      name: string;
+      mcpName?: string;
+    };
+    const listing = JSON.parse(readFileSync(join(ROOT, "packages/wallet-mcp/server.json"), "utf8")) as {
+      name: string;
+      description: string;
+      version: string;
+      packages: { registryType: string; identifier: string; version: string }[];
+    };
+    expect(wallet.mcpName).toMatch(/^io\.github\.MaxwellCalkin\//);
+    expect(listing.name).toBe(wallet.mcpName);
+    expect(listing.version).toBe(root.version);
+    expect(listing.packages).toHaveLength(1);
+    expect(listing.packages[0]!.version).toBe(root.version);
+    expect(listing.packages[0]!.registryType).toBe("npm");
+    expect(listing.packages[0]!.identifier).toBe(wallet.name);
+    // The registry schema caps description at 100 characters and validates on publish.
+    expect(listing.description.length).toBeLessThanOrEqual(100);
   });
 });

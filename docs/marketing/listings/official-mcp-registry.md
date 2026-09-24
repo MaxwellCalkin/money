@@ -1,125 +1,88 @@
-# Official MCP Registry — submission package
+# Official MCP Registry — listing
 
 Surface: https://registry.modelcontextprotocol.io (preview; PulseMCP and
 other aggregators ingest from it daily — **publish here first**).
 Docs: https://modelcontextprotocol.io/registry/quickstart
 
-## Submission mechanics (CLI, not a form or PR)
+## Status (2026-09-11)
 
-1. **Prerequisite — `mcpName` must ship in the npm tarball.** The registry
-   verifies package ownership by reading an `mcpName` field from the
-   published npm tarball's `package.json`. The v0.14.0 wallet package still
-   does not have it, so add to `packages/wallet-mcp/package.json`:
+- **Automated.** The `registry` job in
+  `.github/workflows/publish-packages.yml` publishes the listing on every
+  `wallet-mcp-v*` tag, strictly after the npm publish, authenticated by
+  GitHub OIDC. No founder step, no registry credential, no CLI on any
+  machine. How it works and how to troubleshoot it: the "MCP registry
+  listing" section of `docs/RELEASING-PACKAGES.md`.
+- **Not yet live.** The listing first exists when `wallet-mcp-v0.14.1`
+  ships. Live npm is 0.14.0 (`npm view @agentmoney/wallet-mcp version`,
+  2026-09-11) and that tarball has no `mcpName`, which the registry
+  requires; the repo is at 0.14.1 with `mcpName` and
+  `packages/wallet-mcp/server.json` in place.
 
-   ```json
-   "mcpName": "io.github.maxwellcalkin/wallet-mcp"
-   ```
+## Identity — case matters
 
-   and make sure the npm publish that carries it lands before publishing to
-   the registry (fold it into the `0.14.0` npm publish if that has not gone
-   out yet; otherwise ship a `0.14.1` patch and bump the versions below to
-   match).
-   With GitHub authentication the name **must** start with
-   `io.github.<github-username>/` — for the MaxwellCalkin account that is
-   `io.github.maxwellcalkin/`. (`server.json` `name` must match `mcpName`
-   exactly.)
-
-2. Install the publisher CLI (founder machine, Windows PowerShell):
-
-   ```powershell
-   $arch = if ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq "Arm64") { "arm64" } else { "amd64" }
-   Invoke-WebRequest -Uri "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_windows_$arch.tar.gz" -OutFile "mcp-publisher.tar.gz"
-   tar xf mcp-publisher.tar.gz mcp-publisher.exe
-   ```
-
-3. Put the `server.json` below in `packages/wallet-mcp/`.
-
-4. Authenticate (founder — GitHub device-code flow):
-   `mcp-publisher login github`
-
-5. Publish: `mcp-publisher publish`
-
-6. Verify:
-   `curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.maxwellcalkin/wallet-mcp"`
-
-Later: automate on release via the GitHub Action
-(https://github.com/marketplace/actions/publish-mcp-server) alongside npm
-provenance publishing.
-
-## server.json (submission-ready)
-
-Description is 97 chars — registry guides state a 100-character maximum, and
-the schema validates on publish. (It names all three rails; the card rail is
-sandbox/test-mode today — the README the registry links to carries the
-"sandbox, no real funds" label.)
+`packages/wallet-mcp/package.json` carries
 
 ```json
-{
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.maxwellcalkin/wallet-mcp",
-  "description": "Owner-mandated spending for AI agents: agent payments, x402 auto-pay, and reserved virtual cards.",
-  "websiteUrl": "https://github.com/MaxwellCalkin/money",
-  "repository": {
-    "url": "https://github.com/MaxwellCalkin/money",
-    "source": "github",
-    "subfolder": "packages/wallet-mcp"
-  },
-  "version": "0.14.0",
-  "packages": [
-    {
-      "registryType": "npm",
-      "identifier": "@agentmoney/wallet-mcp",
-      "version": "0.14.0",
-      "transport": {
-        "type": "stdio"
-      },
-      "environmentVariables": [
-        {
-          "name": "MONEY_API",
-          "description": "Money network API origin. HTTPS required except on loopback. Default http://127.0.0.1:4021.",
-          "isRequired": true,
-          "isSecret": false,
-          "format": "string",
-          "default": "http://127.0.0.1:4021"
-        },
-        {
-          "name": "MONEY_AGENT_ID",
-          "description": "This agent's account id on the network (agt_...).",
-          "isRequired": true,
-          "isSecret": false,
-          "format": "string"
-        },
-        {
-          "name": "MONEY_AGENT_KEY_FILE",
-          "description": "Path to a file whose first line is the agent's base64 PKCS#8 Ed25519 private key. Preferred over MONEY_AGENT_KEY; set exactly one of the two.",
-          "isRequired": false,
-          "isSecret": false,
-          "format": "filepath"
-        },
-        {
-          "name": "MONEY_AGENT_KEY",
-          "description": "The agent's base64 PKCS#8 Ed25519 private key inline. Fallback when a key file is impractical; treat like a password.",
-          "isRequired": false,
-          "isSecret": true,
-          "format": "string"
-        },
-        {
-          "name": "MONEY_FETCH_PRIVATE_ORIGINS",
-          "description": "Optional JSON array of exact origins (e.g. [\"http://127.0.0.1:8080\"]) money_fetch may reach on private networks. Nothing private is reachable by default.",
-          "isRequired": false,
-          "isSecret": false,
-          "format": "string"
-        }
-      ]
-    }
-  ]
-}
+"mcpName": "io.github.MaxwellCalkin/wallet-mcp"
 ```
 
+and `packages/wallet-mcp/server.json` `name` is the same string. With
+GitHub authentication the registry grants `io.github.<github-login>/*`
+from the OIDC token's repository-owner claim verbatim and matches it as a
+case-sensitive prefix. The login is `MaxwellCalkin`
+(`gh api users/MaxwellCalkin`), so the lowercase `io.github.maxwellcalkin/`
+this document used to show would be refused. `test/packages-build.test.ts`
+pins the prefix, `name == mcpName`, and the version lockstep.
+
+## Mechanics (for the record — the job does all of this)
+
+1. The registry verifies package ownership by reading `mcpName` from the
+   **published** npm tarball's `package.json`, so the npm publish must land
+   first. The job declares `needs: [gate, publish]` and therefore runs
+   after the workflow's `npm view` poll has seen the new version.
+2. `mcp-publisher` v1.8.1 (linux/amd64) is downloaded from the versioned
+   release URL — never `/releases/latest/` — and sha256-verified against
+   `registry_1.8.1_checksums.txt` before it runs; then
+   `login github-oidc` and `publish` in `packages/wallet-mcp/`.
+3. A re-run against an already-listed version ("cannot publish duplicate
+   version … already exists") is treated as success, and the job is
+   `continue-on-error` so a registry outage never fails the npm publish.
+
+Verify (the only manual step, after the tag's run is green):
+
+```sh
+curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.MaxwellCalkin/wallet-mcp"
+```
+
+## server.json
+
+Canonical file: `packages/wallet-mcp/server.json`. It is not in the npm
+tarball (`files` stays `dist`, `README.md`) — only `mcpName` in
+`package.json` has to ship. Schema:
+`https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json`
+— required top-level fields are `name`, `description`, `version`; each
+package needs `registryType`, `identifier`, `transport`; `websiteUrl` and
+`repository` are optional; `description` is capped at 100 characters. Ours
+is 97 characters and names all three rails; the card rail is
+sandbox/test-mode today — the README the registry links to carries the
+"sandbox, no real funds" label.
+
+The file is the source of truth (a second copy here would only drift); the
+lockstep test keeps its version fields equal to the release. Its shape:
+
+| Field | Value |
+|---|---|
+| `name` | `io.github.MaxwellCalkin/wallet-mcp` (= `mcpName`) |
+| `description` | the 97-char short description from `descriptions.md` |
+| `version`, `packages[0].version` | the release version (0.14.1 now) |
+| `packages[0].registryType` / `registryBaseUrl` / `identifier` | `npm` / `https://registry.npmjs.org` / `@agentmoney/wallet-mcp` |
+| `packages[0].transport.type` | `stdio` |
+| `packages[0].environmentVariables` | `MONEY_API`, `MONEY_AGENT_ID`, `MONEY_AGENT_KEY_FILE`, `MONEY_AGENT_KEY` (secret), `MONEY_FETCH_PRIVATE_ORIGINS` — the same env contract as the package README and `descriptions.md` |
+| `websiteUrl`, `repository.url` | the GitHub repo until the landing page is live (TODO-founder: swap `websiteUrl` to the landing page URL when live) |
+
 Notes:
-- `version` bumps in lockstep with the npm version on every future publish —
-  it must always equal the npm version whose tarball carries `mcpName`.
-- Keep `websiteUrl` at the GitHub repo until the landing page exists, then
-  update (TODO-founder: swap in the landing page URL when live).
+- `version` bumps in lockstep with the npm version on every publish (see
+  "Cutting a release" in `docs/RELEASING-PACKAGES.md`) — it must always
+  equal the npm version whose tarball carries `mcpName`.
 - The registry hosts metadata only; npm remains the artifact source, so the
   cold-install path stays `npx -y @agentmoney/wallet-mcp`.

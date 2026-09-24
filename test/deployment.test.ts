@@ -524,7 +524,7 @@ describe("production deployment contract", () => {
       engines: { node: string };
     };
     expect(packageJson).toEqual(expect.objectContaining({
-      version: "0.14.0",
+      version: "0.14.1",
       engines: { node: ">=24" },
     }));
     expect(dockerfile.match(

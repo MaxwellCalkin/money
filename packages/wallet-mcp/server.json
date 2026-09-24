@@ -1,0 +1,61 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.MaxwellCalkin/wallet-mcp",
+  "description": "Owner-mandated spending for AI agents: agent payments, x402 auto-pay, and reserved virtual cards.",
+  "websiteUrl": "https://github.com/MaxwellCalkin/money",
+  "repository": {
+    "url": "https://github.com/MaxwellCalkin/money",
+    "source": "github",
+    "subfolder": "packages/wallet-mcp"
+  },
+  "version": "0.14.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@agentmoney/wallet-mcp",
+      "version": "0.14.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "MONEY_API",
+          "description": "Money network API origin. HTTPS required except on loopback. Default http://127.0.0.1:4021.",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string",
+          "default": "http://127.0.0.1:4021"
+        },
+        {
+          "name": "MONEY_AGENT_ID",
+          "description": "This agent's account id on the network (agt_...).",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "MONEY_AGENT_KEY_FILE",
+          "description": "Path to a file whose first line is the agent's base64 PKCS#8 Ed25519 private key. Preferred over MONEY_AGENT_KEY; set exactly one of the two.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "filepath"
+        },
+        {
+          "name": "MONEY_AGENT_KEY",
+          "description": "The agent's base64 PKCS#8 Ed25519 private key inline. Fallback when a key file is impractical; treat like a password.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "MONEY_FETCH_PRIVATE_ORIGINS",
+          "description": "Optional JSON array of exact origins (e.g. [\"http://127.0.0.1:8080\"]) money_fetch may reach on private networks. Nothing private is reachable by default.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
